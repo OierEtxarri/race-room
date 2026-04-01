@@ -21,6 +21,11 @@ export const config = {
   port: Number(process.env.PORT ?? 8787),
   garminEmail: process.env.GARMIN_EMAIL?.trim() ?? '',
   garminPassword: process.env.GARMIN_PASSWORD?.trim() ?? '',
+  frontendOrigin: process.env.FRONTEND_ORIGIN?.trim() ?? 'http://localhost:5173',
+  frontendAppUrl: process.env.FRONTEND_APP_URL?.trim() ?? process.env.FRONTEND_ORIGIN?.trim() ?? 'http://localhost:5173/',
+  stravaClientId: process.env.STRAVA_CLIENT_ID?.trim() ?? '',
+  stravaClientSecret: process.env.STRAVA_CLIENT_SECRET?.trim() ?? '',
+  stravaRedirectUri: process.env.STRAVA_REDIRECT_URI?.trim() ?? '',
   raceDate: '2026-05-10',
 };
 
@@ -28,6 +33,18 @@ export function assertGarminCredentials(): { garminEmail: string; garminPassword
   return {
     garminEmail: requiredEnv('GARMIN_EMAIL'),
     garminPassword: requiredEnv('GARMIN_PASSWORD'),
+  };
+}
+
+export function assertStravaConfig(): {
+  stravaClientId: string;
+  stravaClientSecret: string;
+  stravaRedirectUri: string;
+} {
+  return {
+    stravaClientId: requiredEnv('STRAVA_CLIENT_ID'),
+    stravaClientSecret: requiredEnv('STRAVA_CLIENT_SECRET'),
+    stravaRedirectUri: requiredEnv('STRAVA_REDIRECT_URI'),
   };
 }
 

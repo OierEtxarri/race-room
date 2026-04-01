@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { startTransition, useEffect, useEffectEvent, useRef, useState, type FormEvent } from 'react';
 import {
   Area,
   AreaChart,
@@ -11,11 +11,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { DashboardData } from './types';
+import type { DashboardData, SessionPayload, UserGoal } from './types';
 import './App.css';
 
 type AsyncState =
   | { status: 'loading'; data: null; error: null }
+  | { status: 'unauthenticated'; data: null; error: null }
   | { status: 'ready'; data: DashboardData; error: null }
   | { status: 'error'; data: null; error: string };
 type ScheduleState = {
@@ -23,10 +24,23 @@ type ScheduleState = {
   status: 'idle' | 'sending' | 'success' | 'error';
   message: string | null;
 };
+type LoginState =
+  | { status: 'idle'; error: null }
+  | { status: 'submitting'; error: null }
+  | { status: 'hydrating'; error: null }
+  | { status: 'error'; error: string };
+type LoginProvider = 'garmin' | 'strava';
 
 type ChartMetric = 'sleepHours' | 'readiness' | 'hrv' | 'steps';
 const serverRefreshMs = 2 * 60 * 1_000;
 const clientPollMs = 30 * 1_000;
+const sessionStorageKey = 'garmin_race_room_session_id';
+const sessionProviderStorageKey = 'garmin_race_room_session_provider';
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+const defaultGoal: UserGoal = {
+  raceDate: '2026-05-10',
+  distanceKm: 21.1,
+};
 
 const chartOptions: Array<{
   key: ChartMetric;
@@ -64,6 +78,86 @@ const chartOptions: Array<{
     description: 'Movimiento diario para detectar fatiga o sedentarismo entre sesiones.',
   },
 ];
+
+function BrandSpinner({ label, detail }: { label: string; detail: string }) {
+  return (
+    <div className="spinner-panel" aria-live="polite" aria-busy="true">
+      <div className="brand-spinner" aria-hidden="true">
+        <div className="brand-spinner-ring" />
+        <div className="brand-spinner-core">GR</div>
+      </div>
+      <strong>{label}</strong>
+      <p>{detail}</p>
+    </div>
+  );
+}
+
+function apiUrl(pathname: string) {
+  return `${apiBaseUrl}${pathname}`;
+}
+
+function absoluteApiUrl(pathname: string) {
+  if (typeof window === 'undefined') {
+    return apiUrl(pathname);
+  }
+
+  return new URL(apiUrl(pathname), window.location.origin).toString();
+}
+
+function appReturnUrl() {
+  if (typeof window === 'undefined') {
+    return '/';
+  }
+
+  return new URL(import.meta.env.BASE_URL, window.location.origin).toString();
+}
+
+function consumeAuthRedirectParams(): {
+  sessionId: string | null;
+  provider: LoginProvider | null;
+  error: string | null;
+} {
+  if (typeof window === 'undefined') {
+    return {
+      sessionId: null as string | null,
+      provider: null as LoginProvider | null,
+      error: null as string | null,
+    };
+  }
+
+  const url = new URL(window.location.href);
+  const sessionId = url.searchParams.get('session_id');
+  const providerParam = url.searchParams.get('provider');
+  const error = url.searchParams.get('auth_error');
+
+  if (!sessionId && !providerParam && !error) {
+    return {
+      sessionId: null,
+      provider: null,
+      error: null,
+    };
+  }
+
+  url.searchParams.delete('session_id');
+  url.searchParams.delete('provider');
+  url.searchParams.delete('auth_error');
+  window.history.replaceState({}, document.title, url.toString());
+
+  return {
+    sessionId,
+    provider: providerParam === 'strava' ? 'strava' : providerParam === 'garmin' ? 'garmin' : null,
+    error,
+  };
+}
+
+function normalizeGoalInput(goal: UserGoal): UserGoal {
+  const distanceKm = Number(goal.distanceKm);
+
+  return {
+    raceDate: goal.raceDate,
+    distanceKm: Number.isFinite(distanceKm) ? distanceKm : defaultGoal.distanceKm,
+  };
+}
 
 function formatRace(seconds: number | null) {
   if (seconds === null) {
@@ -279,7 +373,7 @@ function longRun(week: DashboardData['plan']['weeks'][number]) {
 
 function coachCue(week: DashboardData['plan']['weeks'][number], fallbackReason?: string) {
   if (fallbackReason) {
-    return 'Plan provisional hasta que Garmin vuelva a responder.';
+    return 'Plan provisional hasta que el proveedor vuelva a responder.';
   }
 
   if (week.title.toLowerCase().includes('carrera')) {
@@ -294,11 +388,31 @@ function coachCue(week: DashboardData['plan']['weeks'][number], fallbackReason?:
 }
 
 function App() {
+  const [sessionId, setSessionId] = useState<string | null>(() =>
+    typeof window === 'undefined' ? null : window.sessionStorage.getItem(sessionStorageKey),
+  );
+  const sessionIdRef = useRef<string | null>(sessionId);
+  const [sessionProvider, setSessionProvider] = useState<LoginProvider | null>(() =>
+    typeof window === 'undefined'
+      ? null
+      : ((window.sessionStorage.getItem(sessionProviderStorageKey) as LoginProvider | null) ?? null),
+  );
+  const [sessionAccountLabel, setSessionAccountLabel] = useState<string | null>(null);
   const [state, setState] = useState<AsyncState>({
     status: 'loading',
     data: null,
     error: null,
   });
+  const [loginState, setLoginState] = useState<LoginState>({
+    status: 'idle',
+    error: null,
+  });
+  const [loginProvider, setLoginProvider] = useState<LoginProvider>('garmin');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginGoal, setLoginGoal] = useState<UserGoal>(defaultGoal);
+  const [goalDraft, setGoalDraft] = useState<UserGoal>(defaultGoal);
+  const [isSavingGoal, setIsSavingGoal] = useState(false);
   const [selectedMetric, setSelectedMetric] = useState<ChartMetric>('sleepHours');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
@@ -310,8 +424,91 @@ function App() {
   });
   const [clockNow, setClockNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
+  const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
 
-  const loadDashboard = async (refresh = false) => {
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (sessionId) {
+      window.sessionStorage.setItem(sessionStorageKey, sessionId);
+    } else {
+      window.sessionStorage.removeItem(sessionStorageKey);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (sessionProvider) {
+      window.sessionStorage.setItem(sessionProviderStorageKey, sessionProvider);
+    } else {
+      window.sessionStorage.removeItem(sessionProviderStorageKey);
+    }
+  }, [sessionProvider]);
+
+  const apiFetch = async (
+    pathname: string,
+    init: RequestInit = {},
+    explicitSessionId?: string | null,
+  ) => {
+    const headers = new Headers(init.headers ?? {});
+    const activeSessionId = explicitSessionId ?? sessionIdRef.current;
+
+    if (activeSessionId) {
+      headers.set('X-Session-Id', activeSessionId);
+    }
+
+    if (init.body && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+
+    return fetch(apiUrl(pathname), {
+      ...init,
+      headers,
+      credentials: 'include',
+    });
+  };
+
+  const clearSession = () => {
+    setSessionId(null);
+    setSessionProvider(null);
+    setSessionAccountLabel(null);
+    setGoalDraft(defaultGoal);
+    setLoginState({
+      status: 'idle',
+      error: null,
+    });
+    setState({
+      status: 'unauthenticated',
+      data: null,
+      error: null,
+    });
+  };
+
+  const syncSession = (payload: SessionPayload) => {
+    setSessionId(payload.sessionId);
+    setSessionProvider(payload.provider);
+    setSessionAccountLabel(payload.accountLabel);
+    setGoalDraft(payload.goal);
+    setLoginGoal(payload.goal);
+  };
+
+  const loadDashboard = async (refresh = false, explicitSessionId?: string | null) => {
+    if (!(explicitSessionId ?? sessionIdRef.current)) {
+      setState({
+        status: 'unauthenticated',
+        data: null,
+        error: null,
+      });
+      return;
+    }
+
     if (refreshInFlightRef.current) {
       return;
     }
@@ -322,7 +519,13 @@ function App() {
     }
 
     try {
-      const response = await fetch(`/api/dashboard${refresh ? '?refresh=1' : ''}`);
+      const response = await apiFetch(`/api/dashboard${refresh ? '?refresh=1' : ''}`, {}, explicitSessionId);
+
+      if (response.status === 401) {
+        clearSession();
+        return;
+      }
+
       const payload = await response.json();
 
       if (!response.ok) {
@@ -334,6 +537,10 @@ function App() {
           status: 'ready',
           data: payload as DashboardData,
           error: null,
+        });
+        setGoalDraft({
+          raceDate: (payload as DashboardData).goal.raceDate,
+          distanceKm: (payload as DashboardData).goal.distanceKm,
         });
       });
     } catch (error) {
@@ -350,12 +557,62 @@ function App() {
     }
   };
 
+  const bootstrapSession = useEffectEvent(async (explicitSessionId?: string | null) => {
+    try {
+      const response = await apiFetch('/api/session', {}, explicitSessionId);
+
+      if (response.status === 401) {
+        clearSession();
+        return;
+      }
+
+      const payload = (await response.json()) as SessionPayload | { message?: string };
+      if (!response.ok) {
+        throw new Error(('message' in payload ? payload.message : null) ?? 'No se pudo restaurar la sesión.');
+      }
+
+      syncSession(payload as SessionPayload);
+      await loadDashboard(false, (payload as SessionPayload).sessionId);
+    } catch (error) {
+      startTransition(() => {
+        setState({
+          status: 'error',
+          data: null,
+          error: error instanceof Error ? error.message : 'Fallo inesperado',
+        });
+      });
+    }
+  });
+
   const pollDashboard = useEffectEvent(() => {
+    if (!sessionIdRef.current) {
+      return;
+    }
+
     void loadDashboard();
   });
 
   useEffect(() => {
-    void loadDashboard();
+    const redirect = consumeAuthRedirectParams();
+
+    if (redirect.provider) {
+      setSessionProvider(redirect.provider);
+      setLoginProvider(redirect.provider);
+    }
+
+    if (redirect.sessionId) {
+      setSessionId(redirect.sessionId);
+      sessionIdRef.current = redirect.sessionId;
+    }
+
+    if (redirect.error) {
+      setLoginState({
+        status: 'error',
+        error: redirect.error,
+      });
+    }
+
+    void bootstrapSession(redirect.sessionId);
 
     const pollId = window.setInterval(() => {
       pollDashboard();
@@ -386,13 +643,288 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (state.status !== 'ready') {
+      return;
+    }
+
+    if (selectedWeekIndex > state.data.plan.weeks.length - 1) {
+      setSelectedWeekIndex(0);
+    }
+  }, [selectedWeekIndex, state]);
+
+  const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (loginProvider !== 'garmin') {
+      return;
+    }
+
+    setLoginState({
+      status: 'submitting',
+      error: null,
+    });
+
+    try {
+      const response = await apiFetch('/api/session/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: 'garmin',
+          garminEmail: loginEmail,
+          garminPassword: loginPassword,
+          goal: normalizeGoalInput(loginGoal),
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? 'No se pudo iniciar sesión con Garmin.');
+      }
+
+      const sessionPayload: SessionPayload = {
+        authenticated: true,
+        provider: 'garmin',
+        sessionId: payload.sessionId,
+        accountLabel: payload.accountLabel,
+        goal: payload.goal,
+      };
+
+      syncSession(sessionPayload);
+      setLoginPassword('');
+      setLoginState({
+        status: 'hydrating',
+        error: null,
+      });
+      await loadDashboard(false, sessionPayload.sessionId);
+      setLoginState({
+        status: 'idle',
+        error: null,
+      });
+    } catch (error) {
+      setLoginState({
+        status: 'error',
+        error: error instanceof Error ? error.message : 'No se pudo iniciar sesión.',
+      });
+    }
+  };
+
+  const beginStravaLogin = () => {
+    setLoginState({
+      status: 'submitting',
+      error: null,
+    });
+
+    const url = new URL(absoluteApiUrl('/api/session/strava/start'));
+    url.searchParams.set('raceDate', loginGoal.raceDate);
+    url.searchParams.set('distanceKm', String(loginGoal.distanceKm));
+    url.searchParams.set('returnTo', appReturnUrl());
+    window.location.assign(url.toString());
+  };
+
+  const submitGoal = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!sessionIdRef.current) {
+      return;
+    }
+
+    setIsSavingGoal(true);
+
+    try {
+      const response = await apiFetch('/api/session/goal', {
+        method: 'PUT',
+        body: JSON.stringify(normalizeGoalInput(goalDraft)),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? 'No se pudo actualizar el objetivo.');
+      }
+
+      setGoalDraft(payload.goal as UserGoal);
+      setLoginGoal(payload.goal as UserGoal);
+      setSelectedWeekIndex(0);
+      await loadDashboard(true);
+    } catch (error) {
+      setState({
+        status: 'error',
+        data: null,
+        error: error instanceof Error ? error.message : 'No se pudo actualizar el objetivo.',
+      });
+    } finally {
+      setIsSavingGoal(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await apiFetch('/api/session/logout', {
+        method: 'POST',
+      });
+    } finally {
+      clearSession();
+    }
+  };
+
   if (state.status === 'loading') {
     return (
       <main className="app-shell">
         <section className="status-panel">
           <p className="eyebrow">Garmin Race Room</p>
-          <h1>Cargando tus métricas y el plan hacia la media.</h1>
-          <p>Consultando Garmin Connect desde Python API y MCP local.</p>
+          <BrandSpinner
+            label="Cargando tu último estado"
+            detail="Primero restauro la sesión y el plan persistido; después refresco el proveedor activo."
+          />
+        </section>
+      </main>
+    );
+  }
+
+  if (state.status === 'unauthenticated') {
+    return (
+      <main className="app-shell auth-shell">
+        <section className="auth-panel">
+          <div className="auth-copy">
+            <p className="eyebrow">Garmin Race Room</p>
+            <h1>Entra con Garmin o Strava</h1>
+            <p className="lead">
+              Elige el proveedor con el que quieres cargar tus datos. Garmin entra por credenciales efímeras;
+              Strava entra por OAuth. En ambos casos persisto solo el objetivo y el último dashboard/plan generado.
+            </p>
+            <div className="hero-meta">
+              <span>Login dual Garmin + Strava</span>
+              <span>Session ID efímero por usuario</span>
+              <span>Plan persistido en SQLite</span>
+            </div>
+          </div>
+
+          <form className="auth-form" onSubmit={submitLogin}>
+            <div className="provider-switch">
+              <button
+                className={`provider-pill ${loginProvider === 'garmin' ? 'selected' : ''}`}
+                disabled={isAuthBusy}
+                onClick={() => setLoginProvider('garmin')}
+                type="button"
+              >
+                Garmin
+              </button>
+              <button
+                className={`provider-pill ${loginProvider === 'strava' ? 'selected' : ''}`}
+                disabled={isAuthBusy}
+                onClick={() => setLoginProvider('strava')}
+                type="button"
+              >
+                Strava
+              </button>
+            </div>
+
+            {loginProvider === 'garmin' ? (
+              <>
+                <label className="form-field">
+                  <span>Email Garmin</span>
+                  <input
+                    autoComplete="username"
+                    disabled={isAuthBusy}
+                    onChange={(event) => setLoginEmail(event.target.value)}
+                    placeholder="tu@email.com"
+                    type="email"
+                    value={loginEmail}
+                  />
+                </label>
+
+                <label className="form-field">
+                  <span>Password Garmin</span>
+                  <input
+                    autoComplete="current-password"
+                    disabled={isAuthBusy}
+                    onChange={(event) => setLoginPassword(event.target.value)}
+                    placeholder="••••••••"
+                    type="password"
+                    value={loginPassword}
+                  />
+                </label>
+              </>
+            ) : (
+              <div className="provider-note">
+                <strong>Strava usa OAuth.</strong>
+                <p>
+                  Al pulsar el botón irás a la pantalla oficial de Strava y volverás aquí con la
+                  sesión ya abierta. El backend necesita `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`
+                  y `STRAVA_REDIRECT_URI`.
+                </p>
+              </div>
+            )}
+
+            <div className="field-grid">
+              <label className="form-field">
+                <span>Fecha objetivo</span>
+                <input
+                  disabled={isAuthBusy}
+                  onChange={(event) =>
+                    setLoginGoal((current) => ({
+                      ...current,
+                      raceDate: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={loginGoal.raceDate}
+                />
+              </label>
+
+              <label className="form-field">
+                <span>Distancia</span>
+                <input
+                  disabled={isAuthBusy}
+                  min="3"
+                  onChange={(event) =>
+                    setLoginGoal((current) => ({
+                      ...current,
+                      distanceKm: Number(event.target.value),
+                    }))
+                  }
+                  step="0.1"
+                  type="number"
+                  value={loginGoal.distanceKm}
+                />
+              </label>
+            </div>
+
+            {loginState.error ? <p className="form-error">{loginState.error}</p> : null}
+
+            {loginProvider === 'garmin' ? (
+              <button
+                className="action-button"
+                disabled={isAuthBusy}
+                type="submit"
+              >
+                {loginState.status === 'submitting'
+                  ? 'Abriendo sesión...'
+                  : loginState.status === 'hydrating'
+                    ? 'Cargando dashboard...'
+                    : 'Entrar con Garmin'}
+              </button>
+            ) : (
+              <button
+                className="action-button"
+                disabled={isAuthBusy}
+                onClick={beginStravaLogin}
+                type="button"
+              >
+                {loginState.status === 'submitting' ? 'Redirigiendo a Strava...' : 'Entrar con Strava'}
+              </button>
+            )}
+
+            {isAuthBusy ? (
+              <BrandSpinner
+                label={
+                  loginState.status === 'submitting'
+                    ? loginProvider === 'garmin'
+                      ? 'Abriendo sesión'
+                      : 'Redirigiendo a Strava'
+                    : 'Cargando dashboard'
+                }
+                detail="La sesión ya está en marcha. Bloqueo el formulario hasta terminar la hidratación inicial."
+              />
+            ) : null}
+          </form>
         </section>
       </main>
     );
@@ -405,7 +937,7 @@ function App() {
           <p className="eyebrow">Error de conexión</p>
           <h1>No he podido levantar el dashboard.</h1>
           <p>{state.error}</p>
-          <button className="action-button" onClick={() => void loadDashboard(true)}>
+          <button className="action-button" onClick={() => void bootstrapSession()}>
             Reintentar
           </button>
         </section>
@@ -446,11 +978,8 @@ function App() {
     });
 
     try {
-      const response = await fetch('/api/plan/workout', {
+      const response = await apiFetch('/api/plan/workout', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           weekIndex,
           dayIndex,
@@ -459,13 +988,13 @@ function App() {
       const payload = await response.json();
 
       if (!response.ok) {
-        throw new Error(payload.message ?? 'No se pudo enviar el entrenamiento a Garmin.');
+        throw new Error(payload.message ?? 'No se pudo enviar el entrenamiento al proveedor activo.');
       }
 
       setScheduleState({
         key: requestKey,
         status: 'success',
-        message: `${day.title} ya está programado en Garmin para el ${day.date}.`,
+        message: `${day.title} ya está programado para el ${day.date}.`,
       });
       void loadDashboard(true);
     } catch (error) {
@@ -484,14 +1013,21 @@ function App() {
           <p className="eyebrow">Garmin Race Room</p>
           <h1>{data.athlete.name}</h1>
           <p className="lead">
-            Dashboard interactivo para preparar la media maratón del {data.athlete.raceDate}. Cruza
-            recuperación, volumen, rendimiento y plan semanal en una sola vista.
+            Dashboard interactivo para preparar {data.goal.label} del {data.goal.raceDate}. Cruza
+            recuperación, volumen, rendimiento y plan semanal en una sola vista y arranca con el plan persistido si ya existe.
           </p>
           <div className="hero-meta">
-            <span>{data.athlete.daysToRace} días para carrera</span>
+            <span>{data.provider.label}</span>
+            <span>{data.goal.daysToRace} días para {data.goal.raceTitle.toLowerCase()}</span>
+            <span>{data.goal.totalWeeks} semanas de plan</span>
             {data.athlete.primaryDevice ? <span>{data.athlete.primaryDevice}</span> : null}
             {data.athlete.location ? <span>{data.athlete.location}</span> : null}
-            <span>Re-login Garmin automático activo</span>
+            {sessionAccountLabel ? <span>{sessionAccountLabel}</span> : null}
+            <span>
+              {data.provider.key === 'garmin'
+                ? 'Re-login Garmin automático activo'
+                : 'Refresh OAuth de Strava automático activo'}
+            </span>
           </div>
           <div className="hero-actions">
             <div className={`sync-chip ${syncTone}`}>
@@ -511,18 +1047,66 @@ function App() {
             >
               {isRefreshing ? 'Actualizando...' : 'Refrescar ahora'}
             </button>
+            <button className="secondary-button" onClick={() => void logout()} type="button">
+              Cerrar sesión
+            </button>
           </div>
           {data.fallbackReason ? (
             <div className="warning-banner">
-              Garmin no ha entregado datos reales en este intento: {data.fallbackReason}
+              {data.provider.label} no ha entregado datos reales en este intento: {data.fallbackReason}
             </div>
           ) : null}
         </div>
 
+        <form className="goal-editor" onSubmit={submitGoal}>
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Objetivo</p>
+              <h2>{data.goal.raceTitle}</h2>
+            </div>
+          </div>
+          <div className="field-grid">
+            <label className="form-field">
+              <span>Fecha</span>
+              <input
+                onChange={(event) =>
+                  setGoalDraft((current) => ({
+                    ...current,
+                    raceDate: event.target.value,
+                  }))
+                }
+                type="date"
+                value={goalDraft.raceDate}
+              />
+            </label>
+            <label className="form-field">
+              <span>Distancia</span>
+              <input
+                min="3"
+                onChange={(event) =>
+                  setGoalDraft((current) => ({
+                    ...current,
+                    distanceKm: Number(event.target.value),
+                  }))
+                }
+                step="0.1"
+                type="number"
+                value={goalDraft.distanceKm}
+              />
+            </label>
+          </div>
+          <p className="goal-note">
+            El objetivo manda sobre el número de semanas, la distribución de calidad y el ritmo sugerido.
+          </p>
+          <button className="action-button" disabled={isSavingGoal} type="submit">
+            {isSavingGoal ? 'Guardando...' : 'Actualizar objetivo'}
+          </button>
+        </form>
+
         <div className="hero-scoreboard">
           <div className="score-card primary">
-            <span className="score-label">Predicción media</span>
-            <strong>{formatRace(data.overview.predictedHalfSeconds)}</strong>
+            <span className="score-label">Predicción objetivo</span>
+            <strong>{formatRace(data.overview.predictedGoalSeconds)}</strong>
             <small>Ritmo objetivo {data.plan.paces.race ?? 'pendiente'}</small>
           </div>
           <div className="score-card">
@@ -567,7 +1151,7 @@ function App() {
         <article className="metric-card">
           <span className="metric-label">Peso</span>
           <strong>{metricValue(data.overview.weightKg, ' kg', 1)}</strong>
-          <small>Último registro en Garmin</small>
+          <small>{data.provider.key === 'garmin' ? 'Último registro en Garmin' : 'Dato no disponible en Strava'}</small>
         </article>
       </section>
 
@@ -666,7 +1250,7 @@ function App() {
 
         {data.adaptive.signals.loadBalanceFeedback ? (
           <p className="adaptive-footnote">
-            Señal de balance de carga Garmin:{' '}
+            Señal de balance de carga {data.provider.label}:{' '}
             <strong>{formatTrainingStatus(data.adaptive.signals.loadBalanceFeedback)}</strong>
           </p>
         ) : null}
@@ -815,7 +1399,7 @@ function App() {
           <div className="panel-head">
             <div>
               <p className="eyebrow">Consejos</p>
-              <h2>Lo importante hasta el 10 de mayo</h2>
+              <h2>Lo importante para {data.goal.label}</h2>
             </div>
           </div>
           <div className="advice-list">
@@ -835,7 +1419,9 @@ function App() {
               <h2>Detalle de rodaje</h2>
             </div>
             <span className="mini-status">
-              {isRefreshing ? 'Actualizando con Garmin...' : `Auto refresh cada ${Math.round(serverRefreshMs / 60_000)} min`}
+              {isRefreshing
+                ? `Actualizando con ${data.provider.label}...`
+                : `Auto refresh cada ${Math.round(serverRefreshMs / 60_000)} min`}
             </span>
           </div>
 
@@ -895,7 +1481,7 @@ function App() {
             </div>
           ) : (
             <p className="chart-description">
-              Garmin todavía no ha devuelto actividades recientes. En cuanto sincronice, aquí podrás
+              {data.provider.label} todavía no ha devuelto actividades recientes. En cuanto sincronice, aquí podrás
               entrar a cada rodaje.
             </p>
           )}
@@ -906,7 +1492,7 @@ function App() {
         <div className="panel-head">
           <div>
             <p className="eyebrow">Plan semanal</p>
-            <h2>Ruta hacia tu media maratón</h2>
+            <h2>Ruta hacia tu {data.goal.label}</h2>
           </div>
           <div className="pace-pills">
             {data.plan.paces.easy ? <span>Easy {data.plan.paces.easy}</span> : null}
@@ -917,7 +1503,10 @@ function App() {
 
         <p className="plan-summary">{data.plan.summary}</p>
         <p className="adaptive-footnote">
-          El plan se recalcula solo con cada sync. Si un día futuro es compatible, puedes enviarlo a Garmin desde aquí.
+          El plan se recalcula con cada sync, pero primero se carga la última versión persistida.
+          {data.provider.supportsWorkoutPush
+            ? ' Si un día futuro es compatible, puedes enviarlo a Garmin desde aquí.'
+            : ' En sesiones Strava el plan es de lectura y ajuste; no hay envío directo de workouts.'}
         </p>
 
         <div className="week-tabs">
@@ -1041,8 +1630,8 @@ function App() {
 
       <footer className="footer-note">
         <span>
-          Última sincronización: {new Date(data.fetchedAt).toLocaleString()} · La app consulta la API
-          local cada 30 s y el backend refresca Garmin cada {Math.round(serverRefreshMs / 60_000)} min.
+          Última sincronización: {new Date(data.fetchedAt).toLocaleString()} · El frontend consulta la API
+          cada 30 s y el backend refresca {data.provider.label} cada {Math.round(serverRefreshMs / 60_000)} min.
         </span>
       </footer>
     </main>

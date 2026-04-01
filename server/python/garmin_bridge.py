@@ -116,7 +116,15 @@ def build_client() -> Garmin:
             "No valid Garmin tokens found and no Garmin credentials are available for automatic re-login."
         )
 
-    client.login()
+    original_tokenstore_env = os.environ.pop("GARMINTOKENS", None)
+
+    try:
+        client.login()
+    finally:
+        if original_tokenstore_env is not None:
+            os.environ["GARMINTOKENS"] = original_tokenstore_env
+
+    tokenstore_path.mkdir(parents=True, exist_ok=True)
     client.garth.dump(str(tokenstore_path))
     ensure_tokenstore_permissions(tokenstore_path)
     return client
@@ -154,6 +162,8 @@ def extract_workout_id(payload: Any) -> int:
 def call_tool(client: Garmin, name: str, args: dict[str, Any]) -> Any:
     if name == "get_user_profile":
         return client.get_user_profile()
+    if name == "get_social_profile":
+        return client.garth.connectapi("/userprofile-service/socialProfile")
     if name == "get_devices":
         return client.get_devices()
     if name == "get_daily_summary":

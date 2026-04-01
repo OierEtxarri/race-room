@@ -1,10 +1,25 @@
 export type DashboardData = {
+  provider: {
+    key: 'garmin' | 'strava';
+    label: string;
+    supportsWorkoutPush: boolean;
+    supportsWellness: boolean;
+  };
   athlete: {
     name: string;
     location: string | null;
     primaryDevice: string | null;
     raceDate: string;
     daysToRace: number;
+  };
+  goal: {
+    raceDate: string;
+    distanceKm: number;
+    label: string;
+    raceTitle: string;
+    category: 'speed' | 'tenk' | 'half' | 'marathon';
+    daysToRace: number;
+    totalWeeks: number;
   };
   overview: {
     steps: number | null;
@@ -19,7 +34,7 @@ export type DashboardData = {
     weightKg: number | null;
     averageWeeklyKm: number | null;
     longestRunKm: number | null;
-    predictedHalfSeconds: number | null;
+    predictedGoalSeconds: number | null;
   };
   wellnessTrend: Array<{
     date: string;
@@ -126,4 +141,17 @@ export type DashboardData = {
   };
   fetchedAt: string;
   fallbackReason?: string;
+};
+
+export type UserGoal = {
+  raceDate: string;
+  distanceKm: number;
+};
+
+export type SessionPayload = {
+  authenticated: true;
+  provider: 'garmin' | 'strava';
+  sessionId: string;
+  accountLabel: string;
+  goal: UserGoal;
 };

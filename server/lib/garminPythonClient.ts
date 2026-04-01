@@ -11,6 +11,7 @@ export class GarminPythonClient {
   async callJson<T extends JsonLike = JsonLike>(
     name: string,
     args?: Record<string, unknown>,
+    envOverrides?: Record<string, string>,
   ): Promise<T> {
     const pythonBin = path.join(config.rootDir, '.venv-garmin', 'bin', 'python');
     const scriptPath = path.join(config.rootDir, 'server', 'python', 'garmin_bridge.py');
@@ -21,7 +22,10 @@ export class GarminPythonClient {
         [scriptPath, name, JSON.stringify(args ?? {})],
         {
           cwd: config.rootDir,
-          env: process.env,
+          env: {
+            ...process.env,
+            ...envOverrides,
+          },
           maxBuffer: 10 * 1024 * 1024,
         },
       );

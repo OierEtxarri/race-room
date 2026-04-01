@@ -1,9 +1,14 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { assertGarminCredentials, config, resolveGarminMcpBuild } from '../config.ts';
-import { ensureGarminMcpTokens } from './garminMcpBootstrap.ts';
+import { config, resolveGarminMcpBuild } from '../config.ts';
+import type { GarminSessionRecord } from './sessionStore.ts';
 
 type JsonLike = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+export type GarminSessionAuth = Pick<
+  GarminSessionRecord,
+  'id' | 'garminEmail' | 'garminPassword' | 'homeDir' | 'tokenDirs'
+>;
 
 function isTextContent(
   content: unknown,
@@ -35,11 +40,16 @@ function extractText(result: unknown): string {
   return textChunk.text;
 }
 
-export class GarminMcpClient {
+class GarminMcpSessionClient {
   private client: Client | null = null;
   private transport: StdioClientTransport | null = null;
   private connecting: Promise<void> | null = null;
   private callChain: Promise<unknown> = Promise.resolve();
+  private readonly auth: GarminSessionAuth;
+
+  constructor(auth: GarminSessionAuth) {
+    this.auth = auth;
+  }
 
   async callJson<T extends JsonLike = JsonLike>(
     name: string,
@@ -57,7 +67,7 @@ export class GarminMcpClient {
         const text = extractText(result);
         try {
           return JSON.parse(text) as T;
-        } catch (error) {
+        } catch {
           throw new Error(`Tool ${name} returned non-JSON content: ${text}`);
         }
       } catch (error) {
@@ -92,15 +102,14 @@ export class GarminMcpClient {
     }
 
     this.connecting = (async () => {
-      const { garminEmail, garminPassword } = assertGarminCredentials();
-      await ensureGarminMcpTokens();
       const transport = new StdioClientTransport({
         command: process.execPath,
         args: [resolveGarminMcpBuild('index')],
         env: {
           ...process.env,
-          GARMIN_EMAIL: garminEmail,
-          GARMIN_PASSWORD: garminPassword,
+          HOME: this.auth.homeDir,
+          GARMIN_EMAIL: this.auth.garminEmail,
+          GARMIN_PASSWORD: this.auth.garminPassword,
         } as Record<string, string>,
         cwd: config.rootDir,
         stderr: 'pipe',
@@ -109,7 +118,7 @@ export class GarminMcpClient {
       transport.stderr?.on('data', (chunk) => {
         const message = chunk.toString().trim();
         if (message) {
-          console.info(`[garmin-mcp] ${message}`);
+          console.info(`[garmin-mcp:${this.auth.id}] ${message}`);
         }
       });
 
@@ -132,4 +141,37 @@ export class GarminMcpClient {
   }
 }
 
-export const garminMcpClient = new GarminMcpClient();
+export class GarminMcpClientManager {
+  private clients = new Map<string, GarminMcpSessionClient>();
+
+  async callJson<T extends JsonLike = JsonLike>(
+    auth: GarminSessionAuth,
+    name: string,
+    args?: Record<string, unknown>,
+  ): Promise<T> {
+    let client = this.clients.get(auth.id);
+    if (!client) {
+      client = new GarminMcpSessionClient(auth);
+      this.clients.set(auth.id, client);
+    }
+
+    return client.callJson<T>(name, args);
+  }
+
+  async close(sessionId?: string): Promise<void> {
+    if (sessionId) {
+      const client = this.clients.get(sessionId);
+      this.clients.delete(sessionId);
+      if (client) {
+        await client.close();
+      }
+      return;
+    }
+
+    const clients = [...this.clients.values()];
+    this.clients.clear();
+    await Promise.all(clients.map((client) => client.close().catch(() => undefined)));
+  }
+}
+
+export const garminMcpClient = new GarminMcpClientManager();

@@ -1,4 +1,5 @@
 import { garminPythonClient } from './garminPythonClient.ts';
+import type { GarminSessionAuth } from './garminMcpClient.ts';
 
 export type PlanPaces = {
   easy: string | null;
@@ -223,16 +224,89 @@ export function buildWorkoutFromPlanDay(day: PlanDayForWorkout, paces: PlanPaces
           makeStep(5, 'cooldown', '10\' soltando', 600),
         ],
       );
-    case 'Ritmo de media':
+    case 'Ritmo objetivo':
       return createRunningWorkoutPayload(
         `${day.title} · ${day.date}`,
-        `Bloque principal a ${paces.race ?? 'ritmo de media'}. ${day.notes}`,
+        `Bloque principal a ${paces.race ?? 'ritmo objetivo'}. ${day.notes}`,
         2_520,
         null,
         [
           makeStep(1, 'warmup', `12' fáciles · ${paces.easy ?? 'suave'}`, 720),
-          makeStep(2, 'interval', `20' a ritmo de media · ${paces.race ?? 'objetivo'}`, 1_200),
+          makeStep(2, 'interval', `20' a ritmo objetivo · ${paces.race ?? 'objetivo'}`, 1_200),
           makeStep(3, 'cooldown', '10\' soltando', 600),
+        ],
+      );
+    case 'VO2 controlado':
+      return createRunningWorkoutPayload(
+        `${day.title} · ${day.date}`,
+        `8 x 2' vivos con 90" suaves. ${day.notes}`,
+        2_460,
+        null,
+        [
+          makeStep(1, 'warmup', `12' fáciles · ${paces.easy ?? 'suave'}`, 720),
+          makeRepeatGroup(2, 8, [
+            makeStep(3, 'interval', `2' vivos · ${paces.tempo ?? 'tempo'}`, 120),
+            makeStep(4, 'recovery', '90" suaves', 90),
+          ]),
+          makeStep(5, 'cooldown', '9\' soltando', 540),
+        ],
+      );
+    case 'Cambios de ritmo':
+      return createRunningWorkoutPayload(
+        `${day.title} · ${day.date}`,
+        `6 x 3' vivos con 2' suaves. ${day.notes}`,
+        2_700,
+        null,
+        [
+          makeStep(1, 'warmup', `10' fáciles · ${paces.easy ?? 'suave'}`, 600),
+          makeRepeatGroup(2, 6, [
+            makeStep(3, 'interval', `3' controlados · ${paces.tempo ?? 'tempo'}`, 180),
+            makeStep(4, 'recovery', '2\' suaves', 120),
+          ]),
+          makeStep(5, 'cooldown', '10\' soltando', 600),
+        ],
+      );
+    case 'Umbral sostenido':
+      return createRunningWorkoutPayload(
+        `${day.title} · ${day.date}`,
+        `3 x 12' a ${paces.tempo ?? 'umbral controlado'} con 2' suaves. ${day.notes}`,
+        3_180,
+        null,
+        [
+          makeStep(1, 'warmup', `12' fáciles · ${paces.easy ?? 'suave'}`, 720),
+          makeRepeatGroup(2, 3, [
+            makeStep(3, 'interval', `12' umbral · ${paces.tempo ?? 'tempo'}`, 720),
+            makeStep(4, 'recovery', '2\' suaves', 120),
+          ]),
+          makeStep(5, 'cooldown', '10\' soltando', 600),
+        ],
+      );
+    case 'Control de maratón':
+    case 'Bloque objetivo':
+      return createRunningWorkoutPayload(
+        `${day.title} · ${day.date}`,
+        `Bloque largo a ${paces.race ?? 'ritmo objetivo'}. ${day.notes}`,
+        3_120,
+        null,
+        [
+          makeStep(1, 'warmup', `15' fáciles · ${paces.easy ?? 'suave'}`, 900),
+          makeStep(2, 'interval', `25' a ritmo objetivo · ${paces.race ?? 'objetivo'}`, 1_500),
+          makeStep(3, 'cooldown', '12\' soltando', 720),
+        ],
+      );
+    case 'Afinado corto':
+      return createRunningWorkoutPayload(
+        `${day.title} · ${day.date}`,
+        `Rodaje breve + rectas para afinar. ${day.notes}`,
+        1_680,
+        null,
+        [
+          makeStep(1, 'interval', `18' fáciles · ${paces.easy ?? 'suave'}`, 1_080),
+          makeRepeatGroup(2, 6, [
+            makeStep(3, 'interval', '20" progresivos', 20),
+            makeStep(4, 'recovery', '40" muy suaves', 40),
+          ]),
+          makeStep(5, 'cooldown', '4\' soltando', 240),
         ],
       );
     case 'Tempo progresivo':
@@ -325,12 +399,22 @@ export function buildWorkoutFromPlanDay(day: PlanDayForWorkout, paces: PlanPaces
 }
 
 export async function schedulePlanWorkoutOnGarmin(
+  auth: GarminSessionAuth,
   day: PlanDayForWorkout,
   paces: PlanPaces,
 ): Promise<{ workoutId: number | null; uploaded: unknown; scheduled: unknown }> {
   const workout = buildWorkoutFromPlanDay(day, paces);
-  return garminPythonClient.callJson<{ workoutId: number | null; uploaded: unknown; scheduled: unknown }>('upload_and_schedule_workout', {
-    date: day.date,
-    workout,
-  });
+  return garminPythonClient.callJson<{ workoutId: number | null; uploaded: unknown; scheduled: unknown }>(
+    'upload_and_schedule_workout',
+    {
+      date: day.date,
+      workout,
+    },
+    {
+      HOME: auth.homeDir,
+      GARMIN_EMAIL: auth.garminEmail,
+      GARMIN_PASSWORD: auth.garminPassword,
+      GARMINTOKENS: auth.tokenDirs.python,
+    },
+  );
 }

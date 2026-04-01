@@ -174,7 +174,7 @@ function isEasyPlanDay(day: AdaptivePlanDay): boolean {
 }
 
 function targetPaceForDay(day: AdaptivePlanDay, paces: AdaptivePlanPaces): number | null {
-  if (day.title.includes('Ritmo de media') || day.title.includes('Media maratón')) {
+  if (day.title.includes('Ritmo objetivo') || day.title.includes('Bloque objetivo') || day.intensity === 'carrera') {
     return parsePaceSeconds(paces.race);
   }
 
@@ -392,13 +392,14 @@ export function analyzePlanExecution(input: {
 export function analyzeAdaptiveGuidance(input: {
   today: Date;
   raceDate: Date;
+  goalDistanceKm: number;
   recentRuns: AdaptiveRun[];
   averageWeeklyKm: number | null;
   readinessAvg: number | null;
   sleepAvgHours: number | null;
   acuteChronicRatio: number | null;
   loadBalanceFeedback: string | null;
-  predictedHalfSeconds: number | null;
+  predictedGoalSeconds: number | null;
   execution: PlanExecutionReview;
   lowSleepDays7d: number;
   lowReadinessDays7d: number;
@@ -426,7 +427,7 @@ export function analyzeAdaptiveGuidance(input: {
       : null;
 
   const racePace =
-    input.predictedHalfSeconds !== null ? input.predictedHalfSeconds / 21.0975 : null;
+    input.predictedGoalSeconds !== null ? input.predictedGoalSeconds / input.goalDistanceKm : null;
   const sharpRuns = recent14.filter(
     (run) =>
       run.paceSecondsPerKm !== null &&
@@ -506,7 +507,7 @@ export function analyzeAdaptiveGuidance(input: {
     paceAction = 'acelerar';
     paceSeconds = 4;
     paceRationale =
-      'Tus mejores sesiones recientes salen claramente por encima del ritmo de media previsto y sin señales de fatiga descontrolada. Se puede tensar un poco el plan.';
+      'Tus mejores sesiones recientes salen claramente por encima del ritmo objetivo previsto y sin señales de fatiga descontrolada. Se puede tensar un poco el plan.';
   }
 
   if ((input.execution.qualityPaceDeltaSeconds ?? 0) >= 12) {
