@@ -45,7 +45,19 @@ def configure_oauth_consumer() -> None:
 
 
 def resolve_tokenstore() -> str:
-    return os.getenv("GARMINTOKENS", "~/.garminconnect").strip() or "~/.garminconnect"
+    env_tokenstore = os.getenv("GARMINTOKENS", "").strip()
+    if env_tokenstore:
+        return env_tokenstore
+
+    mcp_tokenstore = Path("~/.garmin-mcp").expanduser()
+    python_tokenstore = Path("~/.garminconnect").expanduser()
+
+    if has_saved_tokens(mcp_tokenstore):
+        return str(mcp_tokenstore)
+    if has_saved_tokens(python_tokenstore):
+        return str(python_tokenstore)
+
+    return str(mcp_tokenstore)
 
 
 def ensure_tokenstore_permissions(tokenstore_path: Path) -> None:
@@ -101,12 +113,13 @@ def build_client() -> Garmin:
 
     if not email or not password:
         raise RuntimeError(
-            "No valid Garmin tokens found. Run `npm run garmin:python:setup` to create ~/.garminconnect."
+            "No valid Garmin tokens found and no Garmin credentials are available for automatic re-login."
         )
 
-    raise RuntimeError(
-        "No valid Garmin tokens found. Run `npm run garmin:python:setup` to create ~/.garminconnect before starting the API."
-    )
+    client.login()
+    client.garth.dump(str(tokenstore_path))
+    ensure_tokenstore_permissions(tokenstore_path)
+    return client
 
 
 def safe_daily_range(
@@ -120,6 +133,22 @@ def safe_daily_range(
         except Exception:
             rows.append({"date": cdate, "data": None})
     return rows
+
+
+def extract_workout_id(payload: Any) -> int:
+    if isinstance(payload, dict):
+        for key in ("workoutId", "workoutID", "id"):
+            value = payload.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+
+        nested = payload.get("workout")
+        if nested is not None:
+            return extract_workout_id(nested)
+
+    raise RuntimeError("Garmin did not return a workoutId after uploading the workout.")
 
 
 def call_tool(client: Garmin, name: str, args: dict[str, Any]) -> Any:
@@ -167,6 +196,19 @@ def call_tool(client: Garmin, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "get_body_composition":
         return client.get_body_composition(args["startDate"], args["endDate"])
+    if name == "upload_workout":
+        return client.upload_workout(args["workout"])
+    if name == "schedule_workout":
+        return client.schedule_workout(args["workoutId"], args["date"])
+    if name == "upload_and_schedule_workout":
+        upload_result = client.upload_workout(args["workout"])
+        workout_id = extract_workout_id(upload_result)
+        schedule_result = client.schedule_workout(workout_id, args["date"])
+        return {
+            "workoutId": workout_id,
+            "uploaded": upload_result,
+            "scheduled": schedule_result,
+        }
 
     raise RuntimeError(f"Unsupported Garmin bridge command: {name}")
 

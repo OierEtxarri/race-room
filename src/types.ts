@@ -50,7 +50,48 @@ export type DashboardData = {
     averageHeartRate: number | null;
     elevationGain: number | null;
     trainingEffect: number | null;
+    trainingLoad: number | null;
+    workoutId: number | null;
   }>;
+  adaptive: {
+    overall: 'push' | 'steady' | 'protect';
+    primaryNeed: string;
+    volume: {
+      action: 'subir' | 'mantener' | 'bajar';
+      deltaKm: number;
+      rationale: string;
+    };
+    pace: {
+      action: 'acelerar' | 'mantener' | 'aflojar';
+      secondsPerKm: number;
+      rationale: string;
+    };
+    recovery: {
+      action: 'proteger' | 'normal' | 'apretar';
+      rationale: string;
+    };
+    signals: {
+      recent7Km: number;
+      baselineWeeklyKm: number | null;
+      volumeRatio: number | null;
+      acuteChronicRatio: number | null;
+      loadBalanceFeedback: string | null;
+      qualitySessions14d: number;
+      lastLongRunKm: number | null;
+      plannedSessions7d: number;
+      completedSessions7d: number;
+      missedSessions7d: number;
+      movedSessions7d: number;
+      complianceRate7d: number | null;
+      missedKeySessionThisWeek: boolean;
+      keySessionRelocatedTo: string | null;
+      qualityPaceDeltaSeconds: number | null;
+      easyPaceDeltaSeconds: number | null;
+      lowSleepDays7d: number;
+      lowReadinessDays7d: number;
+      hrvDelta: number | null;
+    };
+  };
   advice: Array<{
     title: string;
     body: string;
@@ -77,6 +118,9 @@ export type DashboardData = {
         intensity: 'suave' | 'medio' | 'alto' | 'recuperacion' | 'descanso' | 'carrera';
         distanceKm: number | null;
         notes: string;
+        status: 'planned' | 'done' | 'missed' | 'moved' | 'adjusted';
+        outcome: string | null;
+        canSendToGarmin: boolean;
       }>;
     }>;
   };

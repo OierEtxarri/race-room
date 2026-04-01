@@ -1,15 +1,27 @@
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap');
 
 :root {
-  --bg: #f2ece2;
-  --bg-deep: #e8dfd1;
-  --panel: rgba(250, 246, 239, 0.88);
-  --panel-strong: linear-gradient(145deg, rgba(255, 251, 245, 0.95), rgba(243, 232, 217, 0.96));
-  --heading: #1d222a;
-  --text: #3f4a56;
-  --muted: #65707c;
-  --line: rgba(29, 34, 42, 0.1);
-  --shadow-soft: 0 22px 48px rgba(41, 36, 28, 0.09);
+  --bg: #071118;
+  --bg-deep: #02060b;
+  --panel: rgba(8, 15, 21, 0.84);
+  --panel-strong: linear-gradient(145deg, rgba(10, 18, 26, 0.96), rgba(4, 9, 14, 0.98));
+  --surface: rgba(12, 22, 31, 0.84);
+  --surface-strong: rgba(15, 26, 36, 0.94);
+  --surface-ghost: rgba(9, 17, 24, 0.72);
+  --heading: #f2f7ff;
+  --text: #c5d2de;
+  --muted: #8ea2b8;
+  --line: rgba(145, 164, 184, 0.16);
+  --shadow-soft: 0 22px 48px rgba(0, 0, 0, 0.35);
+  --accent: #b28cff;
+  --accent-deep: #5c36b8;
+  --accent-soft: rgba(178, 140, 255, 0.16);
+  --blue: #8d97ff;
+  --blue-soft: rgba(141, 151, 255, 0.14);
+  --amber: #f0a14a;
+  --amber-soft: rgba(240, 161, 74, 0.16);
+  --danger: #ff9a77;
+  --danger-soft: rgba(255, 154, 119, 0.15);
   --sans: 'Space Grotesk', sans-serif;
   --serif: 'Fraunces', serif;
 }
@@ -24,6 +36,7 @@ html {
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  color-scheme: dark;
 }
 
 body {
@@ -31,8 +44,9 @@ body {
   color: var(--text);
   font-family: var(--sans);
   background:
-    radial-gradient(circle at top left, rgba(17, 102, 94, 0.1), transparent 28%),
-    radial-gradient(circle at 85% 10%, rgba(244, 157, 55, 0.14), transparent 18%),
+    radial-gradient(circle at top left, rgba(178, 140, 255, 0.18), transparent 28%),
+    radial-gradient(circle at 85% 10%, rgba(240, 161, 74, 0.14), transparent 18%),
+    radial-gradient(circle at 50% 100%, rgba(141, 151, 255, 0.12), transparent 26%),
     linear-gradient(180deg, var(--bg), var(--bg-deep));
   min-height: 100vh;
 }
@@ -77,7 +91,7 @@ h3 {
   font-size: 0.82rem;
   text-transform: uppercase;
   letter-spacing: 0.16em;
-  color: #0d6b62;
+  color: var(--accent);
   margin-bottom: 0.7rem;
 }
 

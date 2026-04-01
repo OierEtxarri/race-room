@@ -9,7 +9,15 @@ import {
   subWeeks,
 } from 'date-fns';
 import { config } from '../config.ts';
+import {
+  analyzeAdaptiveGuidance,
+  analyzePlanExecution,
+  createEmptyPlanExecutionReview,
+  type AdaptiveGuidance,
+  type PlanExecutionReview,
+} from './adaptivePlan.ts';
 import { garminClient } from './garminClient.ts';
+import { canSchedulePlanDay } from './planWorkouts.ts';
 
 type NullableNumber = number | null;
 
@@ -28,6 +36,8 @@ type RunSummary = {
   averageHeartRate: number | null;
   elevationGain: number | null;
   trainingEffect: number | null;
+  trainingLoad: number | null;
+  workoutId: number | null;
 };
 
 type TrainingDay = {
@@ -38,6 +48,9 @@ type TrainingDay = {
   intensity: 'suave' | 'medio' | 'alto' | 'recuperacion' | 'descanso' | 'carrera';
   distanceKm: number | null;
   notes: string;
+  status: 'planned' | 'done' | 'missed' | 'moved' | 'adjusted';
+  outcome: string | null;
+  canSendToGarmin: boolean;
 };
 
 type TrainingWeek = {
@@ -96,6 +109,7 @@ export type DashboardData = {
     value: number | null;
   }>;
   recentRuns: RunSummary[];
+  adaptive: AdaptiveGuidance;
   advice: AdviceCard[];
   plan: {
     summary: string;
@@ -358,6 +372,8 @@ function normalizeRun(activity: unknown): RunSummary | null {
     averageHeartRate: pickNumber(activity, ['averageHR', 'summaryDTO.averageHR'], ['averagehr', 'heartrate']),
     elevationGain: pickNumber(activity, ['elevationGain', 'summaryDTO.elevationGain'], ['elevation']),
     trainingEffect: pickNumber(activity, ['aerobicTrainingEffect'], ['trainingeffect']),
+    trainingLoad: pickNumber(activity, ['activityTrainingLoad', 'summaryDTO.activityTrainingLoad'], ['trainingload']),
+    workoutId: pickNumber(activity, ['workoutId'], ['workoutid']),
   };
 }
 
@@ -492,8 +508,51 @@ function extractTrainingStatus(value: unknown): string | null {
   return null;
 }
 
+function extractAcuteChronicRatio(value: unknown): number | null {
+  for (const candidate of collectObjects(value)) {
+    const acuteTrainingLoad = getPath(candidate, 'acuteTrainingLoadDTO');
+    const ratio = toNumber(getPath(acuteTrainingLoad, 'dailyAcuteChronicWorkloadRatio'));
+
+    if (ratio !== null) {
+      return ratio;
+    }
+  }
+
+  return pickNumber(
+    value,
+    ['mostRecentTrainingStatus.latestTrainingStatusData.acuteTrainingLoadDTO.dailyAcuteChronicWorkloadRatio'],
+    ['dailyacutechronicworkloadratio'],
+  );
+}
+
+function extractLoadBalanceFeedback(value: unknown): string | null {
+  return pickString(
+    value,
+    ['mostRecentTrainingStatus.latestTrainingLoadBalance.trainingBalanceFeedbackPhrase'],
+    ['trainingbalancefeedbackphrase', 'loadbalancefeedback', 'balancefeedbackphrase'],
+  );
+}
+
 function extractRacePredictions(source: unknown): Record<string, number> {
   const predictions: Record<string, number> = {};
+  const fieldMap = [
+    { label: '5k', paths: ['time5K', 'predicted5KTime', 'fiveK.timeInSeconds'] },
+    { label: '10k', paths: ['time10K', 'predicted10KTime', 'tenK.timeInSeconds'] },
+    {
+      label: 'half',
+      paths: ['timeHalfMarathon', 'predictedHalfMarathonTime', 'halfMarathon.timeInSeconds'],
+    },
+    { label: 'marathon', paths: ['timeMarathon', 'predictedMarathonTime', 'marathon.timeInSeconds'] },
+  ] as const;
+
+  for (const field of fieldMap) {
+    const rawSeconds = pickNumber(source, [...field.paths], []);
+    const normalizedSeconds = normalizeDurationSeconds(rawSeconds);
+
+    if (normalizedSeconds && normalizedSeconds >= 600 && normalizedSeconds <= 30_000) {
+      predictions[field.label] = normalizedSeconds;
+    }
+  }
 
   for (const candidate of collectObjects(source)) {
     const context = [
@@ -513,7 +572,7 @@ function extractRacePredictions(source: unknown): Record<string, number> {
             ? '5k'
             : null;
 
-    if (!label) {
+    if (!label || predictions[label]) {
       continue;
     }
 
@@ -629,6 +688,142 @@ function groupWeeklyRunning(runs: RunSummary[]) {
     }));
 }
 
+function describeAdaptiveVolume(adaptive: AdaptiveGuidance): string {
+  if (adaptive.volume.action === 'subir') {
+    return `Sube alrededor de ${adaptive.volume.deltaKm} km esta semana, repartidos en rodajes suaves o en el final de la tirada larga.`;
+  }
+
+  if (adaptive.volume.action === 'bajar') {
+    return `Recorta alrededor de ${adaptive.volume.deltaKm} km esta semana para absorber mejor la carga reciente.`;
+  }
+
+  return 'Mantén el volumen actual; no hay señal clara para abrir ni cerrar más carga.';
+}
+
+function describeAdaptivePace(adaptive: AdaptiveGuidance): string {
+  if (adaptive.pace.action === 'acelerar') {
+    return `Puedes tensar los ritmos de trabajo unos ${adaptive.pace.secondsPerKm}s/km si las piernas siguen respondiendo.`;
+  }
+
+  if (adaptive.pace.action === 'aflojar') {
+    return `Conviene aflojar los ritmos de calidad unos ${adaptive.pace.secondsPerKm}s/km hasta que la recuperación vuelva a estabilizarse.`;
+  }
+
+  return 'Mantén los ritmos previstos; ahora mismo el plan no necesita más agresividad ni más freno.';
+}
+
+function describePrimaryNeed(adaptive: AdaptiveGuidance): string {
+  const loadBalance = adaptive.signals.loadBalanceFeedback;
+
+  if (loadBalance?.includes('AEROBIC_HIGH_SHORTAGE')) {
+    return 'Te falta trabajo sostenido de calidad. Mejor más bloques controlados cerca del umbral que más series cortas.';
+  }
+
+  if (loadBalance?.includes('ANAEROBIC_HIGH_EXCESS')) {
+    return 'Ahora mismo te sobra chispa y te falta continuidad. Conviene menos intensidad explosiva y más estabilidad aeróbica.';
+  }
+
+  if ((adaptive.signals.lastLongRunKm ?? 0) < 14) {
+    return 'Tu prioridad sigue siendo consolidar la tirada larga útil, sin convertirla en una carrera.';
+  }
+
+  return adaptive.primaryNeed;
+}
+
+function formatExecutionDelta(seconds: number | null): string | null {
+  if (seconds === null || seconds === 0) {
+    return null;
+  }
+
+  if (seconds > 0) {
+    return `${seconds}s/km más lento que lo previsto`;
+  }
+
+  return `${Math.abs(seconds)}s/km más rápido que lo previsto`;
+}
+
+function formatComplianceRate(rate: number | null): string {
+  if (rate === null) {
+    return 'Sin dato';
+  }
+
+  return `${Math.round(rate * 100)}%`;
+}
+
+function appendNote(base: string, extra: string | null): string {
+  if (!extra) {
+    return base;
+  }
+
+  return `${base} ${extra}`.trim();
+}
+
+function applyExecutionToWeeks(input: {
+  weeks: TrainingWeek[];
+  execution: PlanExecutionReview | null;
+  today: Date;
+  adaptive: AdaptiveGuidance;
+}): TrainingWeek[] {
+  const todayIso = isoDate(input.today);
+  const relocation = input.execution?.relocation ?? null;
+  const matches = new Map<string, PlanExecutionReview['matches'][number]>(
+    (input.execution?.matches ?? []).map((match) => [`${match.plannedDate}|${match.title}`, match] as const),
+  );
+
+  return input.weeks.map((week) => ({
+    ...week,
+    days: week.days.map((day) => {
+      const key = `${day.date}|${day.title}`;
+      const match = matches.get(key);
+      let nextDay = { ...day };
+
+      if (match) {
+        if (match.status === 'done') {
+          nextDay.status = 'done';
+          nextDay.outcome = 'Completado según plan';
+          nextDay.notes = appendNote(
+            nextDay.notes,
+            formatExecutionDelta(match.paceDeltaSeconds)
+              ? `Resultado real: ${formatExecutionDelta(match.paceDeltaSeconds)}.`
+              : 'Sesión completada en la fecha prevista.',
+          );
+        } else if (match.status === 'moved') {
+          nextDay.status = 'moved';
+          nextDay.outcome = `Hecho el ${match.actualDate}`;
+          nextDay.notes = appendNote(
+            nextDay.notes,
+            `La sesión salió el ${match.actualDate}.${formatExecutionDelta(match.paceDeltaSeconds) ? ` Ritmo real ${formatExecutionDelta(match.paceDeltaSeconds)}.` : ''}`,
+          );
+        } else {
+          nextDay.status = 'missed';
+          nextDay.outcome = 'No realizado';
+          nextDay.notes = appendNote(
+            nextDay.notes,
+            relocation?.fromDate === day.date && relocation.toDate
+              ? `No salió este día. La reubico al ${relocation.toDate}.`
+              : 'No salió según lo previsto. No intentes recuperar toda la carga de golpe.',
+          );
+        }
+      }
+
+      if (relocation?.toDate === day.date && day.date >= todayIso) {
+        nextDay = {
+          ...nextDay,
+          title: relocation.title,
+          intensity: input.adaptive.overall === 'protect' ? 'medio' : relocation.intensity,
+          distanceKm: relocation.distanceKm ?? nextDay.distanceKm,
+          status: 'adjusted',
+          outcome: `Reubicada desde ${relocation.fromDate}`,
+          notes: `Sesión clave reubicada desde ${relocation.fromDate}. ${relocation.notes}`,
+        };
+      }
+
+      nextDay.canSendToGarmin = nextDay.date >= todayIso && canSchedulePlanDay(nextDay);
+      return nextDay;
+    }),
+  }));
+}
+
 function buildAdvice(input: {
   daysToRace: number;
   predictedHalfSeconds: number | null;
@@ -637,8 +832,64 @@ function buildAdvice(input: {
   readinessAvg: number | null;
   sleepAvgHours: number | null;
   trainingStatus: string | null;
+  adaptive: AdaptiveGuidance;
 }) : AdviceCard[] {
   const cards: AdviceCard[] = [];
+
+  cards.push({
+    title: 'Ajuste de esta semana',
+    body: `${describeAdaptiveVolume(input.adaptive)} ${describeAdaptivePace(input.adaptive)}`,
+    tone:
+      input.adaptive.overall === 'protect'
+        ? 'warning'
+        : input.adaptive.overall === 'push'
+          ? 'accent'
+          : 'calm',
+  });
+
+  cards.push({
+    title: 'Lo que más necesitas',
+    body: describePrimaryNeed(input.adaptive),
+    tone: 'accent',
+  });
+
+  if (input.adaptive.signals.missedKeySessionThisWeek && input.adaptive.signals.keySessionRelocatedTo) {
+    cards.push({
+      title: 'Sesión clave reubicada',
+      body: `Has perdido la sesión principal de esta semana. La app la mueve al ${input.adaptive.signals.keySessionRelocatedTo}; no metas otra calidad extra además de esa.`,
+      tone: 'warning',
+    });
+  }
+
+  if ((input.adaptive.signals.complianceRate7d ?? 1) < 0.6) {
+    cards.push({
+      title: 'Cumplimiento primero',
+      body: `Tu cumplimiento útil de los últimos 7 días va en ${formatComplianceRate(input.adaptive.signals.complianceRate7d)}. Conviene estabilizar horarios y sacar 3 sesiones buenas antes de endurecer el plan.`,
+      tone: 'warning',
+    });
+  }
+
+  if ((input.adaptive.signals.qualityPaceDeltaSeconds ?? 0) >= 12) {
+    cards.push({
+      title: 'La calidad va justa',
+      body: `Tus sesiones rápidas recientes están saliendo ${formatExecutionDelta(input.adaptive.signals.qualityPaceDeltaSeconds)}. Baja un punto el objetivo esta semana y busca control, no épica.`,
+      tone: 'warning',
+    });
+  } else if ((input.adaptive.signals.qualityPaceDeltaSeconds ?? 0) <= -10) {
+    cards.push({
+      title: 'La calidad responde',
+      body: `La calidad te está saliendo ${formatExecutionDelta(input.adaptive.signals.qualityPaceDeltaSeconds)}. Puedes tensar un poco, pero solo si mantienes suaves de verdad los días fáciles.`,
+      tone: 'calm',
+    });
+  }
+
+  if ((input.adaptive.signals.easyPaceDeltaSeconds ?? 0) <= -15) {
+    cards.push({
+      title: 'Rodajes suaves demasiado vivos',
+      body: `Tus rodajes fáciles van ${formatExecutionDelta(input.adaptive.signals.easyPaceDeltaSeconds)}. Ahí es donde más margen tienes para mejorar la recuperación sin perder forma.`,
+      tone: 'warning',
+    });
+  }
 
   if (input.predictedHalfSeconds !== null) {
     const racePace = formatPace(input.predictedHalfSeconds / 21.0975);
@@ -669,6 +920,18 @@ function buildAdvice(input: {
       body: 'Tus métricas de recuperación piden disciplina: baja el volumen del día siguiente si enlazas dos noches malas y protege especialmente el sueño de jueves a domingo.',
       tone: 'warning',
     });
+  } else if (input.adaptive.signals.lowSleepDays7d >= 2 || input.adaptive.signals.lowReadinessDays7d >= 2) {
+    cards.push({
+      title: 'Recuperación irregular',
+      body: `Acumulas ${input.adaptive.signals.lowSleepDays7d} noches cortas y ${input.adaptive.signals.lowReadinessDays7d} días de readiness bajo en la última semana. Mejor asegurar descanso y no sumar intensidad oculta.`,
+      tone: 'warning',
+    });
+  } else if ((input.adaptive.signals.hrvDelta ?? 0) <= -6) {
+    cards.push({
+      title: 'HRV a la baja',
+      body: 'Tu HRV reciente está por debajo de su referencia de 14 días. Mantén la semana útil, pero baja ambición en la parte intensa si notas piernas opacas.',
+      tone: 'warning',
+    });
   } else {
     cards.push({
       title: 'Recuperación estable',
@@ -696,7 +959,7 @@ function buildAdvice(input: {
     });
   }
 
-  return cards.slice(0, 4);
+  return cards.slice(0, 6);
 }
 
 function paceBandLabel(minSeconds: number | null, maxSeconds: number | null): string | null {
@@ -718,6 +981,14 @@ function roundHalfKm(value: number): number {
   return Math.max(0, Math.round(value * 2) / 2);
 }
 
+function shiftPaceSeconds(secondsPerKm: number | null, deltaSeconds: number): number | null {
+  if (secondsPerKm === null) {
+    return null;
+  }
+
+  return Math.max(240, Math.round(secondsPerKm + deltaSeconds));
+}
+
 function buildTrainingPlan(input: {
   today: Date;
   raceDate: Date;
@@ -725,19 +996,41 @@ function buildTrainingPlan(input: {
   averageWeeklyKm: number | null;
   longestRunKm: number | null;
   recentRuns: RunSummary[];
+  adaptive: AdaptiveGuidance;
+  execution: PlanExecutionReview | null;
 }) {
-  const averageWeeklyKm = input.averageWeeklyKm ?? 28;
+  const volumeDelta =
+    input.adaptive.volume.action === 'subir'
+      ? input.adaptive.volume.deltaKm
+      : input.adaptive.volume.action === 'bajar'
+        ? -input.adaptive.volume.deltaKm
+        : 0;
+  const paceDelta =
+    input.adaptive.pace.action === 'acelerar'
+      ? -input.adaptive.pace.secondsPerKm
+      : input.adaptive.pace.action === 'aflojar'
+        ? input.adaptive.pace.secondsPerKm
+        : 0;
+
+  const averageWeeklyKm = Math.max(18, (input.averageWeeklyKm ?? 28) + volumeDelta);
   const longestRunKm = input.longestRunKm ?? 14;
   const level: DashboardData['plan']['level'] =
     averageWeeklyKm >= 48 ? 'ambicioso' : averageWeeklyKm >= 30 ? 'equilibrado' : 'conservador';
   const peakVolume = Math.max(24, Math.min(70, averageWeeklyKm));
   const peakLongRun = Math.max(14, Math.min(22, roundHalfKm(Math.max(longestRunKm, peakVolume * 0.38))));
   const racePace = input.predictedHalfSeconds ? input.predictedHalfSeconds / 21.0975 : null;
+  const adjustedRacePace = shiftPaceSeconds(racePace, paceDelta);
   const paces = {
-    easy: paceBandLabel(racePace ? racePace + 55 : null, racePace ? racePace + 85 : null),
-    steady: formatPace(racePace ? racePace + 25 : null),
-    tempo: paceBandLabel(racePace ? racePace - 5 : null, racePace ? racePace + 8 : null),
-    race: formatPace(racePace),
+    easy: paceBandLabel(
+      adjustedRacePace ? adjustedRacePace + 55 : null,
+      adjustedRacePace ? adjustedRacePace + 85 : null,
+    ),
+    steady: formatPace(adjustedRacePace ? adjustedRacePace + 25 : null),
+    tempo: paceBandLabel(
+      adjustedRacePace ? adjustedRacePace - 5 : null,
+      adjustedRacePace ? adjustedRacePace + 8 : null,
+    ),
+    race: formatPace(adjustedRacePace),
   };
 
   const weeklyTargets = [0.92, 1.02, 0.97, 0.78, 0.64, 0.4].map((factor) => roundHalfKm(peakVolume * factor));
@@ -769,6 +1062,7 @@ function buildTrainingPlan(input: {
 
   const weeks: TrainingWeek[] = [];
   const planStart = startOfWeek(input.today, { weekStartsOn: 1 });
+  const todayIso = isoDate(input.today);
 
   for (let weekIndex = 0; weekIndex < 6; weekIndex += 1) {
     const weekStart = weekIndex === 0 ? planStart : startOfWeek(subDays(endOfWeek(planStart, { weekStartsOn: 1 }), -7 * weekIndex), { weekStartsOn: 1 });
@@ -785,21 +1079,28 @@ function buildTrainingPlan(input: {
       const iso = isoDate(date);
       const weekday = format(date, 'EEEE');
       const lowerWeekday = weekday.toLowerCase();
+      const qualityGuardrail =
+        input.adaptive.overall === 'protect'
+          ? ' Si sigues cargado o has dormido mal, recorta una repetición o 10-15 min.'
+          : input.adaptive.overall === 'push'
+            ? ' Si sales muy entero y la FC va estable, puedes añadir 1 km suave al final.'
+            : '';
+      const recoveryGuardrail =
+        input.adaptive.recovery.action === 'proteger'
+          ? ' Prioriza soltar piernas y no conviertas este día en trabajo oculto.'
+          : input.adaptive.recovery.action === 'apretar'
+            ? ' Si te notas muy bien, mete 4-6 rectas de calidad sin fatiga.'
+            : '';
 
-      if (iso < isoDate(input.today)) {
-        return {
-          date: iso,
-          weekday: lowerWeekday,
-          title: 'Completado',
-          intent: 'pasado',
-          intensity: 'descanso',
-          distanceKm: null,
-          notes: 'Día anterior al arranque del plan.',
-        };
-      }
+      const finalizeDay = (day: Omit<TrainingDay, 'canSendToGarmin'>): TrainingDay => ({
+        ...day,
+        status: day.status ?? 'planned',
+        outcome: day.outcome ?? null,
+        canSendToGarmin: day.date >= todayIso && canSchedulePlanDay(day),
+      });
 
       if (raceWeek && iso === config.raceDate) {
-        return {
+        return finalizeDay({
           date: iso,
           weekday: lowerWeekday,
           title: 'Media maratón',
@@ -807,12 +1108,14 @@ function buildTrainingPlan(input: {
           intensity: 'carrera',
           distanceKm: 21.1,
           notes: `Salida muy controlada hasta el km 5. Ritmo objetivo ${paces.race ?? 'por sensaciones fuertes y estables'} y toma de carbohidratos cada 25-30 minutos.`,
-        };
+          status: 'planned',
+          outcome: null,
+        });
       }
 
       switch (weekdayIndex) {
         case 0:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: 'Descanso + movilidad',
@@ -820,9 +1123,11 @@ function buildTrainingPlan(input: {
             intensity: 'descanso',
             distanceKm: null,
             notes: '20-30 min de movilidad, tobillo y glúteo medio. Si vienes cargado, paseo suave.',
-          };
+            status: 'planned',
+            outcome: null,
+          });
         case 1:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: TuesdayTitles[weekIndex] ?? 'Calidad',
@@ -832,27 +1137,31 @@ function buildTrainingPlan(input: {
             notes: raceWeek
               ? '25-35 min suaves + 5 rectas de 20". Nada de fatiga residual.'
               : weekIndex === 0
-                ? `Calentamiento + 5x1 km a ${paces.tempo ?? 'ritmo vivo controlado'} con 90" suaves.`
+                ? `Calentamiento + 5x1 km a ${paces.tempo ?? 'ritmo vivo controlado'} con 90" suaves.${qualityGuardrail}`
                 : weekIndex === 1
-                  ? `3x2 km a ${paces.tempo ?? 'umbral controlado'} con 2' suaves.`
+                  ? `3x2 km a ${paces.tempo ?? 'umbral controlado'} con 2' suaves.${qualityGuardrail}`
                   : weekIndex === 2
-                    ? `2x4 km a ${paces.steady ?? 'ritmo sostenido'} con 3' suaves.`
+                    ? `2x4 km a ${paces.steady ?? 'ritmo sostenido'} con 3' suaves.${qualityGuardrail}`
                     : weekIndex === 3
-                      ? '6x800 m vivos con recuperación completa.'
-                      : '4x1 km a ritmo de media con mucha soltura.',
-          };
+                      ? `6x800 m vivos con recuperación completa.${qualityGuardrail}`
+                      : `4x1 km a ritmo de media con mucha soltura.${qualityGuardrail}`,
+            status: 'planned',
+            outcome: null,
+          });
         case 2:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: 'Rodaje suave',
             intent: 'aeróbico',
             intensity: 'suave',
             distanceKm: easyKm,
-            notes: `Mantén el rodaje realmente fácil, idealmente en ${paces.easy ?? 'zona cómoda conversacional'}.`,
-          };
+            notes: `Mantén el rodaje realmente fácil, idealmente en ${paces.easy ?? 'zona cómoda conversacional'}.${recoveryGuardrail}`,
+            status: 'planned',
+            outcome: null,
+          });
         case 3:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: level === 'conservador' ? 'Fuerza y core' : 'Recuperación activa',
@@ -861,24 +1170,28 @@ function buildTrainingPlan(input: {
             distanceKm: level === 'conservador' ? null : recoveryKm,
             notes: level === 'conservador'
               ? '30-40 min de fuerza básica: gemelo, isquio, glúteo, core. Sin carga máxima.'
-              : 'Rodaje muy suave o bici soltando piernas; termina con 6 rectas cortas.',
-          };
+              : `Rodaje muy suave o bici soltando piernas; termina con 6 rectas cortas.${recoveryGuardrail}`,
+            status: 'planned',
+            outcome: null,
+          });
         case 4:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: FridayTitles[weekIndex] ?? 'Control',
             intent: 'economía de carrera',
-            intensity: preRaceWeek || raceWeek ? 'medio' : 'alto',
+            intensity: preRaceWeek || raceWeek || input.adaptive.overall === 'protect' ? 'medio' : 'alto',
             distanceKm: preRaceWeek ? roundHalfKm((targetKm ?? 0) * 0.14) : qualityKm,
             notes: raceWeek
               ? '30 min muy suaves. Si te notas pesado, convierte el día en descanso total.'
               : preRaceWeek
-                ? `8-10 km con 3 km a ${paces.race ?? 'ritmo de media'} y buenas sensaciones.`
-                : `Rodaje controlado terminando cerca de ${paces.race ?? 'ritmo objetivo'} sin forzar.`,
-          };
+                ? `8-10 km con 3 km a ${paces.race ?? 'ritmo de media'} y buenas sensaciones.${qualityGuardrail}`
+                : `Rodaje controlado terminando cerca de ${paces.race ?? 'ritmo objetivo'} sin forzar.${qualityGuardrail}`,
+            status: 'planned',
+            outcome: null,
+          });
         case 5:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: 'Suave + técnica',
@@ -887,10 +1200,12 @@ function buildTrainingPlan(input: {
             distanceKm: raceWeek ? 4 : recoveryKm,
             notes: raceWeek
               ? '20-25 min muy suaves o descanso si notas fatiga.'
-              : 'Rodaje corto y fácil. Añade 4-6 rectas progresivas si estás fino.',
-          };
+              : `Rodaje corto y fácil. Añade 4-6 rectas progresivas si estás fino.${recoveryGuardrail}`,
+            status: 'planned',
+            outcome: null,
+          });
         default:
-          return {
+          return finalizeDay({
             date: iso,
             weekday: lowerWeekday,
             title: raceWeek ? 'Descanso total' : 'Tirada larga',
@@ -899,8 +1214,10 @@ function buildTrainingPlan(input: {
             distanceKm: raceWeek ? null : longRunKm,
             notes: raceWeek
               ? 'Descanso, hidratación y preparación del material.'
-              : `Tirada larga fácil. Últimos 15-20 min algo más alegres si llegas con buenas piernas; combustible ensayado.`,
-          };
+              : `Tirada larga fácil. Últimos 15-20 min algo más alegres si llegas con buenas piernas; combustible ensayado.${qualityGuardrail}`,
+            status: 'planned',
+            outcome: null,
+          });
       }
     });
 
@@ -920,14 +1237,26 @@ function buildTrainingPlan(input: {
       .reduce((sum, run) => sum + run.distanceKm, 0),
     1,
   );
+  const complianceSentence =
+    (input.execution?.complianceRate7d ?? null) !== null
+      ? ` Cumplimiento útil reciente: ${formatComplianceRate(input.execution?.complianceRate7d ?? null)}.`
+      : '';
+  const relocationSentence = input.execution?.relocation?.toDate
+    ? ` La sesión clave perdida se recoloca al ${input.execution.relocation.toDate}.`
+    : '';
 
-  const summary = `Vas con un nivel ${level}, promediando ${round(averageWeeklyKm, 1)} km/sem y con tirada larga reciente de ${round(longestRunKm, 1)} km. El plan prioriza especificidad de media maratón, un taper progresivo y llegar al 10 de mayo con piernas frescas. Tus últimos 4 entrenamientos suman ${recentDistance} km, así que el foco debe estar en calidad utilizable, no en acumular por acumular.`;
+  const summary = `Vas con un nivel ${level}, promediando ${round(averageWeeklyKm, 1)} km/sem y con tirada larga reciente de ${round(longestRunKm, 1)} km.${complianceSentence}${relocationSentence} Ajuste actual: ${describeAdaptiveVolume(input.adaptive)} ${describeAdaptivePace(input.adaptive)} Tus últimos 4 entrenamientos suman ${recentDistance} km, así que el foco está en calidad utilizable, taper progresivo y llegar al 10 de mayo con piernas frescas.`;
 
   return {
     summary,
     level,
     paces,
-    weeks,
+    weeks: applyExecutionToWeeks({
+      weeks,
+      execution: input.execution,
+      today: input.today,
+      adaptive: input.adaptive,
+    }),
   };
 }
 
@@ -1001,6 +1330,8 @@ export async function buildDashboardData(): Promise<DashboardData> {
   const racePredictions = extractRacePredictions(racePredictionsRaw);
   const predictedHalfSeconds = racePredictions.half ?? null;
   const trainingStatus = extractTrainingStatus(trainingStatusRaw);
+  const acuteChronicRatio = extractAcuteChronicRatio(trainingStatusRaw);
+  const loadBalanceFeedback = extractLoadBalanceFeedback(trainingStatusRaw);
   const overview = {
     steps: pickNumber(dailySummary, ['totalSteps', 'steps'], ['steps']),
     activeCalories: pickNumber(dailySummary, ['activeKilocalories', 'activeCalories'], ['calories']),
@@ -1023,6 +1354,64 @@ export async function buildDashboardData(): Promise<DashboardData> {
 
   const readinessAvg = average(readinessSeries.map((entry) => entry.value).filter((value): value is number => value !== null));
   const sleepAvgHours = average(sleepSeries.map((entry) => entry.value).filter((value): value is number => value !== null));
+  const recentSleepDays = sleepSeries.filter((entry) => entry.date >= isoDate(subDays(today, 7)));
+  const recentReadinessDays = readinessSeries.filter((entry) => entry.date >= isoDate(subDays(today, 7)));
+  const lowSleepDays7d = recentSleepDays.filter((entry) => (entry.value ?? 10) < 6.5).length;
+  const lowReadinessDays7d = recentReadinessDays.filter((entry) => (entry.value ?? 100) < 60).length;
+  const validHrv = hrvSeries.map((entry) => entry.value).filter((value): value is number => value !== null);
+  const hrvDelta =
+    validHrv.length >= 6
+      ? round(
+          average(validHrv.slice(-3))! - average(validHrv.slice(0, Math.max(1, validHrv.length - 3)))!,
+          1,
+        )
+      : null;
+  const baselineAdaptive = analyzeAdaptiveGuidance({
+    today,
+    raceDate,
+    recentRuns: runningActivities,
+    averageWeeklyKm: overview.averageWeeklyKm,
+    readinessAvg,
+    sleepAvgHours,
+    acuteChronicRatio,
+    loadBalanceFeedback,
+    predictedHalfSeconds,
+    execution: createEmptyPlanExecutionReview(),
+    lowSleepDays7d,
+    lowReadinessDays7d,
+    hrvDelta,
+  });
+  const draftPlan = buildTrainingPlan({
+    today,
+    raceDate,
+    predictedHalfSeconds,
+    averageWeeklyKm: overview.averageWeeklyKm,
+    longestRunKm: overview.longestRunKm,
+    recentRuns,
+    adaptive: baselineAdaptive,
+    execution: null,
+  });
+  const execution = analyzePlanExecution({
+    today,
+    recentRuns: runningActivities,
+    weeks: draftPlan.weeks,
+    paces: draftPlan.paces,
+  });
+  const adaptive = analyzeAdaptiveGuidance({
+    today,
+    raceDate,
+    recentRuns: runningActivities,
+    averageWeeklyKm: overview.averageWeeklyKm,
+    readinessAvg,
+    sleepAvgHours,
+    acuteChronicRatio,
+    loadBalanceFeedback,
+    predictedHalfSeconds,
+    execution,
+    lowSleepDays7d,
+    lowReadinessDays7d,
+    hrvDelta,
+  });
 
   const athleteName =
     pickString(userProfile, ['fullName', 'displayName', 'userName'], ['name', 'display']) ??
@@ -1048,6 +1437,7 @@ export async function buildDashboardData(): Promise<DashboardData> {
     readinessAvg,
     sleepAvgHours,
     trainingStatus,
+    adaptive,
   });
 
   const plan = buildTrainingPlan({
@@ -1057,6 +1447,8 @@ export async function buildDashboardData(): Promise<DashboardData> {
     averageWeeklyKm: overview.averageWeeklyKm,
     longestRunKm: overview.longestRunKm,
     recentRuns,
+    adaptive,
+    execution,
   });
 
   return {
@@ -1076,6 +1468,7 @@ export async function buildDashboardData(): Promise<DashboardData> {
       value: entry.value,
     })),
     recentRuns,
+    adaptive,
     advice,
     plan,
     fetchedAt: new Date().toISOString(),
@@ -1085,6 +1478,45 @@ export async function buildDashboardData(): Promise<DashboardData> {
 export function buildFallbackDashboardData(reason: string): DashboardData {
   const today = startOfToday();
   const raceDate = parseISO(config.raceDate);
+  const adaptive: AdaptiveGuidance = {
+    overall: 'steady',
+    primaryNeed: 'Recuperar acceso estable a Garmin antes de afinar el plan con datos reales.',
+    volume: {
+      action: 'mantener',
+      deltaKm: 0,
+      rationale: 'Sin datos recientes válidos no conviene mover el volumen automáticamente.',
+    },
+    pace: {
+      action: 'mantener',
+      secondsPerKm: 0,
+      rationale: 'Sin sesiones recientes no conviene tocar los ritmos del plan.',
+    },
+    recovery: {
+      action: 'normal',
+      rationale: 'Usa sensaciones y no fuerces hasta que Garmin vuelva a sincronizar.',
+    },
+    signals: {
+      recent7Km: 0,
+      baselineWeeklyKm: null,
+      volumeRatio: null,
+      acuteChronicRatio: null,
+      loadBalanceFeedback: null,
+      qualitySessions14d: 0,
+      lastLongRunKm: null,
+      plannedSessions7d: 0,
+      completedSessions7d: 0,
+      missedSessions7d: 0,
+      movedSessions7d: 0,
+      complianceRate7d: null,
+      missedKeySessionThisWeek: false,
+      keySessionRelocatedTo: null,
+      qualityPaceDeltaSeconds: null,
+      easyPaceDeltaSeconds: null,
+      lowSleepDays7d: 0,
+      lowReadinessDays7d: 0,
+      hrvDelta: null,
+    },
+  };
 
   return {
     athlete: {
@@ -1113,6 +1545,7 @@ export function buildFallbackDashboardData(reason: string): DashboardData {
     weeklyRunning: [],
     vo2Trend: [],
     recentRuns: [],
+    adaptive,
     advice: [
       {
         title: 'Garmin ha limitado la conexión',
@@ -1132,6 +1565,8 @@ export function buildFallbackDashboardData(reason: string): DashboardData {
       averageWeeklyKm: null,
       longestRunKm: null,
       recentRuns: [],
+      adaptive,
+      execution: null,
     }),
     fetchedAt: new Date().toISOString(),
     fallbackReason: reason,

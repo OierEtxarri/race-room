@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useState } from 'react';
+import { startTransition, useEffect, useEffectEvent, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -18,8 +18,15 @@ type AsyncState =
   | { status: 'loading'; data: null; error: null }
   | { status: 'ready'; data: DashboardData; error: null }
   | { status: 'error'; data: null; error: string };
+type ScheduleState = {
+  key: string | null;
+  status: 'idle' | 'sending' | 'success' | 'error';
+  message: string | null;
+};
 
 type ChartMetric = 'sleepHours' | 'readiness' | 'hrv' | 'steps';
+const serverRefreshMs = 2 * 60 * 1_000;
+const clientPollMs = 30 * 1_000;
 
 const chartOptions: Array<{
   key: ChartMetric;
@@ -38,14 +45,14 @@ const chartOptions: Array<{
   {
     key: 'readiness',
     label: 'Readiness',
-    tone: '#0d6b62',
+    tone: '#9b79ff',
     unit: '',
     description: 'Lectura compuesta de recuperación y disponibilidad para entrenar.',
   },
   {
     key: 'hrv',
     label: 'HRV',
-    tone: '#1329a6',
+    tone: '#7f8cff',
     unit: '',
     description: 'Tendencia autonómica. Más útil como serie que como valor aislado.',
   },
@@ -86,6 +93,113 @@ function formatDuration(seconds: number) {
     return `${hours}h ${String(minutes).padStart(2, '0')}m`;
   }
   return `${minutes} min`;
+}
+
+function formatCountdown(ms: number) {
+  if (ms <= 0) {
+    return 'ahora';
+  }
+
+  const totalSeconds = Math.ceil(ms / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function formatTrainingStatus(value: string | null) {
+  if (!value) {
+    return 'Sin estado';
+  }
+
+  return value
+    .split('_')
+    .filter(Boolean)
+    .map((chunk) => chunk.charAt(0) + chunk.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function formatAdaptiveOverall(value: DashboardData['adaptive']['overall']) {
+  if (value === 'protect') {
+    return 'Proteger';
+  }
+
+  if (value === 'push') {
+    return 'Empujar';
+  }
+
+  return 'Consolidar';
+}
+
+function formatAdaptivePace(data: DashboardData['adaptive']['pace']) {
+  if (data.action === 'aflojar') {
+    return `+${data.secondsPerKm}s/km`;
+  }
+
+  if (data.action === 'acelerar') {
+    return `-${data.secondsPerKm}s/km`;
+  }
+
+  return 'Sin cambio';
+}
+
+function formatAdaptiveVolume(data: DashboardData['adaptive']['volume']) {
+  if (data.action === 'bajar') {
+    return `-${data.deltaKm} km`;
+  }
+
+  if (data.action === 'subir') {
+    return `+${data.deltaKm} km`;
+  }
+
+  return 'Sin cambio';
+}
+
+function formatVolumeRatio(value: number | null) {
+  if (value === null) {
+    return 'Sin dato';
+  }
+
+  return `${value.toFixed(2)}x`;
+}
+
+function formatComplianceRate(value: number | null) {
+  if (value === null) {
+    return 'Sin dato';
+  }
+
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatExecutionDelta(value: number | null) {
+  if (value === null || value === 0) {
+    return 'Sin dato';
+  }
+
+  if (value > 0) {
+    return `${value}s/km más lento`;
+  }
+
+  return `${Math.abs(value)}s/km más rápido`;
+}
+
+function formatDayStatus(status: DashboardData['plan']['weeks'][number]['days'][number]['status']) {
+  switch (status) {
+    case 'done':
+      return 'Hecho';
+    case 'missed':
+      return 'Perdido';
+    case 'moved':
+      return 'Movido';
+    case 'adjusted':
+      return 'Ajustado';
+    default:
+      return 'Plan';
+  }
 }
 
 function metricValue(value: number | null, suffix = '', digits = 0) {
@@ -188,8 +302,25 @@ function App() {
   const [selectedMetric, setSelectedMetric] = useState<ChartMetric>('sleepHours');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [scheduleState, setScheduleState] = useState<ScheduleState>({
+    key: null,
+    status: 'idle',
+    message: null,
+  });
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const refreshInFlightRef = useRef(false);
 
   const loadDashboard = async (refresh = false) => {
+    if (refreshInFlightRef.current) {
+      return;
+    }
+
+    refreshInFlightRef.current = true;
+    if (state.status !== 'loading') {
+      setIsRefreshing(true);
+    }
+
     try {
       const response = await fetch(`/api/dashboard${refresh ? '?refresh=1' : ''}`);
       const payload = await response.json();
@@ -213,11 +344,46 @@ function App() {
           error: error instanceof Error ? error.message : 'Fallo inesperado',
         });
       });
+    } finally {
+      refreshInFlightRef.current = false;
+      setIsRefreshing(false);
     }
   };
 
+  const pollDashboard = useEffectEvent(() => {
+    void loadDashboard();
+  });
+
   useEffect(() => {
     void loadDashboard();
+
+    const pollId = window.setInterval(() => {
+      pollDashboard();
+    }, clientPollMs);
+
+    const clockId = window.setInterval(() => {
+      setClockNow(Date.now());
+    }, 1_000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        pollDashboard();
+      }
+    };
+
+    const handleFocus = () => {
+      pollDashboard();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      window.clearInterval(pollId);
+      window.clearInterval(clockId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, []);
 
   if (state.status === 'loading') {
@@ -262,6 +428,54 @@ function App() {
   const selectedWeekQualityDays = selectedWeek
     ? selectedWeek.days.filter((day) => day.intensity === 'alto' || day.intensity === 'medio' || day.intensity === 'carrera').length
     : 0;
+  const nextSyncAt = new Date(data.fetchedAt).getTime() + serverRefreshMs;
+  const nextSyncIn = nextSyncAt - clockNow;
+  const syncTone = data.fallbackReason ? 'warning' : isRefreshing ? 'syncing' : 'live';
+  const syncLabel = data.fallbackReason ? 'Modo provisional' : isRefreshing ? 'Sincronizando' : 'Live';
+  const scheduleWorkout = async (weekIndex: number, dayIndex: number) => {
+    const day = data.plan.weeks[weekIndex]?.days[dayIndex];
+    if (!day) {
+      return;
+    }
+
+    const requestKey = `${weekIndex}-${dayIndex}`;
+    setScheduleState({
+      key: requestKey,
+      status: 'sending',
+      message: null,
+    });
+
+    try {
+      const response = await fetch('/api/plan/workout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          weekIndex,
+          dayIndex,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? 'No se pudo enviar el entrenamiento a Garmin.');
+      }
+
+      setScheduleState({
+        key: requestKey,
+        status: 'success',
+        message: `${day.title} ya está programado en Garmin para el ${day.date}.`,
+      });
+      void loadDashboard(true);
+    } catch (error) {
+      setScheduleState({
+        key: requestKey,
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Error inesperado al programar el entrenamiento.',
+      });
+    }
+  };
 
   return (
     <main className="app-shell">
@@ -277,6 +491,26 @@ function App() {
             <span>{data.athlete.daysToRace} días para carrera</span>
             {data.athlete.primaryDevice ? <span>{data.athlete.primaryDevice}</span> : null}
             {data.athlete.location ? <span>{data.athlete.location}</span> : null}
+            <span>Re-login Garmin automático activo</span>
+          </div>
+          <div className="hero-actions">
+            <div className={`sync-chip ${syncTone}`}>
+              <span className="metric-label">Estado</span>
+              <strong>{syncLabel}</strong>
+              <small>
+                Última sync {new Date(data.fetchedAt).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
+                {' · '}
+                Próxima en {formatCountdown(nextSyncIn)}
+              </small>
+            </div>
+            <button
+              className="action-button"
+              disabled={isRefreshing}
+              onClick={() => void loadDashboard(true)}
+              type="button"
+            >
+              {isRefreshing ? 'Actualizando...' : 'Refrescar ahora'}
+            </button>
           </div>
           {data.fallbackReason ? (
             <div className="warning-banner">
@@ -294,7 +528,7 @@ function App() {
           <div className="score-card">
             <span className="score-label">Readiness</span>
             <strong>{metricValue(data.overview.readiness)}</strong>
-            <small>{data.overview.trainingStatus ?? 'Sin estado de carga'}</small>
+            <small>{formatTrainingStatus(data.overview.trainingStatus)}</small>
           </div>
           <div className="score-card">
             <span className="score-label">Volumen</span>
@@ -335,6 +569,113 @@ function App() {
           <strong>{metricValue(data.overview.weightKg, ' kg', 1)}</strong>
           <small>Último registro en Garmin</small>
         </article>
+      </section>
+
+      <section className="panel adaptive-panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">Plan adaptativo</p>
+            <h2>Ajuste automático según tus últimas sesiones</h2>
+          </div>
+          <span className={`adaptive-badge ${data.adaptive.overall}`}>
+            {formatAdaptiveOverall(data.adaptive.overall)}
+          </span>
+        </div>
+
+        <p className="chart-description">{data.adaptive.primaryNeed}</p>
+
+        <div className="adaptive-grid">
+          <article className="stat-pill">
+            <span className="metric-label">Volumen</span>
+            <strong>{formatAdaptiveVolume(data.adaptive.volume)}</strong>
+            <small>{data.adaptive.volume.rationale}</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Ritmos</span>
+            <strong>{formatAdaptivePace(data.adaptive.pace)}</strong>
+            <small>{data.adaptive.pace.rationale}</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Recuperación</span>
+            <strong>{formatTrainingStatus(data.adaptive.recovery.action)}</strong>
+            <small>{data.adaptive.recovery.rationale}</small>
+          </article>
+        </div>
+
+        <div className="signal-strip">
+          <article className="stat-pill">
+            <span className="metric-label">Km 7d</span>
+            <strong>{metricValue(data.adaptive.signals.recent7Km, ' km', 1)}</strong>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Base semanal</span>
+            <strong>{metricValue(data.adaptive.signals.baselineWeeklyKm, ' km', 1)}</strong>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Ratio carga</span>
+            <strong>{formatVolumeRatio(data.adaptive.signals.volumeRatio)}</strong>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">ACWR</span>
+            <strong>{metricValue(data.adaptive.signals.acuteChronicRatio, '', 2)}</strong>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Calidad 14d</span>
+            <strong>{data.adaptive.signals.qualitySessions14d}</strong>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Tirada larga</span>
+            <strong>{metricValue(data.adaptive.signals.lastLongRunKm, ' km', 1)}</strong>
+          </article>
+        </div>
+
+        <div className="signal-strip">
+          <article className="stat-pill">
+            <span className="metric-label">Cumplimiento 7d</span>
+            <strong>{formatComplianceRate(data.adaptive.signals.complianceRate7d)}</strong>
+            <small>
+              {data.adaptive.signals.completedSessions7d}/{data.adaptive.signals.plannedSessions7d} sesiones
+            </small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Sesiones perdidas</span>
+            <strong>{data.adaptive.signals.missedSessions7d}</strong>
+            <small>{data.adaptive.signals.movedSessions7d} reubicadas</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Calidad real</span>
+            <strong>{formatExecutionDelta(data.adaptive.signals.qualityPaceDeltaSeconds)}</strong>
+            <small>vs ritmo previsto</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Rodajes suaves</span>
+            <strong>{formatExecutionDelta(data.adaptive.signals.easyPaceDeltaSeconds)}</strong>
+            <small>disciplina de recuperación</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Noches cortas</span>
+            <strong>{data.adaptive.signals.lowSleepDays7d}</strong>
+            <small>últimos 7 días</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Readiness bajo</span>
+            <strong>{data.adaptive.signals.lowReadinessDays7d}</strong>
+            <small>últimos 7 días</small>
+          </article>
+        </div>
+
+        {data.adaptive.signals.loadBalanceFeedback ? (
+          <p className="adaptive-footnote">
+            Señal de balance de carga Garmin:{' '}
+            <strong>{formatTrainingStatus(data.adaptive.signals.loadBalanceFeedback)}</strong>
+          </p>
+        ) : null}
+        {data.adaptive.signals.keySessionRelocatedTo ? (
+          <p className="adaptive-footnote">
+            La sesión clave perdida se ha reubicado automáticamente al{' '}
+            <strong>{data.adaptive.signals.keySessionRelocatedTo}</strong>.
+          </p>
+        ) : null}
       </section>
 
       <section className="insight-grid">
@@ -433,7 +774,7 @@ function App() {
                   {data.weeklyRunning.map((entry) => (
                     <Cell
                       key={entry.weekLabel}
-                      fill={entry.runCount >= 4 ? '#0d6b62' : '#c8722b'}
+                      fill={entry.runCount >= 4 ? '#9b79ff' : '#c8722b'}
                     />
                   ))}
                 </Bar>
@@ -454,15 +795,15 @@ function App() {
               <AreaChart data={data.vo2Trend}>
                 <defs>
                   <linearGradient id="vo2Fill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#1329a6" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#1329a6" stopOpacity={0} />
+                    <stop offset="5%" stopColor="#7f8cff" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="#7f8cff" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid stroke="rgba(29, 34, 42, 0.08)" vertical={false} />
                 <XAxis dataKey="label" tickLine={false} axisLine={false} />
                 <YAxis tickLine={false} axisLine={false} />
                 <Tooltip />
-                <Area type="monotone" dataKey="value" stroke="#1329a6" fill="url(#vo2Fill)" strokeWidth={2.5} />
+                <Area type="monotone" dataKey="value" stroke="#7f8cff" fill="url(#vo2Fill)" strokeWidth={2.5} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -493,9 +834,9 @@ function App() {
               <p className="eyebrow">Sesiones recientes</p>
               <h2>Detalle de rodaje</h2>
             </div>
-            <button className="action-button" onClick={() => void loadDashboard(true)}>
-              Refrescar
-            </button>
+            <span className="mini-status">
+              {isRefreshing ? 'Actualizando con Garmin...' : `Auto refresh cada ${Math.round(serverRefreshMs / 60_000)} min`}
+            </span>
           </div>
 
           {selectedRun ? (
@@ -547,7 +888,7 @@ function App() {
                 </div>
                 <p className="spotlight-note">
                   {selectedRun.trainingEffect
-                    ? `Training Effect ${selectedRun.trainingEffect.toFixed(1)}. Buena referencia para calibrar si la calidad está dejando el estímulo justo o demasiada fatiga.`
+                    ? `Training Effect ${selectedRun.trainingEffect.toFixed(1)}${selectedRun.trainingLoad ? ` · carga ${selectedRun.trainingLoad.toFixed(0)}` : ''}. Buena referencia para calibrar si la calidad está dejando el estímulo justo o demasiada fatiga.`
                     : 'Sin Training Effect disponible. Usa esta sesión como referencia de sensaciones, ritmo y deriva cardíaca.'}
                 </p>
               </aside>
@@ -575,6 +916,9 @@ function App() {
         </div>
 
         <p className="plan-summary">{data.plan.summary}</p>
+        <p className="adaptive-footnote">
+          El plan se recalcula solo con cada sync. Si un día futuro es compatible, puedes enviarlo a Garmin desde aquí.
+        </p>
 
         <div className="week-tabs">
           {data.plan.weeks.map((week, index) => (
@@ -621,29 +965,85 @@ function App() {
               </div>
 
               <div className="day-list">
-                {selectedWeek.days.map((day) => (
-                  <div className={`day-row intensity-${day.intensity}`} key={`${selectedWeek.title}-${day.date}`}>
-                    <div className="day-date">
-                      <strong>{day.weekday.slice(0, 3)}</strong>
-                      <span>{day.date}</span>
+                {selectedWeek.days.map((day, dayIndex) => {
+                  const dayKey = `${selectedWeekIndex}-${dayIndex}`;
+                  const isSending = scheduleState.status === 'sending' && scheduleState.key === dayKey;
+                  const showFeedback = scheduleState.key === dayKey && scheduleState.message;
+
+                  return (
+                    <div className={`day-row intensity-${day.intensity}`} key={`${selectedWeek.title}-${day.date}`}>
+                      <div className="day-date">
+                        <strong>{day.weekday.slice(0, 3)}</strong>
+                        <span>{day.date}</span>
+                      </div>
+                      <div className="day-main">
+                        <div className="day-title-row">
+                          <strong>{day.title}</strong>
+                          <span className={`day-status ${day.status}`}>{formatDayStatus(day.status)}</span>
+                        </div>
+                        <p>{day.notes}</p>
+                        {day.outcome ? <p className="day-outcome">{day.outcome}</p> : null}
+                        {showFeedback ? (
+                          <p className={`day-feedback ${scheduleState.status}`}>{scheduleState.message}</p>
+                        ) : null}
+                      </div>
+                      <div className="day-actions">
+                        <div className="day-distance">
+                          {day.distanceKm ? `${day.distanceKm.toFixed(1)} km` : 'Off'}
+                        </div>
+                        {day.canSendToGarmin && !data.fallbackReason ? (
+                          <button
+                            className="day-button"
+                            disabled={isSending}
+                            onClick={() => void scheduleWorkout(selectedWeekIndex, dayIndex)}
+                            type="button"
+                          >
+                            {isSending ? 'Enviando...' : 'Enviar a Garmin'}
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                    <div className="day-main">
-                      <strong>{day.title}</strong>
-                      <p>{day.notes}</p>
-                    </div>
-                    <div className="day-distance">
-                      {day.distanceKm ? `${day.distanceKm.toFixed(1)} km` : 'Off'}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
+            </div>
+
+            <div className="weeks-grid">
+              {data.plan.weeks.map((week, index) => {
+                const roadmapLongRun = longRun(week);
+                const roadmapKeySession = keySession(week);
+
+                return (
+                  <button
+                    className={`week-card ${selectedWeekIndex === index ? 'selected' : ''}`}
+                    key={`${week.title}-roadmap`}
+                    onClick={() => setSelectedWeekIndex(index)}
+                    type="button"
+                  >
+                    <div className="week-head">
+                      <div>
+                        <h3>{week.title}</h3>
+                        <p>{week.focus}</p>
+                      </div>
+                      <strong>{week.targetKm ? `${week.targetKm.toFixed(1)} km` : 'Carrera'}</strong>
+                    </div>
+                    <div className="roadmap-kpis">
+                      <span>Tirada {roadmapLongRun.distanceKm ? `${roadmapLongRun.distanceKm.toFixed(1)} km` : 'off'}</span>
+                      <span>Clave {roadmapKeySession.title}</span>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </>
         ) : null}
       </section>
 
       <footer className="footer-note">
-        <span>Última sincronización: {new Date(data.fetchedAt).toLocaleString()}</span>
+        <span>
+          Última sincronización: {new Date(data.fetchedAt).toLocaleString()} · La app consulta la API
+          local cada 30 s y el backend refresca Garmin cada {Math.round(serverRefreshMs / 60_000)} min.
+        </span>
       </footer>
     </main>
   );
