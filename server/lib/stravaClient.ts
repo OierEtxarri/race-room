@@ -160,6 +160,13 @@ export async function getStravaAthlete(session: StravaSessionRecord): Promise<Re
   return authorizedGet<Record<string, unknown>>(session, '/athlete');
 }
 
+export async function getStravaActivity(
+  session: StravaSessionRecord,
+  activityId: number,
+): Promise<Record<string, unknown>> {
+  return authorizedGet<Record<string, unknown>>(session, `/activities/${activityId}`);
+}
+
 export async function getStravaAthleteStats(
   session: StravaSessionRecord,
   athleteId = session.athleteId,

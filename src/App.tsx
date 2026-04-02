@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { DashboardData, SessionPayload, UserGoal } from './types';
+import type { ActivityRoute, DashboardData, SessionPayload, UserGoal } from './types';
 import './App.css';
 
 type AsyncState =
@@ -30,6 +30,14 @@ type LoginState =
   | { status: 'hydrating'; error: null }
   | { status: 'error'; error: string };
 type LoginProvider = 'garmin' | 'strava';
+type RouteState =
+  | { status: 'idle'; data: null; error: null }
+  | { status: 'loading'; data: null; error: null }
+  | { status: 'ready'; data: ActivityRoute; error: null }
+  | { status: 'error'; data: null; error: string };
+type RunOverlayTemplateId = 'routeGlass';
+type DashboardSectionId = 'summary' | 'fitness' | 'plan' | 'advice' | 'sessions' | 'insights';
+type AvatarSize = 'sm' | 'lg';
 
 type ChartMetric = 'sleepHours' | 'readiness' | 'hrv' | 'steps';
 const serverRefreshMs = 2 * 60 * 1_000;
@@ -37,9 +45,20 @@ const clientPollMs = 30 * 1_000;
 const sessionStorageKey = 'garmin_race_room_session_id';
 const sessionProviderStorageKey = 'garmin_race_room_session_provider';
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+const idleRouteState: RouteState = {
+  status: 'idle',
+  data: null,
+  error: null,
+};
 const defaultGoal: UserGoal = {
   raceDate: '2026-05-10',
   distanceKm: 21.1,
+};
+const runOverlayTemplate = {
+  id: 'routeGlass' as const,
+  label: 'Glass Profile',
+  headline: 'Blur card',
+  description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
 };
 
 const chartOptions: Array<{
@@ -52,31 +71,43 @@ const chartOptions: Array<{
   {
     key: 'sleepHours',
     label: 'Sueño',
-    tone: '#f49d37',
+    tone: '#9bc7ff',
     unit: ' h',
     description: 'Horas de sueño útiles para asimilar la carga.',
   },
   {
     key: 'readiness',
     label: 'Readiness',
-    tone: '#9b79ff',
+    tone: '#ffffff',
     unit: '',
     description: 'Lectura compuesta de recuperación y disponibilidad para entrenar.',
   },
   {
     key: 'hrv',
     label: 'HRV',
-    tone: '#7f8cff',
+    tone: '#d7e4ff',
     unit: '',
     description: 'Tendencia autonómica. Más útil como serie que como valor aislado.',
   },
   {
     key: 'steps',
     label: 'Pasos',
-    tone: '#c8722b',
+    tone: '#7fd1ff',
     unit: '',
     description: 'Movimiento diario para detectar fatiga o sedentarismo entre sesiones.',
   },
+];
+const dashboardSections: Array<{
+  id: DashboardSectionId;
+  label: string;
+  note: string;
+}> = [
+  { id: 'summary', label: 'Resumen', note: 'Visión rápida y métricas clave' },
+  { id: 'sessions', label: 'Sesiones', note: 'Rodajes recientes y export glass' },
+  { id: 'plan', label: 'Plan', note: 'Semanas, sesiones y roadmap' },
+  { id: 'fitness', label: 'Fitness', note: 'Estado actual y ajuste adaptativo' },
+  { id: 'insights', label: 'Tendencias', note: 'Métricas y evolución semanal' },
+  { id: 'advice', label: 'Consejos', note: 'Qué priorizar ahora mismo' },
 ];
 
 function BrandSpinner({ label, detail }: { label: string; detail: string }) {
@@ -90,6 +121,1283 @@ function BrandSpinner({ label, detail }: { label: string; detail: string }) {
       <p>{detail}</p>
     </div>
   );
+}
+
+function AthleteAvatar({
+  name,
+  avatarUrl,
+  size = 'sm',
+}: {
+  name: string;
+  avatarUrl: string | null;
+  size?: AvatarSize;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [avatarUrl]);
+
+  if (avatarUrl && !failed) {
+    return (
+      <span className={`athlete-avatar ${size}`}>
+        <img alt={`Perfil de ${name}`} onError={() => setFailed(true)} src={avatarUrl} />
+      </span>
+    );
+  }
+
+  return (
+    <span className={`athlete-avatar ${size} fallback`} aria-hidden="true">
+      {athleteInitials(name)}
+    </span>
+  );
+}
+
+function RouteMiniMap({
+  route,
+  title,
+}: {
+  route: ActivityRoute;
+  title: string;
+}) {
+  const points = route.points;
+
+  if (points.length < 2) {
+    return (
+      <div className="route-map empty">
+        <span>[ SIN RUTA ]</span>
+      </div>
+    );
+  }
+
+  const latitudes = points.map((point) => point[0]);
+  const longitudes = points.map((point) => point[1]);
+  const minLat = Math.min(...latitudes);
+  const maxLat = Math.max(...latitudes);
+  const minLng = Math.min(...longitudes);
+  const maxLng = Math.max(...longitudes);
+  const latSpan = Math.max(maxLat - minLat, 0.0001);
+  const lngSpan = Math.max(maxLng - minLng, 0.0001);
+  const padding = 16;
+  const width = 320;
+  const height = 192;
+
+  const svgPoints = points
+    .map(([lat, lng]) => {
+      const x = padding + ((lng - minLng) / lngSpan) * (width - padding * 2);
+      const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(' ');
+
+  const start = svgPoints.split(' ')[0]?.split(',') ?? ['0', '0'];
+  const end = svgPoints.split(' ').at(-1)?.split(',') ?? ['0', '0'];
+
+  return (
+    <div className="route-map" aria-label={`Mapa del recorrido de ${title}`}>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-hidden="true">
+        <defs>
+          <pattern id="route-grid" width="16" height="16" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="1" fill="rgba(255,255,255,0.1)" />
+          </pattern>
+        </defs>
+        <rect width={width} height={height} fill="url(#route-grid)" />
+        <polyline points={svgPoints} fill="none" stroke="rgba(158, 215, 255, 0.96)" strokeWidth="2.5" />
+        <circle cx={start[0]} cy={start[1]} r="4" fill="rgba(255,255,255,0.96)" />
+        <circle cx={end[0]} cy={end[1]} r="4" fill="rgba(168, 225, 255, 1)" />
+      </svg>
+      <div className="route-map-meta">
+        <span>START</span>
+        <span>{route.source.toUpperCase()}</span>
+        <span>END</span>
+      </div>
+    </div>
+  );
+}
+
+function projectRoutePoints(points: ActivityRoute['points'], width: number, height: number, padding: number) {
+  const latitudes = points.map((point) => point[0]);
+  const longitudes = points.map((point) => point[1]);
+  const minLat = Math.min(...latitudes);
+  const maxLat = Math.max(...latitudes);
+  const minLng = Math.min(...longitudes);
+  const maxLng = Math.max(...longitudes);
+  const latSpan = Math.max(maxLat - minLat, 0.0001);
+  const lngSpan = Math.max(maxLng - minLng, 0.0001);
+
+  return points.map(([lat, lng]) => {
+    const x = padding + ((lng - minLng) / lngSpan) * (width - padding * 2);
+    const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
+    return [x, y] as const;
+  });
+}
+
+function wrapCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines = 3,
+) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (context.measureText(candidate).width <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+    }
+    current = word;
+
+    if (lines.length >= maxLines - 1) {
+      break;
+    }
+  }
+
+  if (current && lines.length < maxLines) {
+    lines.push(current);
+  }
+
+  if (lines.length === maxLines && words.join(' ') !== lines.join(' ')) {
+    lines[maxLines - 1] = `${lines[maxLines - 1].replace(/[.,;:!?-]*$/, '')}…`;
+  }
+
+  lines.forEach((line, index) => {
+    context.fillText(line, x, y + index * lineHeight);
+  });
+}
+
+function drawRoundedRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+function fillRoundedPanel(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  options: {
+    radius?: number;
+    fill?: string;
+    stroke?: string;
+    lineWidth?: number;
+  } = {},
+) {
+  const radius = options.radius ?? 24;
+  drawRoundedRect(context, x, y, width, height, radius);
+
+  if (options.fill) {
+    context.fillStyle = options.fill;
+    context.fill();
+  }
+
+  if (options.stroke) {
+    context.strokeStyle = options.stroke;
+    context.lineWidth = options.lineWidth ?? 1.5;
+    context.stroke();
+  }
+}
+
+function drawMetricCard(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  label: string,
+  value: string,
+  accent = false,
+) {
+  fillRoundedPanel(context, x, y, width, height, {
+    radius: 26,
+    fill: '#101010',
+    stroke: accent ? '#D71921' : '#2F2F2F',
+    lineWidth: accent ? 2 : 1.5,
+  });
+
+  if (accent) {
+    context.fillStyle = 'rgba(215,25,33,0.12)';
+    fillRoundedPanel(context, x + 10, y + 10, width - 20, height - 20, {
+      radius: 18,
+      fill: 'rgba(215,25,33,0.08)',
+    });
+  }
+
+  context.fillStyle = '#999999';
+  context.font = '500 20px "Space Mono", monospace';
+  context.fillText(label, x + 28, y + 40);
+  context.fillStyle = '#FFFFFF';
+  context.font = accent ? '600 54px "Doto", "Space Mono", monospace' : '700 42px "Space Grotesk", sans-serif';
+  context.fillText(value, x + 28, y + 104);
+}
+
+function drawOverlayPill(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  text: string,
+  options: {
+    fill?: string;
+    stroke?: string;
+    textColor?: string;
+    paddingX?: number;
+    height?: number;
+    radius?: number;
+    font?: string;
+  } = {},
+) {
+  context.save();
+  context.font = options.font ?? '500 18px "Space Mono", monospace';
+  const paddingX = options.paddingX ?? 24;
+  const height = options.height ?? 54;
+  const radius = options.radius ?? 999;
+  const textWidth = context.measureText(text).width;
+  const width = textWidth + paddingX * 2;
+
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    fill: options.fill ?? 'rgba(0,0,0,0.22)',
+    stroke: options.stroke ?? 'rgba(255,255,255,0.14)',
+  });
+  context.fillStyle = options.textColor ?? 'rgba(255,255,255,0.76)';
+  context.textBaseline = 'middle';
+  context.fillText(text, x + paddingX, y + height / 2 + 1);
+  context.restore();
+  return width;
+}
+
+function measureOverlayPillWidth(
+  context: CanvasRenderingContext2D,
+  text: string,
+  options: {
+    paddingX?: number;
+    font?: string;
+  } = {},
+) {
+  context.save();
+  context.font = options.font ?? '500 18px "Space Mono", monospace';
+  const paddingX = options.paddingX ?? 24;
+  const width = context.measureText(text).width + paddingX * 2;
+  context.restore();
+  return width;
+}
+
+function drawOverlayStat(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  label: string,
+  value: string,
+  options: {
+    align?: CanvasTextAlign;
+    labelFont?: string;
+    valueFont?: string;
+    labelColor?: string;
+    valueColor?: string;
+  } = {},
+) {
+  const align = options.align ?? 'left';
+  context.save();
+  context.textAlign = align;
+  context.fillStyle = options.labelColor ?? 'rgba(255,255,255,0.72)';
+  context.font = options.labelFont ?? '500 20px "Space Mono", monospace';
+  context.fillText(label, x, y);
+  context.fillStyle = options.valueColor ?? '#FFFFFF';
+  context.font = options.valueFont ?? '700 52px "Space Grotesk", sans-serif';
+  context.fillText(value, x, y + 58);
+  context.restore();
+}
+
+function drawShadowedText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  options: {
+    fillStyle?: string;
+    font?: string;
+    shadowColor?: string;
+    shadowBlur?: number;
+    shadowOffsetY?: number;
+  } = {},
+) {
+  context.save();
+  context.fillStyle = options.fillStyle ?? '#FFFFFF';
+  if (options.font) {
+    context.font = options.font;
+  }
+  context.shadowColor = options.shadowColor ?? 'rgba(0,0,0,0.36)';
+  context.shadowBlur = options.shadowBlur ?? 24;
+  context.shadowOffsetY = options.shadowOffsetY ?? 8;
+  context.fillText(text, x, y);
+  context.restore();
+}
+
+function drawShadowedWrappedText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number,
+  options: {
+    fillStyle?: string;
+    font?: string;
+    shadowColor?: string;
+    shadowBlur?: number;
+    shadowOffsetY?: number;
+  } = {},
+) {
+  context.save();
+  context.fillStyle = options.fillStyle ?? '#FFFFFF';
+  if (options.font) {
+    context.font = options.font;
+  }
+  context.shadowColor = options.shadowColor ?? 'rgba(0,0,0,0.36)';
+  context.shadowBlur = options.shadowBlur ?? 24;
+  context.shadowOffsetY = options.shadowOffsetY ?? 8;
+  wrapCanvasText(context, text, x, y, maxWidth, lineHeight, maxLines);
+  context.restore();
+}
+
+function formatDistanceCompact(distanceKm: number) {
+  return Math.abs(distanceKm - Math.round(distanceKm)) < 0.12 ? String(Math.round(distanceKm)) : distanceKm.toFixed(1);
+}
+
+function athleteInitials(name: string) {
+  const tokens = name
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return tokens.map((token) => token[0]?.toUpperCase() ?? '').join('') || 'GR';
+}
+
+function loadImageElement(source: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.decoding = 'async';
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('No se pudo cargar la imagen.'));
+    image.src = source;
+  });
+}
+
+async function resolveAthleteAvatarAsset(avatarPath: string | null, sessionId: string | null) {
+  if (!avatarPath) {
+    return {
+      image: null,
+      cleanup: () => undefined,
+    };
+  }
+
+  const headers = new Headers();
+  if (sessionId) {
+    headers.set('X-Session-Id', sessionId);
+  }
+
+  const response = await fetch(absoluteApiUrl(avatarPath), {
+    headers,
+    credentials: 'include',
+  }).catch(() => null);
+
+  if (!response?.ok) {
+    return {
+      image: null,
+      cleanup: () => undefined,
+    };
+  }
+
+  const blobUrl = URL.createObjectURL(await response.blob());
+
+  try {
+    const image = await loadImageElement(blobUrl);
+    return {
+      image,
+      cleanup: () => URL.revokeObjectURL(blobUrl),
+    };
+  } catch {
+    URL.revokeObjectURL(blobUrl);
+    return {
+      image: null,
+      cleanup: () => undefined,
+    };
+  }
+}
+
+function buildOverlayHeadline(name: string) {
+  const cleaned = name
+    .toLowerCase()
+    .replace(/[_]+/g, ' ')
+    .replace(/[^a-z0-9\s-]/gi, ' ')
+    .replace(/\b(run|carrera|rodaje|entrenamiento|workout)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const firstToken = cleaned.split(/[\s-]+/).filter(Boolean)[0] ?? 'training';
+  return `${firstToken} | run`;
+}
+
+function buildRunDescription(run: DashboardData['recentRuns'][number]) {
+  if (run.trainingEffect !== null) {
+    return `Training Effect ${run.trainingEffect.toFixed(1)} · ${formatPace(run.paceSecondsPerKm) ?? 'sin dato'}`;
+  }
+
+  if (run.averageHeartRate !== null) {
+    return `Rodaje controlado · ${run.averageHeartRate} bpm medios · ${metricValue(run.elevationGain, ' m')} de desnivel`;
+  }
+
+  return `Sesión de ${run.distanceKm.toFixed(1)} km en ${formatDuration(run.durationSeconds).toLowerCase()}.`;
+}
+
+function drawGlassPanel(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius = 34,
+) {
+  context.save();
+  drawRoundedRect(context, x, y, width, height, radius);
+  context.clip();
+
+  const baseGradient = context.createLinearGradient(x, y, x, y + height);
+  baseGradient.addColorStop(0, 'rgba(58,58,62,0.68)');
+  baseGradient.addColorStop(1, 'rgba(28,28,30,0.54)');
+  context.fillStyle = baseGradient;
+  context.fillRect(x, y, width, height);
+
+  const glowA = context.createRadialGradient(x + width * 0.22, y + height * 0.2, 0, x + width * 0.22, y + height * 0.2, width * 0.38);
+  glowA.addColorStop(0, 'rgba(255,255,255,0.16)');
+  glowA.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = glowA;
+  context.fillRect(x, y, width, height);
+
+  const glowB = context.createRadialGradient(x + width * 0.78, y + height * 0.72, 0, x + width * 0.78, y + height * 0.72, width * 0.32);
+  glowB.addColorStop(0, 'rgba(255,255,255,0.1)');
+  glowB.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = glowB;
+  context.fillRect(x, y, width, height);
+  context.restore();
+
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    stroke: 'rgba(255,255,255,0.72)',
+    lineWidth: 2,
+  });
+
+  context.save();
+  context.beginPath();
+  context.moveTo(x + radius, y + 1);
+  context.lineTo(x + width - radius, y + 1);
+  context.strokeStyle = 'rgba(255,255,255,0.34)';
+  context.lineWidth = 1.5;
+  context.stroke();
+  context.restore();
+}
+
+function drawSignatureRouteOverlay(
+  context: CanvasRenderingContext2D,
+  route: ActivityRoute,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  const projected = projectRoutePoints(route.points, width, height, 14);
+
+  context.save();
+  context.translate(x, y);
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+
+  context.strokeStyle = 'rgba(141, 212, 255, 0.2)';
+  context.lineWidth = 20;
+  context.beginPath();
+  projected.forEach(([pointX, pointY], index) => {
+    if (index === 0) {
+      context.moveTo(pointX, pointY);
+    } else {
+      context.lineTo(pointX, pointY);
+    }
+  });
+  context.stroke();
+
+  context.strokeStyle = '#9ED7FF';
+  context.lineWidth = 7;
+  context.beginPath();
+  projected.forEach(([pointX, pointY], index) => {
+    if (index === 0) {
+      context.moveTo(pointX, pointY);
+    } else {
+      context.lineTo(pointX, pointY);
+    }
+  });
+  context.stroke();
+
+  const [startX, startY] = projected[0]!;
+  const [endX, endY] = projected.at(-1)!;
+  context.fillStyle = '#FFFFFF';
+  context.beginPath();
+  context.arc(startX, startY, 6, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#BEE8FF';
+  context.beginPath();
+  context.arc(endX, endY, 7, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
+}
+
+function drawRouteOverlay(input: {
+  context: CanvasRenderingContext2D;
+  route: ActivityRoute;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  panel?: boolean;
+  labelLeft?: string;
+  labelRight?: string;
+}) {
+  const { context, route, x, y, width, height } = input;
+
+  if (input.panel !== false) {
+    fillRoundedPanel(context, x, y, width, height, {
+      radius: 30,
+      fill: 'rgba(0,0,0,0.22)',
+      stroke: 'rgba(255,255,255,0.14)',
+      lineWidth: 1.5,
+    });
+  }
+
+  const projected = projectRoutePoints(route.points, width, height, input.panel === false ? 18 : 56);
+  context.save();
+  context.translate(x, y);
+  context.strokeStyle = 'rgba(0,0,0,0.22)';
+  context.lineWidth = 18;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+  projected.forEach(([pointX, pointY], index) => {
+    if (index === 0) {
+      context.moveTo(pointX, pointY);
+    } else {
+      context.lineTo(pointX, pointY);
+    }
+  });
+  context.stroke();
+
+  context.strokeStyle = '#FFFFFF';
+  context.lineWidth = 7;
+  context.beginPath();
+  projected.forEach(([pointX, pointY], index) => {
+    if (index === 0) {
+      context.moveTo(pointX, pointY);
+    } else {
+      context.lineTo(pointX, pointY);
+    }
+  });
+  context.stroke();
+
+  const [startX, startY] = projected[0]!;
+  const [endX, endY] = projected.at(-1)!;
+  context.fillStyle = '#FFFFFF';
+  context.beginPath();
+  context.arc(startX, startY, 9, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#D71921';
+  context.beginPath();
+  context.arc(endX, endY, 10, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = 'rgba(255,255,255,0.84)';
+  context.lineWidth = 2;
+  context.beginPath();
+  context.arc(endX, endY, 18, 0, Math.PI * 2);
+  context.stroke();
+  context.restore();
+
+  if (input.labelLeft || input.labelRight) {
+    context.fillStyle = 'rgba(255,255,255,0.62)';
+    context.font = '500 18px "Space Mono", monospace';
+    if (input.labelLeft) {
+      context.fillText(input.labelLeft, x + 24, y + height - 22);
+    }
+    if (input.labelRight) {
+      const widthText = context.measureText(input.labelRight).width;
+      context.fillText(input.labelRight, x + width - 24 - widthText, y + height - 22);
+    }
+  }
+}
+
+function renderAuraHeroOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  const headline = buildOverlayHeadline(input.run.name);
+
+  fillRoundedPanel(context, 68, 72, 226, 56, {
+    radius: 999,
+    fill: 'rgba(0,0,0,0.24)',
+    stroke: 'rgba(255,255,255,0.14)',
+  });
+  context.fillStyle = 'rgba(255,255,255,0.74)';
+  context.font = '500 18px "Space Mono", monospace';
+  context.fillText('[ AURA OVERLAY ]', 96, 108);
+
+  drawShadowedText(context, headline, 70, 272, {
+    font: '500 110px "Space Grotesk", sans-serif',
+    fillStyle: '#FFFFFF',
+    shadowBlur: 26,
+  });
+
+  context.save();
+  context.fillStyle = 'rgba(0,0,0,0.30)';
+  context.font = '700 300px "Space Grotesk", sans-serif';
+  context.fillText(`${formatDistanceCompact(input.run.distanceKm)}KM`, 84, 930);
+  context.restore();
+
+  drawMetricCard(context, 76, 1010, 290, 128, 'DISTANCE', `${input.run.distanceKm.toFixed(1)} km`);
+  drawMetricCard(context, 392, 1010, 290, 128, 'TIME', formatDuration(input.run.durationSeconds));
+  drawMetricCard(context, 708, 1010, 290, 128, 'PACE', formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato', true);
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 76,
+    y: 1218,
+    width: 320,
+    height: 196,
+    labelLeft: 'ROUTE',
+    labelRight: input.providerLabel.toUpperCase(),
+  });
+
+  fillRoundedPanel(context, 824, 1366, 186, 54, {
+    radius: 999,
+    fill: 'rgba(0,0,0,0.20)',
+    stroke: 'rgba(255,255,255,0.12)',
+  });
+  context.fillStyle = 'rgba(255,255,255,0.76)';
+  context.font = '500 18px "Space Mono", monospace';
+  context.fillText(input.athleteName.toUpperCase(), 852, 1401);
+
+  context.fillStyle = 'rgba(255,255,255,0.64)';
+  context.font = '500 18px "Space Mono", monospace';
+  context.fillText(input.run.date, 78, 1458);
+}
+
+function renderFloatingStatsOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  drawOverlayPill(context, 84, 84, 'MAP STATS');
+  drawShadowedText(context, buildOverlayHeadline(input.run.name), 84, 228, {
+    font: '500 84px "Space Grotesk", sans-serif',
+  });
+
+  fillRoundedPanel(context, 88, 312, 432, 520, {
+    radius: 34,
+    fill: 'rgba(18,18,18,0.38)',
+    stroke: 'rgba(255,255,255,0.14)',
+  });
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 112,
+    y: 346,
+    width: 384,
+    height: 452,
+    panel: false,
+  });
+
+  drawOverlayPill(context, 112, 770, 'MAP');
+  drawOverlayPill(context, 364, 770, input.providerLabel.toUpperCase(), {
+    stroke: 'rgba(215,25,33,0.88)',
+  });
+
+  drawGlassPanel(context, 262, 1082, 560, 290, 38);
+  const gridItems = [
+    { x: 320, y: 1160, label: 'DISTANCE', value: `${input.run.distanceKm.toFixed(1)} km` },
+    { x: 588, y: 1160, label: 'PACE', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+    { x: 320, y: 1290, label: 'TIME', value: formatDuration(input.run.durationSeconds) },
+    { x: 588, y: 1290, label: 'ELEV', value: metricValue(input.run.elevationGain, ' m') },
+  ];
+
+  gridItems.forEach((item) => {
+    drawOverlayStat(context, item.x, item.y, item.label, item.value, {
+      valueFont: '700 42px "Space Grotesk", sans-serif',
+    });
+  });
+
+  context.fillStyle = 'rgba(255,255,255,0.68)';
+  context.font = '500 18px "Space Mono", monospace';
+  context.fillText(input.run.date, 88, 1708);
+  context.fillText(input.athleteName.toUpperCase(), 818, 1708);
+}
+
+function renderMonolithKmOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  const distanceText = `${formatDistanceCompact(input.run.distanceKm)}KM`;
+
+  context.fillStyle = 'rgba(255,255,255,0.88)';
+  context.font = '500 28px "Space Mono", monospace';
+  const title = `${input.run.name.toUpperCase()} | ${new Date(input.run.date).getFullYear()}`;
+  const titleWidth = context.measureText(title).width;
+  context.fillText(title, (1080 - titleWidth) / 2, 108);
+
+  context.save();
+  context.fillStyle = 'rgba(0,0,0,0.32)';
+  context.font = '700 304px "Space Grotesk", sans-serif';
+  context.fillText(distanceText, 86, 1018);
+  context.restore();
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 116,
+    y: 380,
+    width: 850,
+    height: 430,
+    panel: false,
+  });
+
+  const rails = [
+    { x: 260, label: `DISTANCE · ${input.run.distanceKm.toFixed(1)} KM` },
+    { x: 520, label: `TIME · ${formatDuration(input.run.durationSeconds).toUpperCase()}` },
+    { x: 770, label: `PACE · ${(formatPace(input.run.paceSecondsPerKm) ?? 'SIN DATO').toUpperCase()}` },
+  ];
+
+  rails.forEach((rail) => {
+    fillRoundedPanel(context, rail.x - 40, 840, 74, 420, {
+      radius: 18,
+      fill: 'rgba(0,0,0,0.20)',
+      stroke: 'rgba(255,255,255,0.12)',
+    });
+    context.save();
+    context.translate(rail.x, 1212);
+    context.rotate(-Math.PI / 2);
+    context.fillStyle = 'rgba(255,255,255,0.92)';
+    context.font = '500 24px "Space Mono", monospace';
+    context.fillText(rail.label, 0, 0);
+    context.restore();
+  });
+
+  fillRoundedPanel(context, 126, 1510, 828, 68, {
+    radius: 999,
+    fill: 'rgba(0,0,0,0.18)',
+    stroke: 'rgba(255,255,255,0.12)',
+  });
+  context.fillStyle = 'rgba(255,255,255,0.72)';
+  context.font = '500 20px "Space Mono", monospace';
+  context.fillText(`${input.run.date}  •  ${input.providerLabel.toUpperCase()}  •  ${input.athleteName.toUpperCase()}`, 164, 1554);
+}
+
+function renderSplitEditorialOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  drawOverlayPill(context, 80, 84, 'SPLIT EDITORIAL');
+  drawShadowedWrappedText(context, input.run.name.toLowerCase(), 82, 236, 420, 96, 2, {
+    font: '500 86px "Space Grotesk", sans-serif',
+    fillStyle: '#FFFFFF',
+  });
+
+  context.save();
+  context.fillStyle = 'rgba(0,0,0,0.24)';
+  context.font = '700 250px "Doto", "Space Mono", monospace';
+  context.fillText('PACE', 70, 1030);
+  context.restore();
+
+  drawOverlayStat(context, 86, 1078, 'PACE', formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato', {
+    valueFont: '700 70px "Space Grotesk", sans-serif',
+  });
+  drawOverlayStat(context, 86, 1232, 'TIME', formatDuration(input.run.durationSeconds), {
+    valueFont: '700 56px "Space Grotesk", sans-serif',
+  });
+  drawOverlayStat(context, 86, 1362, 'DISTANCE', `${input.run.distanceKm.toFixed(1)} km`, {
+    valueFont: '700 56px "Space Grotesk", sans-serif',
+  });
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 540,
+    y: 178,
+    width: 420,
+    height: 610,
+    panel: false,
+  });
+
+  fillRoundedPanel(context, 544, 930, 416, 214, {
+    radius: 34,
+    fill: 'rgba(0,0,0,0.18)',
+    stroke: 'rgba(255,255,255,0.14)',
+  });
+  drawOverlayStat(context, 580, 992, 'AVG HR', input.run.averageHeartRate ? `${input.run.averageHeartRate} bpm` : 'Sin FC', {
+    valueFont: '700 44px "Space Grotesk", sans-serif',
+  });
+  drawOverlayStat(context, 580, 1108, 'ELEV', metricValue(input.run.elevationGain, ' m'), {
+    valueFont: '700 44px "Space Grotesk", sans-serif',
+  });
+
+  drawOverlayPill(context, 82, 1734, `${input.run.date}  •  ${input.providerLabel.toUpperCase()}`);
+  const athleteWidth = measureOverlayPillWidth(context, input.athleteName.toUpperCase());
+  drawOverlayPill(context, 1080 - 82 - athleteWidth, 1734, input.athleteName.toUpperCase());
+}
+
+function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  athleteLocation?: string | null;
+  athleteAvatarImage?: HTMLImageElement | null;
+  providerLabel: string;
+}) {
+  const subtitleParts = [
+    input.run.timeLabel ? `${input.run.timeLabel}` : null,
+    input.athleteLocation,
+  ].filter(Boolean);
+  const subtitle = subtitleParts.join(' · ');
+  const description = buildRunDescription(input.run);
+
+  drawGlassPanel(context, 84, 122, 912, 520, 40);
+
+  context.save();
+  const avatarX = 160;
+  const avatarY = 206;
+  context.beginPath();
+  context.arc(avatarX, avatarY, 42, 0, Math.PI * 2);
+  context.closePath();
+
+  if (input.athleteAvatarImage) {
+    context.save();
+    context.clip();
+    context.drawImage(input.athleteAvatarImage, avatarX - 42, avatarY - 42, 84, 84);
+    context.restore();
+  } else {
+    const avatarGradient = context.createLinearGradient(avatarX - 42, avatarY - 42, avatarX + 42, avatarY + 42);
+    avatarGradient.addColorStop(0, '#67B6FF');
+    avatarGradient.addColorStop(1, '#4D6BFF');
+    context.fillStyle = avatarGradient;
+    context.fill();
+  }
+
+  context.strokeStyle = 'rgba(255,255,255,0.52)';
+  context.lineWidth = 2;
+  context.beginPath();
+  context.arc(avatarX, avatarY, 42, 0, Math.PI * 2);
+  context.stroke();
+
+  if (!input.athleteAvatarImage) {
+    context.fillStyle = '#FFFFFF';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.font = '700 32px "Space Grotesk", sans-serif';
+    context.fillText(athleteInitials(input.athleteName), avatarX, avatarY + 1);
+  }
+  context.restore();
+
+  context.fillStyle = '#FFFFFF';
+  context.font = '600 38px "Space Grotesk", sans-serif';
+  context.fillText(input.athleteName, 228, 192);
+  context.fillStyle = 'rgba(255,255,255,0.76)';
+  context.font = '500 22px "Space Grotesk", sans-serif';
+  context.fillText(subtitle || input.providerLabel, 228, 234);
+
+  context.fillStyle = '#FFFFFF';
+  context.font = '700 70px "Space Grotesk", sans-serif';
+  context.fillText(input.run.name, 124, 358);
+
+  context.fillStyle = 'rgba(255,255,255,0.84)';
+  context.font = '500 30px "Space Grotesk", sans-serif';
+  wrapCanvasText(context, description, 124, 418, 740, 40, 2);
+
+  const statColumns = [
+    { x: 124, label: 'Distancia', value: `${input.run.distanceKm.toFixed(1)} km` },
+    { x: 394, label: 'Tiempo', value: formatDuration(input.run.durationSeconds) },
+    { x: 646, label: 'Ritmo', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+  ];
+
+  statColumns.forEach((item) => {
+    context.fillStyle = 'rgba(255,255,255,0.7)';
+    context.font = '500 22px "Space Grotesk", sans-serif';
+    context.fillText(item.label, item.x, 546);
+    context.fillStyle = '#FFFFFF';
+    context.font = '700 46px "Space Grotesk", sans-serif';
+    context.fillText(item.value, item.x, 596);
+  });
+
+  drawSignatureRouteOverlay(context, input.route, 312, 820, 456, 336);
+
+  context.fillStyle = 'rgba(255,255,255,0.82)';
+  context.font = '700 36px "Space Grotesk", sans-serif';
+  context.fillText(input.providerLabel.toUpperCase(), 424, 1264);
+}
+
+function renderRibbonDataOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  context.save();
+  context.fillStyle = 'rgba(0,0,0,0.24)';
+  context.font = '700 278px "Doto", "Space Mono", monospace';
+  context.fillText(formatDistanceCompact(input.run.distanceKm), 72, 462);
+  context.restore();
+
+  drawOverlayPill(context, 82, 86, 'RIBBON DATA');
+  drawShadowedText(context, 'training overlay', 82, 598, {
+    font: '500 74px "Space Grotesk", sans-serif',
+  });
+  drawShadowedWrappedText(context, input.run.name, 82, 690, 520, 58, 2, {
+    font: '500 50px "Space Grotesk", sans-serif',
+  });
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 576,
+    y: 116,
+    width: 410,
+    height: 470,
+    labelLeft: 'ROUTE',
+    labelRight: input.providerLabel.toUpperCase(),
+  });
+
+  fillRoundedPanel(context, 70, 1488, 940, 248, {
+    radius: 42,
+    fill: 'rgba(0,0,0,0.22)',
+    stroke: 'rgba(255,255,255,0.15)',
+  });
+
+  const ribbonColumns = [
+    { x: 132, label: 'DISTANCE', value: `${input.run.distanceKm.toFixed(1)} km` },
+    { x: 420, label: 'TIME', value: formatDuration(input.run.durationSeconds) },
+    { x: 708, label: 'PACE', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+  ];
+
+  ribbonColumns.forEach((column, index) => {
+    drawOverlayStat(context, column.x, 1568, column.label, column.value, {
+      valueFont: '700 46px "Space Grotesk", sans-serif',
+    });
+    if (index < ribbonColumns.length - 1) {
+      context.fillStyle = 'rgba(255,255,255,0.12)';
+      context.fillRect(column.x + 224, 1536, 1.5, 148);
+    }
+  });
+
+  drawOverlayPill(context, 82, 1408, `${input.run.date}  •  ${input.athleteName.toUpperCase()}`);
+}
+
+function renderStudioCapsuleOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  drawOverlayPill(context, 82, 86, 'STUDIO CAPSULE');
+  drawShadowedText(context, 'run capsule', 82, 250, {
+    font: '500 100px "Space Grotesk", sans-serif',
+  });
+
+  fillRoundedPanel(context, 74, 344, 932, 720, {
+    radius: 54,
+    fill: 'rgba(0,0,0,0.14)',
+    stroke: 'rgba(255,255,255,0.12)',
+  });
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 120,
+    y: 414,
+    width: 840,
+    height: 580,
+    panel: false,
+  });
+
+  const capsules = [
+    { x: 82, y: 1126, text: `${input.run.distanceKm.toFixed(1)} km` },
+    { x: 374, y: 1126, text: formatDuration(input.run.durationSeconds) },
+    { x: 660, y: 1126, text: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+  ];
+
+  capsules.forEach((capsule, index) => {
+    fillRoundedPanel(context, capsule.x, capsule.y, 270, 160, {
+      radius: 36,
+      fill: 'rgba(0,0,0,0.2)',
+      stroke: index === 2 ? 'rgba(215,25,33,0.88)' : 'rgba(255,255,255,0.14)',
+      lineWidth: index === 2 ? 2 : 1.5,
+    });
+    context.fillStyle = 'rgba(255,255,255,0.68)';
+    context.font = '500 18px "Space Mono", monospace';
+    context.fillText(index === 0 ? 'DISTANCE' : index === 1 ? 'TIME' : 'PACE', capsule.x + 26, capsule.y + 42);
+    drawShadowedText(context, capsule.text, capsule.x + 26, capsule.y + 108, {
+      font: '700 44px "Space Grotesk", sans-serif',
+      shadowBlur: 18,
+    });
+  });
+
+  drawOverlayPill(context, 82, 1734, `${input.run.date}  •  ${input.providerLabel.toUpperCase()}`);
+  const athleteWidth = measureOverlayPillWidth(context, input.athleteName.toUpperCase());
+  drawOverlayPill(context, 1080 - 82 - athleteWidth, 1734, input.athleteName.toUpperCase());
+}
+
+function renderPulseGridOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  drawOverlayPill(context, 82, 86, 'PULSE GRID');
+  drawShadowedText(context, 'metrics first', 82, 226, {
+    font: '500 84px "Space Grotesk", sans-serif',
+  });
+
+  const topCards = [
+    { x: 82, label: 'DISTANCE', value: `${input.run.distanceKm.toFixed(1)} km` },
+    { x: 546, label: 'TIME', value: formatDuration(input.run.durationSeconds) },
+  ];
+  topCards.forEach((card) => drawMetricCard(context, card.x, 302, 382, 136, card.label, card.value));
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 82,
+    y: 498,
+    width: 916,
+    height: 604,
+    labelLeft: 'TRACK',
+    labelRight: input.providerLabel.toUpperCase(),
+  });
+
+  const bottomCards = [
+    { x: 82, label: 'PACE', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato', accent: true },
+    { x: 396, label: 'AVG HR', value: input.run.averageHeartRate ? `${input.run.averageHeartRate} bpm` : 'Sin FC' },
+    { x: 710, label: 'ELEV', value: metricValue(input.run.elevationGain, ' m') },
+  ];
+  bottomCards.forEach((card) => drawMetricCard(context, card.x, 1228, 288, 142, card.label, card.value, !!card.accent));
+
+  fillRoundedPanel(context, 82, 1454, 916, 118, {
+    radius: 34,
+    fill: 'rgba(0,0,0,0.18)',
+    stroke: 'rgba(255,255,255,0.14)',
+  });
+  drawOverlayStat(context, 116, 1510, 'ATHLETE', input.athleteName.toUpperCase(), {
+    valueFont: '600 38px "Doto", "Space Mono", monospace',
+  });
+  drawOverlayStat(context, 690, 1510, 'DATE', input.run.date, {
+    valueFont: '700 34px "Space Grotesk", sans-serif',
+  });
+}
+
+function renderGhostBadgeOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  drawOverlayPill(context, 82, 88, 'MINIMAL BADGE');
+  drawShadowedText(context, 'run', 84, 236, {
+    font: '500 112px "Space Grotesk", sans-serif',
+  });
+
+  drawOverlayPill(context, 84, 304, input.run.name.toUpperCase(), {
+    fill: 'rgba(0,0,0,0.14)',
+  });
+
+  context.save();
+  context.fillStyle = 'rgba(0,0,0,0.18)';
+  context.font = '700 260px "Doto", "Space Mono", monospace';
+  context.fillText(`${formatDistanceCompact(input.run.distanceKm)}KM`, 78, 1120);
+  context.restore();
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 86,
+    y: 1260,
+    width: 360,
+    height: 270,
+    panel: false,
+  });
+
+  drawOverlayStat(context, 612, 1248, 'PACE', formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato', {
+    valueFont: '700 50px "Space Grotesk", sans-serif',
+  });
+  drawOverlayStat(context, 612, 1386, 'TIME', formatDuration(input.run.durationSeconds), {
+    valueFont: '700 50px "Space Grotesk", sans-serif',
+  });
+  drawOverlayStat(context, 612, 1524, 'DATE', `${input.run.date}${input.run.timeLabel ? ` · ${input.run.timeLabel}` : ''}`, {
+    valueFont: '700 30px "Space Grotesk", sans-serif',
+  });
+}
+
+function renderVerticalMetricOverlay(context: CanvasRenderingContext2D, input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  drawOverlayPill(context, 88, 86, 'VERTICAL METRIC');
+
+  fillRoundedPanel(context, 88, 178, 120, 1520, {
+    radius: 44,
+    fill: 'rgba(0,0,0,0.18)',
+    stroke: 'rgba(255,255,255,0.14)',
+  });
+  context.save();
+  context.translate(150, 1660);
+  context.rotate(-Math.PI / 2);
+  context.fillStyle = 'rgba(255,255,255,0.78)';
+  context.font = '500 28px "Space Mono", monospace';
+  context.fillText(`${input.run.date}  •  ${input.providerLabel.toUpperCase()}  •  ${input.athleteName.toUpperCase()}`, 0, 0);
+  context.restore();
+
+  drawShadowedText(context, `${formatDistanceCompact(input.run.distanceKm)}km`, 268, 284, {
+    font: '600 104px "Doto", "Space Mono", monospace',
+  });
+
+  drawRouteOverlay({
+    context,
+    route: input.route,
+    x: 250,
+    y: 376,
+    width: 748,
+    height: 708,
+    panel: false,
+  });
+
+  const rails = [
+    { x: 330, label: 'DISTANCE', value: `${input.run.distanceKm.toFixed(1)} KM` },
+    { x: 572, label: 'PACE', value: (formatPace(input.run.paceSecondsPerKm) ?? 'SIN DATO').toUpperCase(), accent: true },
+    { x: 814, label: 'TIME', value: formatDuration(input.run.durationSeconds).toUpperCase() },
+  ];
+
+  rails.forEach((rail) => {
+    fillRoundedPanel(context, rail.x - 58, 1226, 116, 470, {
+      radius: 26,
+      fill: 'rgba(0,0,0,0.18)',
+      stroke: rail.accent ? 'rgba(215,25,33,0.88)' : 'rgba(255,255,255,0.14)',
+      lineWidth: rail.accent ? 2 : 1.5,
+    });
+    context.save();
+    context.translate(rail.x + 16, 1660);
+    context.rotate(-Math.PI / 2);
+    context.fillStyle = 'rgba(255,255,255,0.72)';
+    context.font = '500 18px "Space Mono", monospace';
+    context.fillText(rail.label, 0, 0);
+    context.fillStyle = '#FFFFFF';
+    context.font = rail.accent ? '600 40px "Doto", "Space Mono", monospace' : '700 38px "Space Grotesk", sans-serif';
+    context.fillText(rail.value, 0, 56);
+    context.restore();
+  });
+}
+
+void [
+  renderAuraHeroOverlay,
+  renderFloatingStatsOverlay,
+  renderMonolithKmOverlay,
+  renderSplitEditorialOverlay,
+  renderRibbonDataOverlay,
+  renderStudioCapsuleOverlay,
+  renderPulseGridOverlay,
+  renderGhostBadgeOverlay,
+  renderVerticalMetricOverlay,
+];
+
+async function exportRunShareImage(input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  athleteLocation: string | null;
+  athleteAvatarPath: string | null;
+  providerLabel: string;
+  sessionId: string | null;
+  templateId: RunOverlayTemplateId;
+}) {
+  await document.fonts.ready.catch(() => undefined);
+
+  const width = 1080;
+  const height = 1920;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+
+  if (!context) {
+    throw new Error('El navegador no ha podido crear el canvas para la imagen.');
+  }
+
+  context.clearRect(0, 0, width, height);
+  const avatarAsset = await resolveAthleteAvatarAsset(input.athleteAvatarPath, input.sessionId);
+
+  try {
+    renderRouteFocusOverlay(context, {
+      ...input,
+      athleteAvatarImage: avatarAsset.image,
+    });
+  } finally {
+    avatarAsset.cleanup();
+  }
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((value) => {
+      if (value) {
+        resolve(value);
+        return;
+      }
+
+      reject(new Error('No se pudo generar el PNG del entrenamiento.'));
+    }, 'image/png');
+  });
+
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `run-overlay-${input.templateId}-${input.run.date}-${input.run.id}.png`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 function apiUrl(pathname: string) {
@@ -253,14 +1561,6 @@ function formatAdaptiveVolume(data: DashboardData['adaptive']['volume']) {
   return 'Sin cambio';
 }
 
-function formatVolumeRatio(value: number | null) {
-  if (value === null) {
-    return 'Sin dato';
-  }
-
-  return `${value.toFixed(2)}x`;
-}
-
 function formatComplianceRate(value: number | null) {
   if (value === null) {
     return 'Sin dato';
@@ -416,7 +1716,10 @@ function App() {
   const [selectedMetric, setSelectedMetric] = useState<ChartMetric>('sleepHours');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [routeState, setRouteState] = useState<RouteState>(idleRouteState);
+  const [isExportingRunImage, setIsExportingRunImage] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [activeSection, setActiveSection] = useState<DashboardSectionId>('summary');
   const [scheduleState, setScheduleState] = useState<ScheduleState>({
     key: null,
     status: 'idle',
@@ -499,18 +1802,23 @@ function App() {
     setLoginGoal(payload.goal);
   };
 
-  const loadDashboard = async (refresh = false, explicitSessionId?: string | null) => {
+  const loadDashboard = async (
+    refresh = false,
+    explicitSessionId?: string | null,
+    options: { surfaceError?: boolean } = {},
+  ) => {
+    const surfaceError = options.surfaceError ?? true;
     if (!(explicitSessionId ?? sessionIdRef.current)) {
       setState({
         status: 'unauthenticated',
         data: null,
         error: null,
       });
-      return;
+      throw new Error('No hay una sesión activa para cargar el dashboard.');
     }
 
     if (refreshInFlightRef.current) {
-      return;
+      return null;
     }
 
     refreshInFlightRef.current = true;
@@ -523,7 +1831,7 @@ function App() {
 
       if (response.status === 401) {
         clearSession();
-        return;
+        throw new Error('La sesión se ha perdido antes de poder cargar el dashboard.');
       }
 
       const payload = await response.json();
@@ -543,14 +1851,18 @@ function App() {
           distanceKm: (payload as DashboardData).goal.distanceKm,
         });
       });
+      return payload as DashboardData;
     } catch (error) {
-      startTransition(() => {
-        setState({
-          status: 'error',
-          data: null,
-          error: error instanceof Error ? error.message : 'Fallo inesperado',
+      if (surfaceError) {
+        startTransition(() => {
+          setState({
+            status: 'error',
+            data: null,
+            error: error instanceof Error ? error.message : 'Fallo inesperado',
+          });
         });
-      });
+      }
+      throw (error instanceof Error ? error : new Error('Fallo inesperado'));
     } finally {
       refreshInFlightRef.current = false;
       setIsRefreshing(false);
@@ -589,7 +1901,7 @@ function App() {
       return;
     }
 
-    void loadDashboard();
+    void loadDashboard().catch(() => undefined);
   });
 
   useEffect(() => {
@@ -653,6 +1965,112 @@ function App() {
     }
   }, [selectedWeekIndex, state]);
 
+  useEffect(() => {
+    if (state.status !== 'ready') {
+      setRouteState((current) => (current.status === 'idle' ? current : idleRouteState));
+      return;
+    }
+
+    const selectedRun =
+      state.data.recentRuns.find((run) => run.id === selectedRunId) ??
+      state.data.recentRuns[0] ??
+      null;
+
+    if (!selectedRun) {
+      setRouteState((current) => (current.status === 'idle' ? current : idleRouteState));
+      return;
+    }
+
+    let cancelled = false;
+
+    setRouteState({
+      status: 'loading',
+      data: null,
+      error: null,
+    });
+
+    void (async () => {
+      try {
+        const response = await apiFetch(`/api/activities/${selectedRun.id}/route`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.message ?? 'No se pudo cargar el mapa del entrenamiento.');
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setRouteState({
+          status: 'ready',
+          data: payload as ActivityRoute,
+          error: null,
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setRouteState({
+          status: 'error',
+          data: null,
+          error: error instanceof Error ? error.message : 'No se pudo cargar el mapa del entrenamiento.',
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRunId, state]);
+
+  useEffect(() => {
+    if (state.status !== 'ready' || typeof window === 'undefined') {
+      return;
+    }
+
+    const sectionElements = dashboardSections
+      .map((section) => document.getElementById(`section-${section.id}`))
+      .filter((section): section is HTMLElement => section instanceof HTMLElement);
+
+    if (!sectionElements.length) {
+      return;
+    }
+
+    let frame = 0;
+
+    const updateActiveSection = () => {
+      const viewportOffset = window.innerWidth <= 1100 ? 124 : 116;
+      let nextActive = dashboardSections[0]?.id ?? 'summary';
+
+      for (const section of sectionElements) {
+        const top = section.getBoundingClientRect().top;
+        if (top - viewportOffset <= 0) {
+          nextActive = section.id.replace('section-', '') as DashboardSectionId;
+          continue;
+        }
+        break;
+      }
+
+      setActiveSection((current) => (current === nextActive ? current : nextActive));
+    };
+
+    const requestUpdate = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(updateActiveSection);
+    };
+
+    requestUpdate();
+    window.addEventListener('scroll', requestUpdate, { passive: true });
+    window.addEventListener('resize', requestUpdate);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', requestUpdate);
+      window.removeEventListener('resize', requestUpdate);
+    };
+  }, [state.status]);
+
   const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (loginProvider !== 'garmin') {
@@ -694,12 +2112,15 @@ function App() {
         status: 'hydrating',
         error: null,
       });
-      await loadDashboard(false, sessionPayload.sessionId);
+      await loadDashboard(false, sessionPayload.sessionId, {
+        surfaceError: false,
+      });
       setLoginState({
         status: 'idle',
         error: null,
       });
     } catch (error) {
+      clearSession();
       setLoginState({
         status: 'error',
         error: error instanceof Error ? error.message : 'No se pudo iniciar sesión.',
@@ -964,6 +2385,53 @@ function App() {
   const nextSyncIn = nextSyncAt - clockNow;
   const syncTone = data.fallbackReason ? 'warning' : isRefreshing ? 'syncing' : 'live';
   const syncLabel = data.fallbackReason ? 'Modo provisional' : isRefreshing ? 'Sincronizando' : 'Live';
+  const athleteAvatarUrl = data.athlete.avatarPath ? absoluteApiUrl(data.athlete.avatarPath) : null;
+  const jumpToSection = (sectionId: DashboardSectionId) => {
+    const target = document.getElementById(`section-${sectionId}`);
+    if (!target) {
+      return;
+    }
+
+    setActiveSection(sectionId);
+    target.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  };
+  const exportSelectedRunImage = async () => {
+    if (!selectedRun || isExportingRunImage) {
+      return;
+    }
+
+    if (routeState.status === 'loading') {
+      window.alert('Todavia estoy cargando la ruta de este rodaje. Espera un momento y vuelve a intentarlo.');
+      return;
+    }
+
+    if (routeState.status !== 'ready') {
+      window.alert('Este rodaje no tiene una ruta utilizable para la exportacion.');
+      return;
+    }
+
+    setIsExportingRunImage(true);
+
+    try {
+      await exportRunShareImage({
+        run: selectedRun,
+        route: routeState.data,
+        athleteName: data.athlete.name,
+        athleteLocation: data.athlete.location,
+        athleteAvatarPath: data.athlete.avatarPath,
+        providerLabel: data.provider.label,
+        sessionId,
+        templateId: runOverlayTemplate.id,
+      });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'No se pudo generar la imagen del rodaje.');
+    } finally {
+      setIsExportingRunImage(false);
+    }
+  };
   const scheduleWorkout = async (weekIndex: number, dayIndex: number) => {
     const day = data.plan.weeks[weekIndex]?.days[dayIndex];
     if (!day) {
@@ -1007,11 +2475,41 @@ function App() {
   };
 
   return (
-    <main className="app-shell">
-      <section className="hero-panel">
+    <main className="dashboard-layout">
+      <aside className="dashboard-sidebar">
+        <div className="dashboard-sidebar-inner">
+          <p className="eyebrow">Navegación</p>
+          <nav className="sidebar-nav" aria-label="Secciones del dashboard">
+            {dashboardSections.map((section) => (
+              <button
+                className={`sidebar-button ${activeSection === section.id ? 'active' : ''}`}
+                key={section.id}
+                onClick={() => jumpToSection(section.id)}
+                type="button"
+              >
+                <strong>{section.label}</strong>
+                <small>{section.note}</small>
+              </button>
+            ))}
+          </nav>
+        </div>
+      </aside>
+
+      <div className="dashboard-content">
+      <section className="hero-panel dashboard-section" id="section-summary">
         <div className="hero-copy">
           <p className="eyebrow">Garmin Race Room</p>
-          <h1>{data.athlete.name}</h1>
+          <div className="hero-identity">
+            <AthleteAvatar avatarUrl={athleteAvatarUrl} name={data.athlete.name} size="lg" />
+            <div className="hero-identity-copy">
+              <h1>{data.athlete.name}</h1>
+              <p className="hero-identity-meta">
+                {data.provider.label}
+                {data.athlete.primaryDevice ? ` · ${data.athlete.primaryDevice}` : ''}
+                {sessionAccountLabel ? ` · ${sessionAccountLabel}` : ''}
+              </p>
+            </div>
+          </div>
           <p className="lead">
             Dashboard interactivo para preparar {data.goal.label} del {data.goal.raceDate}. Cruza
             recuperación, volumen, rendimiento y plan semanal en una sola vista y arranca con el plan persistido si ya existe.
@@ -1020,9 +2518,7 @@ function App() {
             <span>{data.provider.label}</span>
             <span>{data.goal.daysToRace} días para {data.goal.raceTitle.toLowerCase()}</span>
             <span>{data.goal.totalWeeks} semanas de plan</span>
-            {data.athlete.primaryDevice ? <span>{data.athlete.primaryDevice}</span> : null}
             {data.athlete.location ? <span>{data.athlete.location}</span> : null}
-            {sessionAccountLabel ? <span>{sessionAccountLabel}</span> : null}
             <span>
               {data.provider.key === 'garmin'
                 ? 'Re-login Garmin automático activo'
@@ -1155,263 +2651,7 @@ function App() {
         </article>
       </section>
 
-      <section className="panel adaptive-panel">
-        <div className="panel-head">
-          <div>
-            <p className="eyebrow">Plan adaptativo</p>
-            <h2>Ajuste automático según tus últimas sesiones</h2>
-          </div>
-          <span className={`adaptive-badge ${data.adaptive.overall}`}>
-            {formatAdaptiveOverall(data.adaptive.overall)}
-          </span>
-        </div>
-
-        <p className="chart-description">{data.adaptive.primaryNeed}</p>
-
-        <div className="adaptive-grid">
-          <article className="stat-pill">
-            <span className="metric-label">Volumen</span>
-            <strong>{formatAdaptiveVolume(data.adaptive.volume)}</strong>
-            <small>{data.adaptive.volume.rationale}</small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Ritmos</span>
-            <strong>{formatAdaptivePace(data.adaptive.pace)}</strong>
-            <small>{data.adaptive.pace.rationale}</small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Recuperación</span>
-            <strong>{formatTrainingStatus(data.adaptive.recovery.action)}</strong>
-            <small>{data.adaptive.recovery.rationale}</small>
-          </article>
-        </div>
-
-        <div className="signal-strip">
-          <article className="stat-pill">
-            <span className="metric-label">Km 7d</span>
-            <strong>{metricValue(data.adaptive.signals.recent7Km, ' km', 1)}</strong>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Base semanal</span>
-            <strong>{metricValue(data.adaptive.signals.baselineWeeklyKm, ' km', 1)}</strong>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Ratio carga</span>
-            <strong>{formatVolumeRatio(data.adaptive.signals.volumeRatio)}</strong>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">ACWR</span>
-            <strong>{metricValue(data.adaptive.signals.acuteChronicRatio, '', 2)}</strong>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Calidad 14d</span>
-            <strong>{data.adaptive.signals.qualitySessions14d}</strong>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Tirada larga</span>
-            <strong>{metricValue(data.adaptive.signals.lastLongRunKm, ' km', 1)}</strong>
-          </article>
-        </div>
-
-        <div className="signal-strip">
-          <article className="stat-pill">
-            <span className="metric-label">Cumplimiento 7d</span>
-            <strong>{formatComplianceRate(data.adaptive.signals.complianceRate7d)}</strong>
-            <small>
-              {data.adaptive.signals.completedSessions7d}/{data.adaptive.signals.plannedSessions7d} sesiones
-            </small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Sesiones perdidas</span>
-            <strong>{data.adaptive.signals.missedSessions7d}</strong>
-            <small>{data.adaptive.signals.movedSessions7d} reubicadas</small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Calidad real</span>
-            <strong>{formatExecutionDelta(data.adaptive.signals.qualityPaceDeltaSeconds)}</strong>
-            <small>vs ritmo previsto</small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Rodajes suaves</span>
-            <strong>{formatExecutionDelta(data.adaptive.signals.easyPaceDeltaSeconds)}</strong>
-            <small>disciplina de recuperación</small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Noches cortas</span>
-            <strong>{data.adaptive.signals.lowSleepDays7d}</strong>
-            <small>últimos 7 días</small>
-          </article>
-          <article className="stat-pill">
-            <span className="metric-label">Readiness bajo</span>
-            <strong>{data.adaptive.signals.lowReadinessDays7d}</strong>
-            <small>últimos 7 días</small>
-          </article>
-        </div>
-
-        {data.adaptive.signals.loadBalanceFeedback ? (
-          <p className="adaptive-footnote">
-            Señal de balance de carga {data.provider.label}:{' '}
-            <strong>{formatTrainingStatus(data.adaptive.signals.loadBalanceFeedback)}</strong>
-          </p>
-        ) : null}
-        {data.adaptive.signals.keySessionRelocatedTo ? (
-          <p className="adaptive-footnote">
-            La sesión clave perdida se ha reubicado automáticamente al{' '}
-            <strong>{data.adaptive.signals.keySessionRelocatedTo}</strong>.
-          </p>
-        ) : null}
-      </section>
-
-      <section className="insight-grid">
-        <article className="panel chart-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Métrica interactiva</p>
-              <h2>{selectedMetricMeta.label} en contexto</h2>
-            </div>
-            <div className="segmented-control">
-              {chartOptions.map((option) => (
-                <button
-                  key={option.key}
-                  className={`segmented-button ${selectedMetric === option.key ? 'selected' : ''}`}
-                  onClick={() => setSelectedMetric(option.key)}
-                  type="button"
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <p className="chart-description">{selectedMetricMeta.description}</p>
-
-          <div className="chart-wrap tall">
-            <ResponsiveContainer width="100%" height="100%">
-              {selectedMetric === 'steps' ? (
-                <BarChart data={data.wellnessTrend}>
-                  <CartesianGrid stroke="rgba(29, 34, 42, 0.08)" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} />
-                  <Tooltip />
-                  <Bar dataKey="steps" radius={[14, 14, 0, 0]} name="Pasos">
-                    {data.wellnessTrend.map((entry) => (
-                      <Cell key={entry.date} fill={selectedMetricMeta.tone} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              ) : (
-                <AreaChart data={data.wellnessTrend}>
-                  <defs>
-                    <linearGradient id="metricFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={selectedMetricMeta.tone} stopOpacity={0.45} />
-                      <stop offset="95%" stopColor={selectedMetricMeta.tone} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgba(29, 34, 42, 0.08)" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} />
-                  <Tooltip />
-                  <Area
-                    type="monotone"
-                    dataKey={selectedMetric}
-                    stroke={selectedMetricMeta.tone}
-                    fill="url(#metricFill)"
-                    strokeWidth={2.5}
-                    name={selectedMetricMeta.label}
-                  />
-                </AreaChart>
-              )}
-            </ResponsiveContainer>
-          </div>
-
-          <div className="chart-stat-strip">
-            <article className="stat-pill">
-              <span className="metric-label">Media 14d</span>
-              <strong>{formatChartMetric(selectedMetric, averageValue)}</strong>
-            </article>
-            <article className="stat-pill">
-              <span className="metric-label">Mejor día</span>
-              <strong>{peakValue ? peakValue.label : 'Sin dato'}</strong>
-            </article>
-            <article className="stat-pill">
-              <span className="metric-label">Valor pico</span>
-              <strong>{formatChartMetric(selectedMetric, peakValue?.[selectedMetric] ?? null)}</strong>
-            </article>
-          </div>
-        </article>
-
-        <article className="panel chart-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Carga</p>
-              <h2>Volumen semanal de running</h2>
-            </div>
-          </div>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.weeklyRunning}>
-                <CartesianGrid stroke="rgba(29, 34, 42, 0.08)" vertical={false} />
-                <XAxis dataKey="weekLabel" tickLine={false} axisLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Bar dataKey="distanceKm" radius={[14, 14, 0, 0]} name="Km">
-                  {data.weeklyRunning.map((entry) => (
-                    <Cell
-                      key={entry.weekLabel}
-                      fill={entry.runCount >= 4 ? '#9b79ff' : '#c8722b'}
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </article>
-
-        <article className="panel chart-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Rendimiento</p>
-              <h2>Tendencia de VO2 Max</h2>
-            </div>
-          </div>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data.vo2Trend}>
-                <defs>
-                  <linearGradient id="vo2Fill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#7f8cff" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#7f8cff" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid stroke="rgba(29, 34, 42, 0.08)" vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Area type="monotone" dataKey="value" stroke="#7f8cff" fill="url(#vo2Fill)" strokeWidth={2.5} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </article>
-      </section>
-
-      <section className="focus-grid">
-        <article className="panel advice-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Consejos</p>
-              <h2>Lo importante para {data.goal.label}</h2>
-            </div>
-          </div>
-          <div className="advice-list">
-            {data.advice.map((item) => (
-              <article className={`advice-card ${item.tone}`} key={item.title}>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
-              </article>
-            ))}
-          </div>
-        </article>
-
+      <section className="dashboard-section" id="section-sessions">
         <article className="panel recent-panel">
           <div className="panel-head">
             <div>
@@ -1427,33 +2667,26 @@ function App() {
 
           {selectedRun ? (
             <div className="recent-layout">
-              <div className="run-list">
-                {data.recentRuns.map((run) => (
-                  <button
-                    className={`run-row run-select ${selectedRun.id === run.id ? 'selected' : ''}`}
-                    key={run.id}
-                    onClick={() => setSelectedRunId(run.id)}
-                    type="button"
-                  >
-                    <div>
-                      <strong>{run.name}</strong>
-                      <span>{run.date}</span>
-                    </div>
-                    <div>
-                      <strong>{metricValue(run.distanceKm, ' km', 1)}</strong>
-                      <span>{formatDuration(run.durationSeconds)}</span>
-                    </div>
-                    <div>
-                      <strong>{formatPace(run.paceSecondsPerKm)}</strong>
-                      <span>{run.averageHeartRate ? `${run.averageHeartRate} bpm` : 'Sin FC'}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
               <aside className="run-spotlight">
                 <p className="eyebrow">Sesión elegida</p>
                 <h3>{selectedRun.name}</h3>
+                <p className="run-spotlight-meta">
+                  {selectedRun.date}
+                  {selectedRun.timeLabel ? ` · ${selectedRun.timeLabel}` : ''}
+                  {data.athlete.location ? ` · ${data.athlete.location}` : ''}
+                </p>
+                {routeState.status === 'ready' ? (
+                  <RouteMiniMap route={routeState.data} title={selectedRun.name} />
+                ) : routeState.status === 'loading' ? (
+                  <div className="route-map empty">
+                    <span>[ LOADING ROUTE ]</span>
+                  </div>
+                ) : routeState.status === 'error' ? (
+                  <div className="route-map empty">
+                    <span>[ ROUTE UNAVAILABLE ]</span>
+                    <small>{routeState.error}</small>
+                  </div>
+                ) : null}
                 <div className="spotlight-grid">
                   <article className="stat-pill">
                     <span className="metric-label">Distancia</span>
@@ -1477,7 +2710,65 @@ function App() {
                     ? `Training Effect ${selectedRun.trainingEffect.toFixed(1)}${selectedRun.trainingLoad ? ` · carga ${selectedRun.trainingLoad.toFixed(0)}` : ''}. Buena referencia para calibrar si la calidad está dejando el estímulo justo o demasiada fatiga.`
                     : 'Sin Training Effect disponible. Usa esta sesión como referencia de sensaciones, ritmo y deriva cardíaca.'}
                 </p>
+                <div className="overlay-export-panel">
+                  <div className="overlay-export-copy">
+                    <span className="metric-label">PNG glass sin fondo</span>
+                    <p>
+                      Exporta una sola tarjeta glass, tipo iOS, con avatar, nombre, hora, lugar, resumen y la ruta
+                      debajo, lista para montarla sobre tu foto.
+                    </p>
+                  </div>
+                  <div className="overlay-single-card" aria-label="Overlay activo">
+                    <span className="overlay-template-tag">{runOverlayTemplate.label}</span>
+                    <strong>{runOverlayTemplate.headline}</strong>
+                    <small>{runOverlayTemplate.description}</small>
+                  </div>
+                  <div className="spotlight-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={isExportingRunImage || routeState.status === 'loading'}
+                      onClick={() => void exportSelectedRunImage()}
+                      type="button"
+                    >
+                      {isExportingRunImage
+                        ? 'Generando PNG...'
+                        : routeState.status === 'loading'
+                          ? 'Cargando ruta...'
+                          : 'Descargar PNG glass'}
+                    </button>
+                  </div>
+                </div>
               </aside>
+
+              <div className="run-list-panel">
+                <p className="eyebrow">Más sesiones</p>
+                <div className="run-list">
+                  {data.recentRuns.map((run) => (
+                    <button
+                      className={`run-row run-select ${selectedRun.id === run.id ? 'selected' : ''}`}
+                      key={run.id}
+                      onClick={() => setSelectedRunId(run.id)}
+                      type="button"
+                    >
+                      <div>
+                        <strong>{run.name}</strong>
+                        <span>
+                          {run.date}
+                          {run.timeLabel ? ` · ${run.timeLabel}` : ''}
+                        </span>
+                      </div>
+                      <div>
+                        <strong>{metricValue(run.distanceKm, ' km', 1)}</strong>
+                        <span>{formatDuration(run.durationSeconds)}</span>
+                      </div>
+                      <div>
+                        <strong>{formatPace(run.paceSecondsPerKm)}</strong>
+                        <span>{run.averageHeartRate ? `${run.averageHeartRate} bpm` : 'Sin FC'}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           ) : (
             <p className="chart-description">
@@ -1488,7 +2779,7 @@ function App() {
         </article>
       </section>
 
-      <section className="panel plan-panel">
+      <section className="panel plan-panel dashboard-section" id="section-plan">
         <div className="panel-head">
           <div>
             <p className="eyebrow">Plan semanal</p>
@@ -1628,12 +2919,214 @@ function App() {
         ) : null}
       </section>
 
+      <section className="panel fitness-summary-panel dashboard-section" id="section-fitness">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">Estado fitness</p>
+            <h2>{data.fitnessSummary.title}</h2>
+          </div>
+          <span className={`adaptive-badge ${data.adaptive.overall}`}>
+            {formatAdaptiveOverall(data.adaptive.overall)}
+          </span>
+        </div>
+
+        <p className="fitness-summary-copy">{data.fitnessSummary.body}</p>
+
+        <div className="fitness-summary-grid">
+          <article className="stat-pill">
+            <span className="metric-label">Volumen</span>
+            <strong>{formatAdaptiveVolume(data.adaptive.volume)}</strong>
+            <small>{metricValue(data.adaptive.signals.recent7Km, ' km', 1)} en 7 días</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Ritmo</span>
+            <strong>{formatAdaptivePace(data.adaptive.pace)}</strong>
+            <small>{formatExecutionDelta(data.adaptive.signals.qualityPaceDeltaSeconds)}</small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Cumplimiento</span>
+            <strong>{formatComplianceRate(data.adaptive.signals.complianceRate7d)}</strong>
+            <small>
+              {data.adaptive.signals.completedSessions7d}/{data.adaptive.signals.plannedSessions7d} sesiones
+            </small>
+          </article>
+          <article className="stat-pill">
+            <span className="metric-label">Recuperación</span>
+            <strong>{formatTrainingStatus(data.adaptive.recovery.action)}</strong>
+            <small>
+              {data.provider.supportsWellness
+                ? `${data.adaptive.signals.lowSleepDays7d} noches cortas · ${data.adaptive.signals.lowReadinessDays7d} días bajos`
+                : 'Lectura basada en carga y consistencia'}
+            </small>
+          </article>
+        </div>
+
+        <div className="fitness-summary-notes">
+          <span>{data.adaptive.primaryNeed}</span>
+          {data.adaptive.signals.keySessionRelocatedTo ? (
+            <span>Sesión clave reubicada al {data.adaptive.signals.keySessionRelocatedTo}</span>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="insight-grid dashboard-section" id="section-insights">
+        <article className="panel chart-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Métrica interactiva</p>
+              <h2>{selectedMetricMeta.label} en contexto</h2>
+            </div>
+            <div className="segmented-control">
+              {chartOptions.map((option) => (
+                <button
+                  key={option.key}
+                  className={`segmented-button ${selectedMetric === option.key ? 'selected' : ''}`}
+                  onClick={() => setSelectedMetric(option.key)}
+                  type="button"
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p className="chart-description">{selectedMetricMeta.description}</p>
+
+          <div className="chart-wrap tall">
+            <ResponsiveContainer width="100%" height="100%">
+              {selectedMetric === 'steps' ? (
+                <BarChart data={data.wellnessTrend}>
+                  <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
+                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                  <YAxis tickLine={false} axisLine={false} />
+                  <Tooltip />
+                  <Bar dataKey="steps" radius={[8, 8, 0, 0]} name="Pasos">
+                    {data.wellnessTrend.map((entry) => (
+                      <Cell key={entry.date} fill={selectedMetricMeta.tone} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              ) : (
+                <AreaChart data={data.wellnessTrend}>
+                  <defs>
+                    <linearGradient id="metricFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={selectedMetricMeta.tone} stopOpacity={0.34} />
+                      <stop offset="95%" stopColor={selectedMetricMeta.tone} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
+                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                  <YAxis tickLine={false} axisLine={false} />
+                  <Tooltip />
+                  <Area
+                    type="monotone"
+                    dataKey={selectedMetric}
+                    stroke={selectedMetricMeta.tone}
+                    fill="url(#metricFill)"
+                    strokeWidth={2}
+                    name={selectedMetricMeta.label}
+                  />
+                </AreaChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+
+          <div className="chart-stat-strip">
+            <article className="stat-pill">
+              <span className="metric-label">Media 14d</span>
+              <strong>{formatChartMetric(selectedMetric, averageValue)}</strong>
+            </article>
+            <article className="stat-pill">
+              <span className="metric-label">Mejor día</span>
+              <strong>{peakValue ? peakValue.label : 'Sin dato'}</strong>
+            </article>
+            <article className="stat-pill">
+              <span className="metric-label">Valor pico</span>
+              <strong>{formatChartMetric(selectedMetric, peakValue?.[selectedMetric] ?? null)}</strong>
+            </article>
+          </div>
+        </article>
+
+        <article className="panel chart-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Carga</p>
+              <h2>Volumen semanal de running</h2>
+            </div>
+          </div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.weeklyRunning}>
+                <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
+                <XAxis dataKey="weekLabel" tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} />
+                <Tooltip />
+                <Bar dataKey="distanceKm" radius={[8, 8, 0, 0]} name="Km">
+                  {data.weeklyRunning.map((entry) => (
+                    <Cell
+                      key={entry.weekLabel}
+                      fill={entry.runCount >= 4 ? 'var(--heading)' : 'var(--warning)'}
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </article>
+
+        <article className="panel chart-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Rendimiento</p>
+              <h2>Tendencia de VO2 Max</h2>
+            </div>
+          </div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={data.vo2Trend}>
+                <defs>
+                  <linearGradient id="vo2Fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--heading)" stopOpacity={0.24} />
+                    <stop offset="95%" stopColor="var(--heading)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
+                <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} />
+                <Tooltip />
+                <Area type="monotone" dataKey="value" stroke="var(--heading)" fill="url(#vo2Fill)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </article>
+      </section>
+
+      <section className="dashboard-section" id="section-advice">
+        <article className="panel advice-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Consejos</p>
+              <h2>Lo importante para {data.goal.label}</h2>
+            </div>
+          </div>
+          <div className="advice-list">
+            {data.advice.map((item) => (
+              <article className={`advice-card ${item.tone}`} key={item.title}>
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </article>
+            ))}
+          </div>
+        </article>
+      </section>
+
       <footer className="footer-note">
         <span>
           Última sincronización: {new Date(data.fetchedAt).toLocaleString()} · El frontend consulta la API
           cada 30 s y el backend refresca {data.provider.label} cada {Math.round(serverRefreshMs / 60_000)} min.
         </span>
       </footer>
+      </div>
     </main>
   );
 }

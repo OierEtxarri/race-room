@@ -9,6 +9,7 @@ export type DashboardData = {
     name: string;
     location: string | null;
     primaryDevice: string | null;
+    avatarPath: string | null;
     raceDate: string;
     daysToRace: number;
   };
@@ -59,6 +60,7 @@ export type DashboardData = {
     id: number;
     name: string;
     date: string;
+    timeLabel: string | null;
     distanceKm: number;
     durationSeconds: number;
     paceSecondsPerKm: number | null;
@@ -68,6 +70,10 @@ export type DashboardData = {
     trainingLoad: number | null;
     workoutId: number | null;
   }>;
+  fitnessSummary: {
+    title: string;
+    body: string;
+  };
   adaptive: {
     overall: 'push' | 'steady' | 'protect';
     primaryNeed: string;
@@ -154,4 +160,9 @@ export type SessionPayload = {
   sessionId: string;
   accountLabel: string;
   goal: UserGoal;
+};
+
+export type ActivityRoute = {
+  points: Array<[number, number]>;
+  source: 'garmin' | 'strava';
 };

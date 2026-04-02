@@ -1,6 +1,6 @@
 # Garmin Race Room
 
-Dashboard responsive para explotar datos de Garmin Connect y Strava desde Codex, ajustar objetivos dinámicos y generar planes de entrenamiento por usuario.
+Dashboard responsive para Garmin Connect y Strava con login desde la propia app, plan adaptativo, export glass de entrenos y vista pensada para desktop y móvil.
 
 ## Vista rápida
 
@@ -17,27 +17,71 @@ Dashboard responsive para explotar datos de Garmin Connect y Strava desde Codex,
 - Wrapper local del servidor MCP de [`Nicolasvegam/garmin-connect-mcp`](https://github.com/Nicolasvegam/garmin-connect-mcp) en [`vendor/garmin-connect-mcp`](vendor/garmin-connect-mcp)
 - Integración principal con [`python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) mediante un bridge Python local
 - Backend Express que consulta Garmin a través del MCP o Python API y Strava vía OAuth + REST API
-- Frontend React + Recharts con vista responsive, login dual dentro de la app y objetivo editable
+- Frontend React + Recharts con sidebar de secciones, glass UI, motion ligero y objetivo editable
 - Refresco automático del dashboard con caché viva en backend y restauración inicial desde snapshot persistido
 - Reautenticación automática cuando caducan los tokens mientras existan credenciales activas en la sesión del usuario
 - Panel de consejos basado en recuperación, carga, cumplimiento y sesiones recientes
 - Plan dinámico según fecha objetivo, distancia y rendimiento reciente
 - Envío de entrenamientos futuros del plan a Garmin desde la propia app
+- Export `PNG` glass sin fondo para compartir entrenos sobre una foto propia
 - Persistencia ligera en SQLite del objetivo y del último dashboard/plan por usuario
 - Modo degradado si Garmin devuelve rate limit o bloquea la autenticación
 - Frontend preparado para desplegarse en GitHub Pages con `VITE_API_BASE_URL`
 
-## Arranque
+## Configuración
+
+Crea un `.env` en la raíz del proyecto.
+
+Mínimo para local:
+
+```env
+PORT=8787
+FRONTEND_ORIGIN=http://localhost:5173
+FRONTEND_APP_URL=http://localhost:5173/
+```
+
+Para Strava añade además:
+
+```env
+STRAVA_CLIENT_ID=tu_client_id
+STRAVA_CLIENT_SECRET=tu_client_secret
+STRAVA_REDIRECT_URI=http://localhost:8787/api/session/strava/callback
+```
+
+Notas:
+
+- Garmin no necesita dejar email y password fijos en `.env` para usar la app. Se introducen en el login y viven solo en la sesión activa.
+- Si quieres usar el bridge Python de Garmin, instala antes el entorno con `npm run garmin:python:install`.
+- Si quieres forzar el consumidor OAuth de `garth`, la API respeta `GARTH_OAUTH_KEY` y `GARTH_OAUTH_SECRET`.
+
+## Arranque local
 
 1. Ejecuta `npm run garmin:python:install` si todavía no existe `.venv-garmin`.
 2. Ejecuta `npm run dev`.
-3. Abre la URL que muestre Vite.
-4. Haz login desde la propia app con Garmin o Strava.
-5. Ajusta el objetivo con fecha y distancia; la app persistirá ese objetivo y el último plan en `data/garmin-connect.sqlite`.
+3. Espera a que la API anuncie `Garmin + Strava dashboard disponible en http://localhost:8787`.
+4. Abre la URL que muestre Vite. En local normal suele ser `http://localhost:5173`, aunque puede subir a otro puerto si ya está ocupado.
+5. Haz login desde la propia app con Garmin o Strava.
+6. Ajusta el objetivo con fecha y distancia; la app persistirá ese objetivo y el último plan en `data/garmin-connect.sqlite`.
+
+## Arranque en móvil
+
+Si quieres abrir la app desde el móvil dentro de la misma red local, usa el modo LAN:
+
+1. Ejecuta `npm run dev:mobile`.
+2. Saca la IP local del portátil con `hostname -I`.
+3. Abre desde el móvil `http://TU_IP:5173`.
+
+Ejemplo real de hotspot móvil:
+
+- Si el teléfono comparte red y el portátil recibe una IP como `172.20.10.6`, abre `http://172.20.10.6:5173`.
+- Este flujo es especialmente útil para Garmin.
+- Para Strava, si quieres completar OAuth desde el móvil, necesitarás además que `STRAVA_REDIRECT_URI` apunte a una URL accesible desde el teléfono; `localhost` no sirve fuera del propio portátil.
 
 ## Scripts útiles
 
 - `npm run dev`: frontend + backend
+- `npm run dev:mobile`: frontend expuesto en LAN + backend
+- `npm run dev:web:mobile`: solo frontend en `0.0.0.0:5173`
 - `npm run start:api`: solo API
 - `npm run build`: typecheck + build del frontend
 - `npm run garmin:python:install`: crea el entorno Python e instala `garminconnect`
@@ -48,13 +92,10 @@ Dashboard responsive para explotar datos de Garmin Connect y Strava desde Codex,
 ## Notas
 
 - El flujo principal en este proyecto es Codex + app local. No depende de Cursor.
-- El login ya no depende de dejar `GARMIN_EMAIL` y `GARMIN_PASSWORD` en `.env` para usar la app. Esas variables quedan solo para scripts manuales.
-- Para Strava necesitas registrar una app y definir `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET` y `STRAVA_REDIRECT_URI` en el backend.
 - Cada sesión de usuario guarda sus tokens de Garmin en un directorio temporal aislado y sus credenciales viven solo en memoria del backend.
 - Las sesiones de Strava guardan `access_token` y `refresh_token` solo en memoria del backend y refrescan OAuth automáticamente mientras la sesión siga viva.
 - `python-garminconnect` sigue disponible como respaldo, como vía de escritura y como referencia de autenticación.
 - El backend persiste por email el último objetivo y dashboard/plan en SQLite para servir primero esa versión y refrescar Garmin después.
-- Si necesitas fijar manualmente el consumidor OAuth de `garth`, la API respeta `GARTH_OAUTH_KEY` y `GARTH_OAUTH_SECRET`.
 - El backend refresca la caché del proveedor activo automáticamente cada 2 minutos y el frontend consulta la API local cada 30 segundos.
 - Si faltan tokens o caducan, el backend intenta autenticarse de nuevo por sí solo con las credenciales activas de la sesión actual.
 - El plan adapta ritmos, volumen y consejo con señales como ACWR, readiness, sueño, tirada larga reciente, cumplimiento y calidad de los últimos 14 días.

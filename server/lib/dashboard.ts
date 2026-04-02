@@ -36,6 +36,7 @@ type RunSummary = {
   id: number;
   name: string;
   date: string;
+  timeLabel: string | null;
   distanceKm: number;
   durationSeconds: number;
   paceSecondsPerKm: number | null;
@@ -99,6 +100,7 @@ export type DashboardData = {
     name: string;
     location: string | null;
     primaryDevice: string | null;
+    avatarPath: string | null;
     raceDate: string;
     daysToRace: number;
   };
@@ -138,6 +140,10 @@ export type DashboardData = {
     value: number | null;
   }>;
   recentRuns: RunSummary[];
+  fitnessSummary: {
+    title: string;
+    body: string;
+  };
   adaptive: AdaptiveGuidance;
   advice: AdviceCard[];
   plan: {
@@ -479,9 +485,26 @@ function pickReferenceDate(today: Date): string {
   return isoDate(subDays(today, 1));
 }
 
+function normalizeActivityDateParts(rawDate: string): { date: string; timeLabel: string | null } {
+  const candidate = rawDate.includes(' ') ? rawDate.replace(' ', 'T') : rawDate;
+  const parsed = new Date(candidate);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return {
+      date: rawDate.slice(0, 10),
+      timeLabel: rawDate.length >= 16 ? rawDate.slice(11, 16) : null,
+    };
+  }
+
+  return {
+    date: format(parsed, 'yyyy-MM-dd'),
+    timeLabel: format(parsed, 'HH:mm'),
+  };
+}
+
 function normalizeRun(activity: unknown): RunSummary | null {
   const id = pickNumber(activity, ['activityId', 'activityUUID'], ['activityid']);
-  const date =
+  const rawDate =
     pickString(activity, ['startTimeLocal', 'startTimeGMT', 'calendarDate'], ['starttime', 'date']) ??
     null;
   const distanceKm = normalizeDistanceKm(
@@ -495,16 +518,18 @@ function normalizeRun(activity: unknown): RunSummary | null {
         getPath(activity, 'summaryDTO.duration'),
     ) ?? 0;
 
-  if (id === null || !date || !distanceKm || durationSeconds <= 0) {
+  if (id === null || !rawDate || !distanceKm || durationSeconds <= 0) {
     return null;
   }
 
   const paceSecondsPerKm = distanceKm > 0 ? durationSeconds / distanceKm : null;
+  const { date, timeLabel } = normalizeActivityDateParts(rawDate);
 
   return {
     id,
     name: pickString(activity, ['activityName'], ['name']) ?? 'Entrenamiento',
-    date: date.slice(0, 10),
+    date,
+    timeLabel,
     distanceKm,
     durationSeconds,
     paceSecondsPerKm: paceSecondsPerKm ? round(paceSecondsPerKm, 0) : null,
@@ -528,22 +553,24 @@ function normalizeStravaRun(activity: unknown): RunSummary | null {
   }
 
   const id = pickNumber(activity, ['id'], ['id']);
-  const date = pickString(activity, ['start_date_local', 'start_date'], ['startdate']);
+  const rawDate = pickString(activity, ['start_date_local', 'start_date'], ['startdate']);
   const distanceKm = normalizeDistanceKm(getPath(activity, 'distance'));
   const durationSeconds =
     normalizeDurationSeconds(getPath(activity, 'moving_time') ?? getPath(activity, 'elapsed_time')) ?? 0;
 
-  if (id === null || !date || !distanceKm || durationSeconds <= 0) {
+  if (id === null || !rawDate || !distanceKm || durationSeconds <= 0) {
     return null;
   }
 
   const paceSecondsPerKm = distanceKm > 0 ? durationSeconds / distanceKm : null;
   const workoutType = pickNumber(activity, ['workout_type'], ['workouttype']);
+  const { date, timeLabel } = normalizeActivityDateParts(rawDate);
 
   return {
     id,
     name: pickString(activity, ['name'], ['name']) ?? 'Actividad Strava',
-    date: date.slice(0, 10),
+    date,
+    timeLabel,
     distanceKm,
     durationSeconds,
     paceSecondsPerKm: paceSecondsPerKm ? round(paceSecondsPerKm, 0) : null,
@@ -1035,6 +1062,40 @@ function applyExecutionToWeeks(input: {
       return nextDay;
     }),
   }));
+}
+
+function buildFitnessSummary(input: {
+  provider: DashboardProviderMeta;
+  goal: GoalMeta;
+  predictedGoalSeconds: number | null;
+  averageWeeklyKm: number | null;
+  longestRunKm: number | null;
+  adaptive: AdaptiveGuidance;
+}): DashboardData['fitnessSummary'] {
+  const title =
+    input.adaptive.overall === 'protect'
+      ? 'Carga alta, conviene proteger'
+      : input.adaptive.overall === 'push'
+        ? 'Bloque sólido, hay margen'
+        : 'Estado estable y controlado';
+
+  const raceReference =
+    input.predictedGoalSeconds !== null
+      ? `Ahora mismo el objetivo se mueve alrededor de ${formatSecondsAsRace(input.predictedGoalSeconds)} para ${input.goal.label}.`
+      : `Todavía no hay una predicción sólida para ${input.goal.label}.`;
+  const volumeReference =
+    input.averageWeeklyKm !== null
+      ? `Estás en ${round(input.averageWeeklyKm, 1)} km/sem con tirada larga reciente de ${round(input.longestRunKm ?? 0, 1)} km.`
+      : 'Todavía falta volumen útil reciente para afinar mejor el plan.';
+  const providerTail =
+    input.provider.supportsWellness
+      ? `Señal principal: ${describePrimaryNeed(input.adaptive)}`
+      : 'Aquí mando sobre todo por consistencia, volumen real y ritmo ejecutado; no por sueño o HRV.';
+
+  return {
+    title,
+    body: `${raceReference} ${volumeReference} ${providerTail}`,
+  };
 }
 
 function buildAdvice(input: {
@@ -1662,6 +1723,7 @@ function buildDashboardFromSource(input: {
   athleteName: string;
   location: string | null;
   primaryDevice: string | null;
+  avatarPath: string | null;
   runningActivities: RunSummary[];
   wellnessTrend: DashboardData['wellnessTrend'];
   vo2Trend: DashboardData['vo2Trend'];
@@ -1774,6 +1836,14 @@ function buildDashboardFromSource(input: {
     trainingStatus: overview.trainingStatus,
     adaptive,
   });
+  const fitnessSummary = buildFitnessSummary({
+    provider: input.provider,
+    goal: goalMeta,
+    predictedGoalSeconds,
+    averageWeeklyKm: overview.averageWeeklyKm,
+    longestRunKm: overview.longestRunKm,
+    adaptive,
+  });
 
   const plan = buildTrainingPlan({
     today: input.today,
@@ -1794,6 +1864,7 @@ function buildDashboardFromSource(input: {
       name: input.athleteName,
       location: input.location,
       primaryDevice: input.primaryDevice,
+      avatarPath: input.avatarPath,
       raceDate: goalMeta.raceDate,
       daysToRace: goalMeta.daysToRace,
     },
@@ -1803,6 +1874,7 @@ function buildDashboardFromSource(input: {
     weeklyRunning,
     vo2Trend: input.vo2Trend,
     recentRuns,
+    fitnessSummary,
     adaptive,
     advice,
     plan,
@@ -1819,6 +1891,7 @@ async function buildGarminDashboardData(input: {
   const referenceDate = pickReferenceDate(today);
   const wellnessStart = isoDate(subDays(today, 13));
   const runningStart = isoDate(subWeeks(today, 6));
+  const runningEnd = isoDate(today);
   const weightStart = isoDate(subWeeks(today, 4));
 
   const userProfile = await garminClient.callJson(input.auth, 'get_user_profile');
@@ -1849,7 +1922,7 @@ async function buildGarminDashboardData(input: {
   const racePredictionsRaw = await garminClient.callJson(input.auth, 'get_race_predictions');
   const runningActivitiesRaw = await garminClient.callJson(input.auth, 'get_activities_by_date', {
     startDate: runningStart,
-    endDate: referenceDate,
+    endDate: runningEnd,
     activityType: 'running',
   });
   const bodyCompositionRaw = await garminClient.callJson(input.auth, 'get_body_composition', {
@@ -1889,6 +1962,10 @@ async function buildGarminDashboardData(input: {
     ['displayName', 'deviceName', 'partNumber'],
     ['display', 'device', 'name'],
   );
+  const avatarUrl = pickString(
+    socialProfile,
+    ['profileImageUrlLarge', 'profileImageUrlMedium', 'profileImageUrlSmall', 'profileImageUrl'],
+  );
 
   return buildDashboardFromSource({
     provider: garminProviderMeta,
@@ -1897,6 +1974,7 @@ async function buildGarminDashboardData(input: {
     athleteName,
     location: locationParts.length ? locationParts.join(' · ') : null,
     primaryDevice,
+    avatarPath: avatarUrl ? '/api/athlete/avatar' : null,
     runningActivities,
     wellnessTrend,
     vo2Trend: vo2Series.map((entry) => ({
@@ -1968,6 +2046,7 @@ async function buildStravaDashboardData(input: {
     athleteName: athleteName || `Strava ${input.auth.athleteId}`,
     location: locationParts.length ? locationParts.join(' · ') : null,
     primaryDevice: null,
+    avatarPath: pickString(athlete, ['profile_medium', 'profile'], ['profile']) ? '/api/athlete/avatar' : null,
     runningActivities,
     wellnessTrend: [],
     vo2Trend: [],
@@ -2064,6 +2143,7 @@ export function buildFallbackDashboardData(
       name: `Perfil ${provider.label} pendiente`,
       location: null,
       primaryDevice: null,
+      avatarPath: null,
       raceDate: goalMeta.raceDate,
       daysToRace: goalMeta.daysToRace,
     },
@@ -2087,6 +2167,10 @@ export function buildFallbackDashboardData(
     weeklyRunning: [],
     vo2Trend: [],
     recentRuns: [],
+    fitnessSummary: {
+      title: `Sin datos reales de ${provider.label}`,
+      body: `Cargo un estado base mientras ${provider.label} vuelve a responder. El plan sigue disponible, pero el ajuste fino está pausado hasta recuperar las sesiones recientes.`,
+    },
     adaptive,
     advice: [
       {

@@ -1,29 +1,33 @@
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
 
 :root {
-  --bg: #071118;
-  --bg-deep: #02060b;
-  --panel: rgba(8, 15, 21, 0.84);
-  --panel-strong: linear-gradient(145deg, rgba(10, 18, 26, 0.96), rgba(4, 9, 14, 0.98));
-  --surface: rgba(12, 22, 31, 0.84);
-  --surface-strong: rgba(15, 26, 36, 0.94);
-  --surface-ghost: rgba(9, 17, 24, 0.72);
-  --heading: #f2f7ff;
-  --text: #c5d2de;
-  --muted: #8ea2b8;
-  --line: rgba(145, 164, 184, 0.16);
-  --shadow-soft: 0 22px 48px rgba(0, 0, 0, 0.35);
-  --accent: #b28cff;
-  --accent-deep: #5c36b8;
-  --accent-soft: rgba(178, 140, 255, 0.16);
-  --blue: #8d97ff;
-  --blue-soft: rgba(141, 151, 255, 0.14);
-  --amber: #f0a14a;
-  --amber-soft: rgba(240, 161, 74, 0.16);
-  --danger: #ff9a77;
-  --danger-soft: rgba(255, 154, 119, 0.15);
-  --sans: 'Space Grotesk', sans-serif;
-  --serif: 'Fraunces', serif;
+  --bg: #0b1220;
+  --bg-deep: #070d17;
+  --panel: rgba(29, 39, 56, 0.52);
+  --panel-strong: rgba(25, 35, 52, 0.68);
+  --surface: rgba(255, 255, 255, 0.09);
+  --surface-strong: rgba(255, 255, 255, 0.15);
+  --surface-ghost: transparent;
+  --heading: #ffffff;
+  --text: rgba(245, 247, 255, 0.92);
+  --muted: rgba(220, 228, 242, 0.62);
+  --line: rgba(255, 255, 255, 0.12);
+  --line-strong: rgba(255, 255, 255, 0.22);
+  --accent: #9bc7ff;
+  --accent-deep: #6ea8ff;
+  --accent-soft: rgba(155, 199, 255, 0.22);
+  --blue: #9bc7ff;
+  --blue-soft: rgba(155, 199, 255, 0.14);
+  --amber: #f2c879;
+  --warning: #f2c879;
+  --amber-soft: rgba(242, 200, 121, 0.16);
+  --danger: #ff7f6b;
+  --danger-soft: rgba(255, 127, 107, 0.16);
+  --success: #6fd4a2;
+  --shadow-soft: 0 24px 70px rgba(0, 0, 0, 0.26);
+  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  --display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+  --mono: 'SFMono-Regular', 'SF Mono', 'Space Mono', ui-monospace, monospace;
 }
 
 * {
@@ -37,6 +41,7 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   color-scheme: dark;
+  scroll-behavior: smooth;
 }
 
 body {
@@ -44,15 +49,46 @@ body {
   color: var(--text);
   font-family: var(--sans);
   background:
-    radial-gradient(circle at top left, rgba(178, 140, 255, 0.18), transparent 28%),
-    radial-gradient(circle at 85% 10%, rgba(240, 161, 74, 0.14), transparent 18%),
-    radial-gradient(circle at 50% 100%, rgba(141, 151, 255, 0.12), transparent 26%),
-    linear-gradient(180deg, var(--bg), var(--bg-deep));
+    radial-gradient(circle at 15% 18%, rgba(138, 188, 255, 0.2), transparent 26%),
+    radial-gradient(circle at 82% 16%, rgba(191, 214, 255, 0.12), transparent 22%),
+    radial-gradient(circle at 50% 100%, rgba(117, 196, 255, 0.12), transparent 34%),
+    linear-gradient(180deg, #101827 0%, #0b1220 52%, #070d17 100%);
   min-height: 100vh;
+  background-attachment: fixed;
+  overflow-x: hidden;
+  position: relative;
+}
+
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: auto;
+  border-radius: 999px;
+  pointer-events: none;
+  filter: blur(70px);
+  opacity: 0.9;
+  z-index: -1;
+}
+
+body::before {
+  top: 4rem;
+  left: -4rem;
+  width: 22rem;
+  height: 22rem;
+  background: rgba(146, 194, 255, 0.12);
+}
+
+body::after {
+  right: -5rem;
+  bottom: 10vh;
+  width: 18rem;
+  height: 18rem;
+  background: rgba(192, 215, 255, 0.08);
 }
 
 #root {
-  width: min(1280px, calc(100% - 2rem));
+  width: min(1320px, calc(100% - 2rem));
   margin: 0 auto;
   padding: 1.5rem 0 3rem;
 }
@@ -71,35 +107,39 @@ h3 {
 }
 
 h1 {
-  font-family: var(--serif);
-  font-size: clamp(2.5rem, 5vw, 4.8rem);
-  line-height: 0.94;
+  font-family: var(--display);
+  font-size: clamp(3.1rem, 6vw, 5.2rem);
+  line-height: 0.95;
   letter-spacing: -0.05em;
+  font-weight: 700;
 }
 
 h2 {
-  font-family: var(--serif);
-  font-size: clamp(1.6rem, 2vw, 2.2rem);
-  line-height: 1;
+  font-family: var(--sans);
+  font-size: clamp(1.5rem, 2.4vw, 2.1rem);
+  line-height: 1.1;
+  font-weight: 600;
 }
 
 h3 {
-  font-size: 1.1rem;
+  font-size: 1rem;
+  line-height: 1.2;
 }
 
 .eyebrow {
-  font-size: 0.82rem;
+  font-size: 0.72rem;
+  font-family: var(--mono);
   text-transform: uppercase;
-  letter-spacing: 0.16em;
-  color: var(--accent);
-  margin-bottom: 0.7rem;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-bottom: 0.75rem;
 }
 
 .lead {
   max-width: 62ch;
-  font-size: 1.02rem;
-  line-height: 1.65;
-  margin: 1rem 0 1.3rem;
+  font-size: 0.98rem;
+  line-height: 1.55;
+  margin: 1rem 0 1.25rem;
 }
 
 button,

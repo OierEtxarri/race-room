@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import express from 'express';
+import { getGarminActivityRoute, getStravaActivityRoute } from './lib/activityRoutes.ts';
 import {
   buildDashboardData,
   buildFallbackDashboardData,
@@ -11,6 +12,7 @@ import { schedulePlanWorkoutOnGarmin } from './lib/planWorkouts.ts';
 import {
   buildStravaAuthorizeUrl,
   exchangeStravaCode,
+  getStravaAthlete,
   isStravaConfigured,
 } from './lib/stravaClient.ts';
 import {
@@ -63,11 +65,48 @@ const inflightRefreshes = new Map<string, Promise<DashboardData>>();
 const stravaLoginStates = new Map<string, StravaLoginState>();
 let refreshTimer: NodeJS.Timeout | null = null;
 
+function isPrivateLanHostname(hostname: string): boolean {
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) {
+    const octets = hostname.split('.').map((chunk) => Number(chunk));
+    const [first, second] = octets;
+
+    if (first === 10) {
+      return true;
+    }
+
+    if (first === 192 && second === 168) {
+      return true;
+    }
+
+    if (first === 172 && second >= 16 && second <= 31) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isAllowedOrigin(origin: string): boolean {
+  if (allowedOrigins.has(origin)) {
+    return true;
+  }
+
+  try {
+    const url = new URL(origin);
+    return (
+      url.protocol === 'http:' &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || isPrivateLanHostname(url.hostname))
+    );
+  } catch {
+    return false;
+  }
+}
+
 app.use(express.json());
 app.use((request, response, next) => {
   const origin = request.header('origin');
 
-  if (origin && allowedOrigins.has(origin)) {
+  if (origin && isAllowedOrigin(origin)) {
     response.header('Access-Control-Allow-Origin', origin);
     response.header('Access-Control-Allow-Credentials', 'true');
     response.header('Access-Control-Allow-Headers', 'Content-Type, X-Session-Id');
@@ -177,6 +216,37 @@ function normalizeReturnTo(rawValue: unknown): string {
   } catch {
     return config.frontendAppUrl;
   }
+}
+
+function pickStringField(source: unknown, keys: string[]): string | null {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return null;
+  }
+
+  const record = source as Record<string, unknown>;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+async function resolveAthleteAvatarUrl(session: SessionRecord): Promise<string | null> {
+  if (isGarminSession(session)) {
+    const socialProfile = await garminClient.callJson(sessionToGarminAuth(session), 'get_social_profile').catch(() => null);
+    return pickStringField(socialProfile, [
+      'profileImageUrlLarge',
+      'profileImageUrlMedium',
+      'profileImageUrlSmall',
+      'profileImageUrl',
+    ]);
+  }
+
+  const athlete = await getStravaAthlete(session).catch(() => null);
+  return pickStringField(athlete, ['profile_medium', 'profile']);
 }
 
 function buildFrontendRedirect(baseUrl: string, params: Record<string, string>): string {
@@ -567,6 +637,84 @@ app.get('/api/dashboard', async (request, response) => {
   const data = await getDashboardData(session, { force: forceRefresh });
   response.setHeader('Set-Cookie', buildSessionCookie(session.id));
   response.json(data);
+});
+
+app.get('/api/activities/:activityId/route', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const activityId = Number(request.params.activityId);
+  if (!Number.isInteger(activityId) || activityId <= 0) {
+    response.status(400).json({
+      message: 'activityId debe ser un entero positivo.',
+    });
+    return;
+  }
+
+  try {
+    const route = isGarminSession(session)
+      ? await getGarminActivityRoute(sessionToGarminAuth(session), activityId)
+      : await getStravaActivityRoute(session, activityId);
+
+    response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+    response.json(route);
+  } catch (error) {
+    response.status(404).json({
+      message:
+        error instanceof Error ? error.message : 'No se pudo cargar el recorrido de la actividad.',
+    });
+  }
+});
+
+app.get('/api/athlete/avatar', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  try {
+    const avatarUrl = await resolveAthleteAvatarUrl(session);
+    if (!avatarUrl) {
+      response.status(404).json({
+        message: 'El perfil activo no tiene imagen disponible.',
+      });
+      return;
+    }
+
+    const upstream = await fetch(avatarUrl, {
+      headers: {
+        Accept: 'image/*',
+      },
+    });
+
+    if (!upstream.ok) {
+      response.status(404).json({
+        message: 'No se pudo descargar el avatar del proveedor activo.',
+      });
+      return;
+    }
+
+    const contentType = upstream.headers.get('content-type');
+    if (contentType) {
+      response.setHeader('Content-Type', contentType);
+    }
+
+    response.setHeader('Cache-Control', 'private, max-age=300');
+    response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+    response.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch (error) {
+    response.status(404).json({
+      message: error instanceof Error ? error.message : 'No se pudo cargar la imagen de perfil.',
+    });
+  }
 });
 
 app.post('/api/plan/workout', async (request, response) => {
