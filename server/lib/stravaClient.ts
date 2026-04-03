@@ -163,8 +163,13 @@ export async function getStravaAthlete(session: StravaSessionRecord): Promise<Re
 export async function getStravaActivity(
   session: StravaSessionRecord,
   activityId: number,
+  options: { endpoint?: 'activity' | 'streams'; search?: URLSearchParams } = {},
 ): Promise<Record<string, unknown>> {
-  return authorizedGet<Record<string, unknown>>(session, `/activities/${activityId}`);
+  if (options.endpoint === 'streams') {
+    return authorizedGet<Record<string, unknown>>(session, `/activities/${activityId}/streams`, options.search);
+  }
+
+  return authorizedGet<Record<string, unknown>>(session, `/activities/${activityId}`, options.search);
 }
 
 export async function getStravaAthleteStats(

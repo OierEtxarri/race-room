@@ -64,6 +64,7 @@ type TrainingWeek = {
   title: string;
   focus: string;
   targetKm: number | null;
+  coachNote?: string | null;
   days: TrainingDay[];
 };
 
@@ -146,6 +147,32 @@ export type DashboardData = {
   };
   adaptive: AdaptiveGuidance;
   advice: AdviceCard[];
+  checkIn: {
+    needsToday: boolean;
+    latest: {
+      date: string;
+      energy: 'low' | 'ok' | 'high';
+      legs: 'heavy' | 'normal' | 'fresh';
+      mood: 'flat' | 'steady' | 'great';
+      note: string | null;
+      createdAt: string;
+    } | null;
+    recent: Array<{
+      date: string;
+      energy: 'low' | 'ok' | 'high';
+      legs: 'heavy' | 'normal' | 'fresh';
+      mood: 'flat' | 'steady' | 'great';
+      note: string | null;
+      createdAt: string;
+    }>;
+  };
+  coach: {
+    enabled: boolean;
+    source: 'gemma4' | 'fallback';
+    model: string | null;
+    generatedAt: string | null;
+    todayMessage: string | null;
+  };
   plan: {
     summary: string;
     level: 'conservador' | 'equilibrado' | 'ambicioso';
@@ -1877,6 +1904,18 @@ function buildDashboardFromSource(input: {
     fitnessSummary,
     adaptive,
     advice,
+    checkIn: {
+      needsToday: true,
+      latest: null,
+      recent: [],
+    },
+    coach: {
+      enabled: false,
+      source: 'fallback',
+      model: null,
+      generatedAt: null,
+      todayMessage: null,
+    },
     plan,
     fetchedAt: new Date().toISOString(),
   };
@@ -2184,6 +2223,18 @@ export function buildFallbackDashboardData(
         tone: 'accent',
       },
     ],
+    checkIn: {
+      needsToday: true,
+      latest: null,
+      recent: [],
+    },
+    coach: {
+      enabled: false,
+      source: 'fallback',
+      model: null,
+      generatedAt: null,
+      todayMessage: null,
+    },
     plan: buildTrainingPlan({
       today,
       raceDate,

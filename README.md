@@ -1,6 +1,6 @@
-# Garmin Race Room
+# Race Room
 
-Dashboard responsive para Garmin Connect y Strava con login desde la propia app, plan adaptativo, export glass de entrenos y vista pensada para desktop y móvil.
+Dashboard responsive para Garmin Connect y Strava con login desde la propia app, plan adaptativo, export glass de entrenos y vista pensada para desktop y móvil. En la rama `feature/llm_gemma_4` añade además un coach basado en Gemma 4, check-in diario y sync más conservador.
 
 ## Vista rápida
 
@@ -18,10 +18,11 @@ Dashboard responsive para Garmin Connect y Strava con login desde la propia app,
 - Integración principal con [`python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) mediante un bridge Python local
 - Backend Express que consulta Garmin a través del MCP o Python API y Strava vía OAuth + REST API
 - Frontend React + Recharts con sidebar de secciones, glass UI, motion ligero y objetivo editable
-- Refresco automático del dashboard con caché viva en backend y restauración inicial desde snapshot persistido
+- Refresco automático más conservador: snapshot persistido al entrar, polling ligero en frontend y refresh del proveedor cada hora por defecto
 - Reautenticación automática cuando caducan los tokens mientras existan credenciales activas en la sesión del usuario
-- Panel de consejos basado en recuperación, carga, cumplimiento y sesiones recientes
 - Plan dinámico según fecha objetivo, distancia y rendimiento reciente
+- Coach adaptativo con Gemma 4 opcional, salida JSON validada y guardrails deterministas
+- Check-in diario de 3 señales subjetivas para afinar textos y microajustes del plan
 - Envío de entrenamientos futuros del plan a Garmin desde la propia app
 - Export `PNG` glass sin fondo para compartir entrenos sobre una foto propia
 - Persistencia ligera en SQLite del objetivo y del último dashboard/plan por usuario
@@ -48,11 +49,31 @@ STRAVA_CLIENT_SECRET=tu_client_secret
 STRAVA_REDIRECT_URI=http://localhost:8787/api/session/strava/callback
 ```
 
+Para activar Gemma 4 en local con Ollama:
+
+```bash
+ollama pull gemma4:e4b
+```
+
+Y añade además:
+
+```env
+LLM_PROVIDER=ollama
+LLM_BASE_URL=http://127.0.0.1:11434
+LLM_MODEL=gemma4:e4b
+LLM_MIN_INTERVAL_MINUTES=360
+
+DASHBOARD_BACKGROUND_REFRESH_MINUTES=60
+DASHBOARD_CACHE_TTL_MINUTES=20
+DASHBOARD_FALLBACK_CACHE_TTL_MINUTES=5
+```
+
 Notas:
 
 - Garmin no necesita dejar email y password fijos en `.env` para usar la app. Se introducen en el login y viven solo en la sesión activa.
 - Si quieres usar el bridge Python de Garmin, instala antes el entorno con `npm run garmin:python:install`.
 - Si quieres forzar el consumidor OAuth de `garth`, la API respeta `GARTH_OAUTH_KEY` y `GARTH_OAUTH_SECRET`.
+- Si no configuras Gemma 4, Race Room sigue funcionando con el motor determinista base.
 
 ## Arranque local
 
@@ -62,6 +83,7 @@ Notas:
 4. Abre la URL que muestre Vite. En local normal suele ser `http://localhost:5173`, aunque puede subir a otro puerto si ya está ocupado.
 5. Haz login desde la propia app con Garmin o Strava.
 6. Ajusta el objetivo con fecha y distancia; la app persistirá ese objetivo y el último plan en `data/garmin-connect.sqlite`.
+7. Si Gemma 4 está activo, completa el check-in diario para afinar el resumen fitness, el resumen del plan y los microajustes semanales.
 
 ## Arranque en móvil
 
@@ -96,9 +118,10 @@ Ejemplo real de hotspot móvil:
 - Las sesiones de Strava guardan `access_token` y `refresh_token` solo en memoria del backend y refrescan OAuth automáticamente mientras la sesión siga viva.
 - `python-garminconnect` sigue disponible como respaldo, como vía de escritura y como referencia de autenticación.
 - El backend persiste por email el último objetivo y dashboard/plan en SQLite para servir primero esa versión y refrescar Garmin después.
-- El backend refresca la caché del proveedor activo automáticamente cada 2 minutos y el frontend consulta la API local cada 30 segundos.
+- El backend refresca el proveedor activo cada 60 minutos por defecto y el frontend consulta la API local cada 10 minutos.
+- Gemma 4 no se invoca en cada sync: el snapshot del coach se reutiliza y solo se vuelve a generar cuando cambian señales clave o cuando haces el check-in diario.
 - Si faltan tokens o caducan, el backend intenta autenticarse de nuevo por sí solo con las credenciales activas de la sesión actual.
-- El plan adapta ritmos, volumen y consejo con señales como ACWR, readiness, sueño, tirada larga reciente, cumplimiento y calidad de los últimos 14 días.
+- El plan adapta ritmos, volumen y texto con señales como ACWR, readiness, sueño, tirada larga reciente, cumplimiento, calidad de los últimos 14 días y percepción subjetiva del día.
 - Los entrenamientos que no sean descanso, fuerza o carrera se pueden subir a Garmin para días futuros desde el panel semanal. En Strava el plan es de lectura y ajuste; no hay push de workouts.
 - Si Garmin devuelve `429` o `427`, el dashboard entra en modo degradado y te deja refrescar más tarde sin romper la UI.
 - GitHub Pages solo sirve el frontend. Para producción necesitas desplegar también la API en otro host y definir `FRONTEND_ORIGIN` en el backend y `VITE_API_BASE_URL` en el build del frontend.

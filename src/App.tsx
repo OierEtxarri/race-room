@@ -11,6 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { ActivityRouteMap } from './components/ActivityRouteMap';
 import type { ActivityRoute, DashboardData, SessionPayload, UserGoal } from './types';
 import './App.css';
 
@@ -30,6 +31,17 @@ type LoginState =
   | { status: 'hydrating'; error: null }
   | { status: 'error'; error: string };
 type LoginProvider = 'garmin' | 'strava';
+type CheckInDraft = {
+  energy: 'low' | 'ok' | 'high';
+  legs: 'heavy' | 'normal' | 'fresh';
+  mood: 'flat' | 'steady' | 'great';
+  note: string;
+};
+type CheckInState = {
+  status: 'idle' | 'saving' | 'success' | 'error';
+  message: string | null;
+  editing: boolean;
+};
 type RouteState =
   | { status: 'idle'; data: null; error: null }
   | { status: 'loading'; data: null; error: null }
@@ -40,8 +52,8 @@ type DashboardSectionId = 'summary' | 'fitness' | 'plan' | 'sessions';
 type AvatarSize = 'sm' | 'lg';
 
 type ChartMetric = 'sleepHours' | 'readiness' | 'hrv' | 'steps';
-const serverRefreshMs = 2 * 60 * 1_000;
-const clientPollMs = 30 * 1_000;
+const serverRefreshMs = 60 * 60 * 1_000;
+const clientPollMs = 10 * 60 * 1_000;
 const sessionStorageKey = 'garmin_race_room_session_id';
 const sessionProviderStorageKey = 'garmin_race_room_session_provider';
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
@@ -53,6 +65,12 @@ const idleRouteState: RouteState = {
 const defaultGoal: UserGoal = {
   raceDate: '2026-05-10',
   distanceKm: 21.1,
+};
+const defaultCheckInDraft: CheckInDraft = {
+  energy: 'ok',
+  legs: 'normal',
+  mood: 'steady',
+  note: '',
 };
 const runOverlayTemplate = {
   id: 'routeGlass' as const,
@@ -97,6 +115,23 @@ const chartOptions: Array<{
     description: 'Movimiento diario para detectar fatiga o sedentarismo entre sesiones.',
   },
 ];
+const checkInOptions = {
+  energy: [
+    { value: 'low' as const, label: 'Baja' },
+    { value: 'ok' as const, label: 'Media' },
+    { value: 'high' as const, label: 'Alta' },
+  ],
+  legs: [
+    { value: 'heavy' as const, label: 'Pesadas' },
+    { value: 'normal' as const, label: 'Normales' },
+    { value: 'fresh' as const, label: 'Frescas' },
+  ],
+  mood: [
+    { value: 'flat' as const, label: 'Plana' },
+    { value: 'steady' as const, label: 'Estable' },
+    { value: 'great' as const, label: 'Muy buena' },
+  ],
+};
 const dashboardSections: Array<{
   id: DashboardSectionId;
   label: string;
@@ -151,82 +186,6 @@ function AthleteAvatar({
   );
 }
 
-function RouteMiniMap({
-  route,
-  title,
-}: {
-  route: ActivityRoute;
-  title: string;
-}) {
-  const points = route.points;
-
-  if (points.length < 2) {
-    return (
-      <div className="route-map empty">
-        <span>[ SIN RUTA ]</span>
-      </div>
-    );
-  }
-
-  const latitudes = points.map((point) => point[0]);
-  const longitudes = points.map((point) => point[1]);
-  const minLat = Math.min(...latitudes);
-  const maxLat = Math.max(...latitudes);
-  const minLng = Math.min(...longitudes);
-  const maxLng = Math.max(...longitudes);
-  const latSpan = Math.max(maxLat - minLat, 0.0001);
-  const lngSpan = Math.max(maxLng - minLng, 0.0001);
-  const padding = 16;
-  const width = 320;
-  const height = 192;
-  const projected = points.map(([lat, lng]) => {
-    const x = padding + ((lng - minLng) / lngSpan) * (width - padding * 2);
-    const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
-    return [x, y] as const;
-  });
-
-  const svgPoints = projected
-    .map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`)
-    .join(' ');
-
-  const milestones = pickRouteMilestones(projected);
-  const gradientId = `route-gradient-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24)}`;
-
-  return (
-    <div className="route-map" aria-label={`Mapa del recorrido de ${title}`}>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-hidden="true">
-        <defs>
-          <pattern id="route-grid" width="16" height="16" patternUnits="userSpaceOnUse">
-            <circle cx="1" cy="1" r="1" fill="rgba(255,255,255,0.1)" />
-          </pattern>
-          <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#3E94FD" />
-            <stop offset="58%" stopColor="#5B8FFF" />
-            <stop offset="82%" stopColor="#F2C33C" />
-            <stop offset="100%" stopColor="#DF3E3E" />
-          </linearGradient>
-        </defs>
-        <rect width={width} height={height} fill="url(#route-grid)" />
-        <polyline points={svgPoints} fill="none" stroke={`url(#${gradientId})`} strokeWidth="2.8" />
-        {milestones.first ? <circle cx={milestones.first[0]} cy={milestones.first[1]} r="4" fill="#f9f6eb" /> : null}
-        {milestones.warm ? <circle cx={milestones.warm[0]} cy={milestones.warm[1]} r="3.5" fill="#3E94FD" /> : null}
-        {milestones.mid ? <circle cx={milestones.mid[0]} cy={milestones.mid[1]} r="3.5" fill="#F2C33C" /> : null}
-        {milestones.finish ? (
-          <>
-            <circle cx={milestones.finish[0]} cy={milestones.finish[1]} r="5" fill="#DF3E3E" />
-            <circle cx={milestones.finish[0]} cy={milestones.finish[1]} r="2.25" fill="#f9f6eb" />
-          </>
-        ) : null}
-      </svg>
-      <div className="route-map-meta">
-        <span>START</span>
-        <span>{route.source.toUpperCase()}</span>
-        <span>END</span>
-      </div>
-    </div>
-  );
-}
-
 function projectRoutePoints(points: ActivityRoute['points'], width: number, height: number, padding: number) {
   const latitudes = points.map((point) => point[0]);
   const longitudes = points.map((point) => point[1]);
@@ -242,26 +201,6 @@ function projectRoutePoints(points: ActivityRoute['points'], width: number, heig
     const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
     return [x, y] as const;
   });
-}
-
-function pickRouteMilestones<T>(points: T[]) {
-  if (!points.length) {
-    return {
-      first: null as T | null,
-      warm: null as T | null,
-      mid: null as T | null,
-      finish: null as T | null,
-    };
-  }
-
-  const milestoneAt = (ratio: number) => points[Math.min(points.length - 1, Math.max(0, Math.round((points.length - 1) * ratio)))] ?? null;
-
-  return {
-    first: points[0] ?? null,
-    warm: milestoneAt(0.34),
-    mid: milestoneAt(0.68),
-    finish: points[points.length - 1] ?? null,
-  };
 }
 
 function wrapCanvasText(
@@ -585,6 +524,294 @@ async function resolveAthleteAvatarAsset(avatarPath: string | null, sessionId: s
   }
 }
 
+const staticTileSize = 256;
+const staticSatelliteTileUrl =
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const staticHillshadeTileUrl =
+  'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}';
+const staticLabelsTileUrl =
+  'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+const staticTileCache = new Map<string, Promise<HTMLImageElement | null>>();
+
+function paceThresholds(route: ActivityRoute) {
+  const paces = route.samples
+    .map((sample) => sample.paceSecondsPerKm)
+    .filter((pace): pace is number => typeof pace === 'number' && Number.isFinite(pace) && pace > 0)
+    .sort((left, right) => left - right);
+
+  if (paces.length < 6) {
+    return null;
+  }
+
+  const pick = (ratio: number) => paces[Math.min(paces.length - 1, Math.floor((paces.length - 1) * ratio))] ?? null;
+  return {
+    fast: pick(0.33),
+    medium: pick(0.66),
+  };
+}
+
+function paceColor(paceSecondsPerKm: number | null, thresholds: ReturnType<typeof paceThresholds>) {
+  if (paceSecondsPerKm === null || !thresholds?.fast || !thresholds.medium) {
+    return '#7FC5FF';
+  }
+
+  if (paceSecondsPerKm <= thresholds.fast) {
+    return '#DF3E3E';
+  }
+
+  if (paceSecondsPerKm <= thresholds.medium) {
+    return '#F2A43C';
+  }
+
+  return '#5DAEFF';
+}
+
+function routeSegments(route: ActivityRoute) {
+  const thresholds = paceThresholds(route);
+
+  if (route.samples.length >= 2) {
+    return route.samples.slice(1).map((sample, index) => {
+      const previous = route.samples[index]!;
+      const segmentPace =
+        sample.paceSecondsPerKm !== null && previous.paceSecondsPerKm !== null
+          ? (sample.paceSecondsPerKm + previous.paceSecondsPerKm) / 2
+          : sample.paceSecondsPerKm ?? previous.paceSecondsPerKm ?? null;
+
+      return {
+        points: [previous.point, sample.point] as Array<[number, number]>,
+        color: paceColor(segmentPace, thresholds),
+      };
+    });
+  }
+
+  return [
+    {
+      points: route.points,
+      color: '#7FC5FF',
+    },
+  ];
+}
+
+function mercatorPixel(lat: number, lng: number, zoom: number) {
+  const sinLat = Math.sin((lat * Math.PI) / 180);
+  const scale = staticTileSize * 2 ** zoom;
+  const x = ((lng + 180) / 360) * scale;
+  const y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+  return { x, y };
+}
+
+function chooseStaticMapZoom(points: Array<[number, number]>, width: number, height: number, padding: number) {
+  for (let zoom = 16; zoom >= 3; zoom -= 1) {
+    const projected = points.map(([lat, lng]) => mercatorPixel(lat, lng, zoom));
+    const xs = projected.map((point) => point.x);
+    const ys = projected.map((point) => point.y);
+    const spanX = Math.max(...xs) - Math.min(...xs);
+    const spanY = Math.max(...ys) - Math.min(...ys);
+
+    if (spanX <= width - padding * 2 && spanY <= height - padding * 2) {
+      return zoom;
+    }
+  }
+
+  return 3;
+}
+
+function staticMapViewport(route: ActivityRoute, width: number, height: number, padding: number) {
+  const zoom = chooseStaticMapZoom(route.points, width, height, padding);
+  const projected = route.points.map(([lat, lng]) => mercatorPixel(lat, lng, zoom));
+  const xs = projected.map((point) => point.x);
+  const ys = projected.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  return {
+    zoom,
+    originX: centerX - width / 2,
+    originY: centerY - height / 2,
+  };
+}
+
+async function loadRemoteImageAsset(url: string) {
+  if (!staticTileCache.has(url)) {
+    staticTileCache.set(
+      url,
+      fetch(url)
+        .then((response) => (response.ok ? response.blob() : null))
+        .then(async (blob) => {
+          if (!blob) {
+            return null;
+          }
+
+          const blobUrl = URL.createObjectURL(blob);
+          try {
+            return await loadImageElement(blobUrl);
+          } finally {
+            URL.revokeObjectURL(blobUrl);
+          }
+        })
+        .catch(() => null),
+    );
+  }
+
+  return staticTileCache.get(url)!;
+}
+
+async function drawStaticRouteMapCard(
+  context: CanvasRenderingContext2D,
+  route: ActivityRoute,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius = 28,
+) {
+  const viewport = staticMapViewport(route, width, height, 28);
+  const startTileX = Math.floor(viewport.originX / staticTileSize);
+  const endTileX = Math.floor((viewport.originX + width) / staticTileSize);
+  const startTileY = Math.floor(viewport.originY / staticTileSize);
+  const endTileY = Math.floor((viewport.originY + height) / staticTileSize);
+  const worldTileCount = 2 ** viewport.zoom;
+  const tileJobs: Array<Promise<{ image: HTMLImageElement | null; hillshade: HTMLImageElement | null; labels: HTMLImageElement | null; drawX: number; drawY: number }>> = [];
+
+  for (let tileY = startTileY; tileY <= endTileY; tileY += 1) {
+    if (tileY < 0 || tileY >= worldTileCount) {
+      continue;
+    }
+
+    for (let tileX = startTileX; tileX <= endTileX; tileX += 1) {
+      const wrappedTileX = ((tileX % worldTileCount) + worldTileCount) % worldTileCount;
+      const drawX = x + tileX * staticTileSize - viewport.originX;
+      const drawY = y + tileY * staticTileSize - viewport.originY;
+      const replace = (template: string) =>
+        template
+          .replace('{z}', String(viewport.zoom))
+          .replace('{y}', String(tileY))
+          .replace('{x}', String(wrappedTileX));
+
+      tileJobs.push(
+        Promise.all([
+          loadRemoteImageAsset(replace(staticSatelliteTileUrl)),
+          loadRemoteImageAsset(replace(staticHillshadeTileUrl)),
+          loadRemoteImageAsset(replace(staticLabelsTileUrl)),
+        ]).then(([image, hillshade, labels]) => ({
+          image,
+          hillshade,
+          labels,
+          drawX,
+          drawY,
+        })),
+      );
+    }
+  }
+
+  const tiles = await Promise.all(tileJobs);
+
+  context.save();
+  drawRoundedRect(context, x, y, width, height, radius);
+  context.clip();
+  context.fillStyle = '#11161D';
+  context.fillRect(x, y, width, height);
+
+  tiles.forEach((tile) => {
+    if (tile.image) {
+      context.drawImage(tile.image, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
+    }
+  });
+
+  context.save();
+  context.globalAlpha = 0.34;
+  context.globalCompositeOperation = 'screen';
+  tiles.forEach((tile) => {
+    if (tile.hillshade) {
+      context.drawImage(tile.hillshade, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
+    }
+  });
+  context.restore();
+
+  context.fillStyle = 'rgba(14, 18, 24, 0.32)';
+  context.fillRect(x, y, width, height);
+
+  context.save();
+  context.globalAlpha = 0.16;
+  tiles.forEach((tile) => {
+    if (tile.labels) {
+      context.drawImage(tile.labels, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
+    }
+  });
+  context.restore();
+
+  const projectedPoints = route.points.map(([lat, lng]) => {
+    const pixel = mercatorPixel(lat, lng, viewport.zoom);
+    return [x + pixel.x - viewport.originX, y + pixel.y - viewport.originY] as const;
+  });
+  const segments = routeSegments(route);
+
+  segments.forEach((segment) => {
+    const projected = segment.points.map(([lat, lng]) => {
+      const pixel = mercatorPixel(lat, lng, viewport.zoom);
+      return [x + pixel.x - viewport.originX, y + pixel.y - viewport.originY] as const;
+    });
+
+    context.strokeStyle = `${segment.color}44`;
+    context.lineWidth = 16;
+    context.lineJoin = 'round';
+    context.lineCap = 'round';
+    context.beginPath();
+    projected.forEach(([pointX, pointY], index) => {
+      if (index === 0) {
+        context.moveTo(pointX, pointY);
+      } else {
+        context.lineTo(pointX, pointY);
+      }
+    });
+    context.stroke();
+
+    context.strokeStyle = segment.color;
+    context.lineWidth = 6;
+    context.beginPath();
+    projected.forEach(([pointX, pointY], index) => {
+      if (index === 0) {
+        context.moveTo(pointX, pointY);
+      } else {
+        context.lineTo(pointX, pointY);
+      }
+    });
+    context.stroke();
+  });
+
+  const [startX, startY] = projectedPoints[0]!;
+  const [endX, endY] = projectedPoints.at(-1)!;
+  context.fillStyle = '#F9F6EB';
+  context.beginPath();
+  context.arc(startX, startY, 5, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#DF3E3E';
+  context.beginPath();
+  context.arc(endX, endY, 6, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#F9F6EB';
+  context.beginPath();
+  context.arc(endX, endY, 2.5, 0, Math.PI * 2);
+  context.fill();
+
+  const overlayGradient = context.createLinearGradient(x, y, x, y + height);
+  overlayGradient.addColorStop(0, 'rgba(20, 24, 31, 0.08)');
+  overlayGradient.addColorStop(1, 'rgba(20, 24, 31, 0.26)');
+  context.fillStyle = overlayGradient;
+  context.fillRect(x, y, width, height);
+  context.restore();
+
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    stroke: 'rgba(255,255,255,0.12)',
+    lineWidth: 1.5,
+  });
+}
+
 function buildOverlayHeadline(name: string) {
   const cleaned = name
     .toLowerCase()
@@ -654,84 +881,6 @@ function drawGlassPanel(
   context.strokeStyle = 'rgba(255,255,255,0.34)';
   context.lineWidth = 1.5;
   context.stroke();
-  context.restore();
-}
-
-function drawSignatureRouteOverlay(
-  context: CanvasRenderingContext2D,
-  route: ActivityRoute,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-) {
-  const projected = projectRoutePoints(route.points, width, height, 14);
-  const milestones = pickRouteMilestones(projected);
-
-  context.save();
-  context.translate(x, y);
-  context.lineJoin = 'round';
-  context.lineCap = 'round';
-
-  const routeGlow = context.createLinearGradient(0, 0, width, height);
-  routeGlow.addColorStop(0, 'rgba(62, 148, 253, 0.22)');
-  routeGlow.addColorStop(0.76, 'rgba(242, 195, 60, 0.18)');
-  routeGlow.addColorStop(1, 'rgba(223, 62, 62, 0.18)');
-  context.strokeStyle = routeGlow;
-  context.lineWidth = 20;
-  context.beginPath();
-  projected.forEach(([pointX, pointY], index) => {
-    if (index === 0) {
-      context.moveTo(pointX, pointY);
-    } else {
-      context.lineTo(pointX, pointY);
-    }
-  });
-  context.stroke();
-
-  const routeStroke = context.createLinearGradient(0, 0, width, height);
-  routeStroke.addColorStop(0, '#3E94FD');
-  routeStroke.addColorStop(0.58, '#5B8FFF');
-  routeStroke.addColorStop(0.82, '#F2C33C');
-  routeStroke.addColorStop(1, '#DF3E3E');
-  context.strokeStyle = routeStroke;
-  context.lineWidth = 7;
-  context.beginPath();
-  projected.forEach(([pointX, pointY], index) => {
-    if (index === 0) {
-      context.moveTo(pointX, pointY);
-    } else {
-      context.lineTo(pointX, pointY);
-    }
-  });
-  context.stroke();
-
-  const [startX, startY] = projected[0]!;
-  const [endX, endY] = projected.at(-1)!;
-  context.fillStyle = '#FFFFFF';
-  context.beginPath();
-  context.arc(startX, startY, 6, 0, Math.PI * 2);
-  context.fill();
-  if (milestones.warm) {
-    context.fillStyle = '#3E94FD';
-    context.beginPath();
-    context.arc(milestones.warm[0], milestones.warm[1], 5, 0, Math.PI * 2);
-    context.fill();
-  }
-  if (milestones.mid) {
-    context.fillStyle = '#F2C33C';
-    context.beginPath();
-    context.arc(milestones.mid[0], milestones.mid[1], 5, 0, Math.PI * 2);
-    context.fill();
-  }
-  context.fillStyle = '#DF3E3E';
-  context.beginPath();
-  context.arc(endX, endY, 7, 0, Math.PI * 2);
-  context.fill();
-  context.fillStyle = '#F9F6EB';
-  context.beginPath();
-  context.arc(endX, endY, 3, 0, Math.PI * 2);
-  context.fill();
   context.restore();
 }
 
@@ -1041,7 +1190,7 @@ function renderSplitEditorialOverlay(context: CanvasRenderingContext2D, input: {
   drawOverlayPill(context, 1080 - 82 - athleteWidth, 1734, input.athleteName.toUpperCase());
 }
 
-function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input: {
+async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input: {
   run: DashboardData['recentRuns'][number];
   route: ActivityRoute;
   athleteName: string;
@@ -1056,7 +1205,7 @@ function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input: {
   const subtitle = subtitleParts.join(' · ');
   const description = buildRunDescription(input.run);
 
-  drawGlassPanel(context, 84, 122, 912, 520, 40);
+  drawGlassPanel(context, 84, 122, 912, 784, 40);
 
   context.save();
   const avatarX = 160;
@@ -1123,11 +1272,19 @@ function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input: {
     context.fillText(item.value, item.x, 596);
   });
 
-  drawSignatureRouteOverlay(context, input.route, 312, 820, 456, 336);
+  await drawStaticRouteMapCard(context, input.route, 122, 650, 836, 216, 30);
 
-  context.fillStyle = 'rgba(255,255,255,0.82)';
-  context.font = '700 36px "Space Grotesk", sans-serif';
-  context.fillText(input.providerLabel.toUpperCase(), 424, 1264);
+  fillRoundedPanel(context, 144, 674, 210, 54, {
+    radius: 999,
+    fill: 'rgba(20,24,31,0.62)',
+    stroke: 'rgba(255,255,255,0.12)',
+  });
+  context.fillStyle = 'rgba(255,255,255,0.66)';
+  context.font = '500 16px "Space Mono", monospace';
+  context.fillText('SATELLITE RELIEF', 170, 708);
+  context.fillStyle = '#FFFFFF';
+  context.font = '700 28px "Space Grotesk", sans-serif';
+  context.fillText(input.providerLabel.toUpperCase(), 170, 742);
 }
 
 function renderRibbonDataOverlay(context: CanvasRenderingContext2D, input: {
@@ -1429,7 +1586,7 @@ async function exportRunShareImage(input: {
   const avatarAsset = await resolveAthleteAvatarAsset(input.athleteAvatarPath, input.sessionId);
 
   try {
-    renderRouteFocusOverlay(context, {
+    await renderRouteFocusOverlay(context, {
       ...input,
       athleteAvatarImage: avatarAsset.image,
     });
@@ -1627,6 +1784,73 @@ function formatComplianceRate(value: number | null) {
   return `${Math.round(value * 100)}%`;
 }
 
+function formatPollingLabel(ms: number) {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  if (!remainderMinutes) {
+    return `${hours} h`;
+  }
+
+  return `${hours} h ${remainderMinutes} min`;
+}
+
+function formatCoachRelativeTime(value: string | null) {
+  if (!value) {
+    return 'Pendiente';
+  }
+
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) {
+    return 'Pendiente';
+  }
+
+  const diffMs = Date.now() - timestamp;
+  const diffMinutes = Math.max(0, Math.round(diffMs / 60_000));
+
+  if (diffMinutes < 1) {
+    return 'Ahora mismo';
+  }
+
+  if (diffMinutes < 60) {
+    return `Hace ${diffMinutes} min`;
+  }
+
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `Hace ${diffHours} h`;
+  }
+
+  return new Date(value).toLocaleDateString('es-ES', {
+    day: '2-digit',
+    month: '2-digit',
+  });
+}
+
+function formatCheckInValue(
+  group: keyof Pick<CheckInDraft, 'energy' | 'legs' | 'mood'>,
+  value: CheckInDraft[typeof group],
+) {
+  const options = checkInOptions[group];
+  return options.find((option) => option.value === value)?.label ?? value;
+}
+
+function coachEngineLabel(coach: DashboardData['coach']) {
+  if (coach.source === 'gemma4') {
+    return coach.model ?? 'Gemma 4';
+  }
+
+  if (coach.enabled) {
+    return 'Fallback validado';
+  }
+
+  return 'Reglas base';
+}
+
 function formatExecutionDelta(value: number | null) {
   if (value === null || value === 0) {
     return 'Sin dato';
@@ -1730,6 +1954,10 @@ function longRun(week: DashboardData['plan']['weeks'][number]) {
 }
 
 function coachCue(week: DashboardData['plan']['weeks'][number], fallbackReason?: string) {
+  if (week.coachNote?.trim()) {
+    return week.coachNote;
+  }
+
   if (fallbackReason) {
     return 'Plan provisional hasta que el proveedor vuelva a responder.';
   }
@@ -1771,6 +1999,12 @@ function App() {
   const [loginGoal, setLoginGoal] = useState<UserGoal>(defaultGoal);
   const [goalDraft, setGoalDraft] = useState<UserGoal>(defaultGoal);
   const [isSavingGoal, setIsSavingGoal] = useState(false);
+  const [checkInDraft, setCheckInDraft] = useState<CheckInDraft>(defaultCheckInDraft);
+  const [checkInState, setCheckInState] = useState<CheckInState>({
+    status: 'idle',
+    message: null,
+    editing: true,
+  });
   const [selectedMetric, setSelectedMetric] = useState<ChartMetric>('sleepHours');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
@@ -1841,6 +2075,12 @@ function App() {
     setSessionProvider(null);
     setSessionAccountLabel(null);
     setGoalDraft(defaultGoal);
+    setCheckInDraft(defaultCheckInDraft);
+    setCheckInState({
+      status: 'idle',
+      message: null,
+      editing: true,
+    });
     setLoginState({
       status: 'idle',
       error: null,
@@ -2025,6 +2265,30 @@ function App() {
 
   useEffect(() => {
     if (state.status !== 'ready') {
+      return;
+    }
+
+    const latest = state.data.checkIn.latest;
+    setCheckInDraft({
+      energy: latest?.energy ?? defaultCheckInDraft.energy,
+      legs: latest?.legs ?? defaultCheckInDraft.legs,
+      mood: latest?.mood ?? defaultCheckInDraft.mood,
+      note: latest?.note ?? '',
+    });
+    setCheckInState((current) => ({
+      status: current.status === 'saving' ? current.status : 'idle',
+      message: current.status === 'saving' ? current.message : null,
+      editing: state.data.checkIn.needsToday,
+    }));
+  }, [
+    state.status,
+    state.status === 'ready' ? state.data.checkIn.latest?.date : null,
+    state.status === 'ready' ? state.data.checkIn.latest?.createdAt : null,
+    state.status === 'ready' ? state.data.checkIn.needsToday : null,
+  ]);
+
+  useEffect(() => {
+    if (state.status !== 'ready') {
       setRouteState((current) => (current.status === 'idle' ? current : idleRouteState));
       return;
     }
@@ -2170,6 +2434,11 @@ function App() {
         status: 'hydrating',
         error: null,
       });
+      setState({
+        status: 'loading',
+        data: null,
+        error: null,
+      });
       await loadDashboard(false, sessionPayload.sessionId, {
         surfaceError: false,
       });
@@ -2197,6 +2466,49 @@ function App() {
     url.searchParams.set('distanceKm', String(loginGoal.distanceKm));
     url.searchParams.set('returnTo', appReturnUrl());
     window.location.assign(url.toString());
+  };
+
+  const submitCheckIn = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!sessionIdRef.current) {
+      return;
+    }
+
+    setCheckInState({
+      status: 'saving',
+      message: null,
+      editing: true,
+    });
+
+    try {
+      const response = await apiFetch('/api/checkin', {
+        method: 'POST',
+        body: JSON.stringify({
+          energy: checkInDraft.energy,
+          legs: checkInDraft.legs,
+          mood: checkInDraft.mood,
+          note: checkInDraft.note.trim() || null,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? 'No se pudo guardar tu check-in diario.');
+      }
+
+      await loadDashboard(false);
+      setCheckInState({
+        status: 'success',
+        message: 'Check-in guardado. El plan y los textos ya están afinados con tu sensación de hoy.',
+        editing: false,
+      });
+    } catch (error) {
+      setCheckInState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'No se pudo guardar el check-in.',
+        editing: true,
+      });
+    }
   };
 
   const submitGoal = async (event: FormEvent<HTMLFormElement>) => {
@@ -2462,6 +2774,9 @@ function App() {
     : 0;
   const volumeRatio = data.adaptive.signals.volumeRatio;
   const acuteChronicRatio = data.adaptive.signals.acuteChronicRatio;
+  const latestCheckIn = data.checkIn.latest;
+  const showCheckInForm = data.checkIn.needsToday || checkInState.editing;
+  const coachLabel = coachEngineLabel(data.coach);
   const nextSyncAt = new Date(data.fetchedAt).getTime() + serverRefreshMs;
   const nextSyncIn = nextSyncAt - clockNow;
   const syncTone = data.fallbackReason ? 'warning' : isRefreshing ? 'syncing' : 'live';
@@ -2701,6 +3016,229 @@ function App() {
         </div>
       </section>
 
+      <section className="coach-strip">
+        <article className={`panel daily-checkin-panel ${data.checkIn.needsToday ? 'attention' : ''}`}>
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Check-in diario</p>
+              <h2>Cómo llegas hoy</h2>
+            </div>
+            <span className={`checkin-status ${data.checkIn.needsToday ? 'pending' : 'done'}`}>
+              {data.checkIn.needsToday ? 'Pendiente hoy' : 'Hecho hoy'}
+            </span>
+          </div>
+
+          {showCheckInForm ? (
+            <form className="checkin-form" onSubmit={submitCheckIn}>
+              <div className="checkin-grid">
+                <div className="checkin-question">
+                  <span>Energía</span>
+                  <div className="checkin-options">
+                    {checkInOptions.energy.map((option) => (
+                      <button
+                        key={option.value}
+                        className={`checkin-option ${checkInDraft.energy === option.value ? 'selected' : ''}`}
+                        disabled={checkInState.status === 'saving'}
+                        onClick={() =>
+                          setCheckInDraft((current) => ({
+                            ...current,
+                            energy: option.value,
+                          }))
+                        }
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="checkin-question">
+                  <span>Piernas</span>
+                  <div className="checkin-options">
+                    {checkInOptions.legs.map((option) => (
+                      <button
+                        key={option.value}
+                        className={`checkin-option ${checkInDraft.legs === option.value ? 'selected' : ''}`}
+                        disabled={checkInState.status === 'saving'}
+                        onClick={() =>
+                          setCheckInDraft((current) => ({
+                            ...current,
+                            legs: option.value,
+                          }))
+                        }
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="checkin-question">
+                  <span>Cabeza</span>
+                  <div className="checkin-options">
+                    {checkInOptions.mood.map((option) => (
+                      <button
+                        key={option.value}
+                        className={`checkin-option ${checkInDraft.mood === option.value ? 'selected' : ''}`}
+                        disabled={checkInState.status === 'saving'}
+                        onClick={() =>
+                          setCheckInDraft((current) => ({
+                            ...current,
+                            mood: option.value,
+                          }))
+                        }
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <label className="form-field checkin-note-field">
+                <span>Nota opcional</span>
+                <textarea
+                  disabled={checkInState.status === 'saving'}
+                  maxLength={220}
+                  onChange={(event) =>
+                    setCheckInDraft((current) => ({
+                      ...current,
+                      note: event.target.value,
+                    }))
+                  }
+                  placeholder="Fatiga acumulada, estrés, molestias o cualquier contexto útil para afinar el plan."
+                  rows={3}
+                  value={checkInDraft.note}
+                />
+              </label>
+
+              <div className="checkin-footer">
+                <p className="checkin-help">
+                  Son solo 3 señales subjetivas al día. Race Room las cruza con Garmin o Strava para ajustar el tono,
+                  el texto y los microcambios del plan sin disparar el LLM a cada sync.
+                </p>
+                <div className="checkin-actions">
+                  {!data.checkIn.needsToday ? (
+                    <button
+                      className="secondary-button"
+                      disabled={checkInState.status === 'saving'}
+                      onClick={() =>
+                        setCheckInState({
+                          status: 'idle',
+                          message: null,
+                          editing: false,
+                        })
+                      }
+                      type="button"
+                    >
+                      Cancelar
+                    </button>
+                  ) : null}
+                  <button className="action-button" disabled={checkInState.status === 'saving'} type="submit">
+                    {checkInState.status === 'saving'
+                      ? 'Guardando...'
+                      : data.checkIn.needsToday
+                        ? 'Guardar check-in de hoy'
+                        : 'Actualizar check-in'}
+                  </button>
+                </div>
+              </div>
+
+              {checkInState.message ? (
+                <p className={`checkin-feedback ${checkInState.status}`}>{checkInState.message}</p>
+              ) : null}
+            </form>
+          ) : (
+            <div className="checkin-complete">
+              <p className="checkin-help">
+                Hoy ya has dejado señal subjetiva. Si cambias de sensación más tarde, puedes actualizarla y volver a
+                afinar el coach.
+              </p>
+              <div className="checkin-summary-chips">
+                <span>
+                  Energía
+                  <strong>{formatCheckInValue('energy', latestCheckIn?.energy ?? 'ok')}</strong>
+                </span>
+                <span>
+                  Piernas
+                  <strong>{formatCheckInValue('legs', latestCheckIn?.legs ?? 'normal')}</strong>
+                </span>
+                <span>
+                  Cabeza
+                  <strong>{formatCheckInValue('mood', latestCheckIn?.mood ?? 'steady')}</strong>
+                </span>
+              </div>
+              {latestCheckIn?.note ? <p className="checkin-latest-note">“{latestCheckIn.note}”</p> : null}
+              {checkInState.message ? (
+                <p className={`checkin-feedback ${checkInState.status}`}>{checkInState.message}</p>
+              ) : null}
+              <div className="checkin-actions">
+                <button
+                  className="secondary-button"
+                  onClick={() =>
+                    setCheckInState({
+                      status: 'idle',
+                      message: null,
+                      editing: true,
+                    })
+                  }
+                  type="button"
+                >
+                  Actualizar sensación de hoy
+                </button>
+              </div>
+            </div>
+          )}
+        </article>
+
+        <aside className="panel coach-daily-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Race Room Coach</p>
+              <h2>{data.coach.source === 'gemma4' ? 'Gemma 4 + guardrails' : 'Ajuste validado del día'}</h2>
+            </div>
+            <span className={`checkin-status ${data.coach.source === 'gemma4' ? 'done' : 'pending'}`}>
+              {coachLabel}
+            </span>
+          </div>
+
+          <p className="coach-daily-message">
+            {data.coach.todayMessage ??
+              'Todavía no hay una lectura subjetiva de hoy. Completa el check-in para dar contexto a los datos duros.'}
+          </p>
+
+          <div className="coach-micro-grid">
+            <article className="stat-pill">
+              <span className="metric-label">Último ajuste</span>
+              <strong>{formatCoachRelativeTime(data.coach.generatedAt)}</strong>
+              <small>{data.coach.generatedAt ? new Date(data.coach.generatedAt).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : 'Sin generación todavía'}</small>
+            </article>
+            <article className="stat-pill">
+              <span className="metric-label">Próximo refresh proveedor</span>
+              <strong>{formatPollingLabel(serverRefreshMs)}</strong>
+              <small>Backend con caché viva y sync más conservador</small>
+            </article>
+            <article className="stat-pill">
+              <span className="metric-label">Estado subjetivo</span>
+              <strong>
+                {latestCheckIn
+                  ? `${formatCheckInValue('energy', latestCheckIn.energy)} · ${formatCheckInValue('legs', latestCheckIn.legs)}`
+                  : 'Pendiente'}
+              </strong>
+              <small>{latestCheckIn ? formatCheckInValue('mood', latestCheckIn.mood) : 'Sin check-in de hoy'}</small>
+            </article>
+          </div>
+
+          <p className="coach-footnote">
+            El proveedor no se refresca cada dos minutos. Primero se reutiliza el snapshot persistido; Gemma solo entra
+            cuando cambian señales relevantes o cuando tú confirmas cómo te encuentras hoy.
+          </p>
+        </aside>
+      </section>
+
       <section className="metrics-grid">
         <article className="metric-card">
           <span className="metric-label">Sueño</span>
@@ -2727,11 +3265,6 @@ function App() {
           <strong>{metricValue(data.overview.activeCalories)}</strong>
           <small>Actividad diaria</small>
         </article>
-        <article className="metric-card">
-          <span className="metric-label">Peso</span>
-          <strong>{metricValue(data.overview.weightKg, ' kg', 1)}</strong>
-          <small>{data.provider.key === 'garmin' ? 'Último registro en Garmin' : 'Dato no disponible en Strava'}</small>
-        </article>
       </section>
 
       <section className="dashboard-section" id="section-sessions">
@@ -2744,7 +3277,7 @@ function App() {
             <span className="mini-status">
               {isRefreshing
                 ? `Actualizando con ${data.provider.label}...`
-                : `Auto refresh cada ${Math.round(serverRefreshMs / 60_000)} min`}
+                : `Auto refresh cada ${formatPollingLabel(serverRefreshMs)}`}
             </span>
           </div>
 
@@ -2759,7 +3292,7 @@ function App() {
                   {data.athlete.location ? ` · ${data.athlete.location}` : ''}
                 </p>
                 {routeState.status === 'ready' ? (
-                  <RouteMiniMap route={routeState.data} title={selectedRun.name} />
+                  <ActivityRouteMap route={routeState.data} title={selectedRun.name} />
                 ) : routeState.status === 'loading' ? (
                   <div className="route-map empty">
                     <span>[ LOADING ROUTE ]</span>
@@ -3362,7 +3895,7 @@ function App() {
       <footer className="footer-note">
         <span>
           Última sincronización: {new Date(data.fetchedAt).toLocaleString()} · El frontend consulta la API
-          cada 30 s y el backend refresca {data.provider.label} cada {Math.round(serverRefreshMs / 60_000)} min.
+          cada {formatPollingLabel(clientPollMs)} y el backend refresca {data.provider.label} cada {formatPollingLabel(serverRefreshMs)}.
         </span>
       </footer>
       </div>

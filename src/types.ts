@@ -118,6 +118,32 @@ export type DashboardData = {
     body: string;
     tone: 'accent' | 'calm' | 'warning';
   }>;
+  checkIn: {
+    needsToday: boolean;
+    latest: {
+      date: string;
+      energy: 'low' | 'ok' | 'high';
+      legs: 'heavy' | 'normal' | 'fresh';
+      mood: 'flat' | 'steady' | 'great';
+      note: string | null;
+      createdAt: string;
+    } | null;
+    recent: Array<{
+      date: string;
+      energy: 'low' | 'ok' | 'high';
+      legs: 'heavy' | 'normal' | 'fresh';
+      mood: 'flat' | 'steady' | 'great';
+      note: string | null;
+      createdAt: string;
+    }>;
+  };
+  coach: {
+    enabled: boolean;
+    source: 'gemma4' | 'fallback';
+    model: string | null;
+    generatedAt: string | null;
+    todayMessage: string | null;
+  };
   plan: {
     summary: string;
     level: 'conservador' | 'equilibrado' | 'ambicioso';
@@ -131,6 +157,7 @@ export type DashboardData = {
       title: string;
       focus: string;
       targetKm: number | null;
+      coachNote?: string | null;
       days: Array<{
         date: string;
         weekday: string;
@@ -162,7 +189,14 @@ export type SessionPayload = {
   goal: UserGoal;
 };
 
+export type ActivityRouteSample = {
+  point: [number, number];
+  paceSecondsPerKm: number | null;
+  timestampSeconds: number | null;
+};
+
 export type ActivityRoute = {
   points: Array<[number, number]>;
+  samples: ActivityRouteSample[];
   source: 'garmin' | 'strava';
 };

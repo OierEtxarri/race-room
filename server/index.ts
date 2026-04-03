@@ -36,16 +36,24 @@ import {
   type UserGoal,
 } from './lib/sessionStore.ts';
 import {
+  applyCoachSnapshotToDashboard,
+  generateCoachSnapshot,
+} from './lib/llmCoach.ts';
+import {
   getPersistedUserState,
+  getPersistedCoachState,
+  listRecentDailyCheckIns,
+  upsertDailyCheckIn,
+  upsertPersistedCoachState,
   upsertPersistedDashboard,
   upsertPersistedGoal,
 } from './lib/userStateStore.ts';
 import { config } from './config.ts';
 
 const app = express();
-const cacheTtlMs = 2 * 60 * 1_000;
-const fallbackCacheTtlMs = 45 * 1_000;
-const backgroundRefreshMs = 2 * 60 * 1_000;
+const cacheTtlMs = config.dashboardCacheTtlMs;
+const fallbackCacheTtlMs = config.dashboardFallbackCacheTtlMs;
+const backgroundRefreshMs = config.dashboardBackgroundRefreshMs;
 const stravaLoginStateTtlMs = 15 * 60 * 1_000;
 const allowedOrigins = new Set(['http://localhost:5173', config.frontendOrigin].filter(Boolean));
 
@@ -200,6 +208,34 @@ function fallbackFromBase(
   };
 }
 
+async function decorateDashboardForSession(
+  session: SessionRecord,
+  dashboard: DashboardData,
+  options: { forceCoachRegeneration?: boolean } = {},
+): Promise<DashboardData> {
+  const checkIns = listRecentDailyCheckIns(session.accountKey, 7);
+  const persistedCoach = getPersistedCoachState(session.accountKey);
+  const { snapshot, inputHash } = await generateCoachSnapshot({
+    dashboard,
+    checkIns,
+    persistedState: persistedCoach,
+    forceRegenerate: options.forceCoachRegeneration,
+  });
+
+  upsertPersistedCoachState({
+    accountKey: session.accountKey,
+    inputHash,
+    snapshotJson: JSON.stringify(snapshot),
+    generatedAt: snapshot.generatedAt,
+  });
+
+  return applyCoachSnapshotToDashboard({
+    dashboard,
+    checkIns,
+    snapshot,
+  });
+}
+
 function resolveSessionFromRequest(request: express.Request): SessionRecord | null {
   const headerSessionId = request.header('x-session-id')?.trim();
   const cookieSessionId = parseCookies(request.header('cookie'))[sessionCookieName];
@@ -288,14 +324,15 @@ async function liveRefreshDashboardData(
             auth: session,
             goal: session.goal,
           });
+      const decorated = await decorateDashboardForSession(session, data);
 
       upsertPersistedDashboard({
         accountKey: session.accountKey,
         goal: session.goal,
-        dashboard: data,
+        dashboard: decorated,
       });
 
-      return cacheDashboard(session.id, data, cacheTtlMs);
+      return cacheDashboard(session.id, decorated, cacheTtlMs);
     } catch (error) {
       console.error(`[api] dashboard fetch failed for ${session.accountKey}`, error);
       const message =
@@ -334,9 +371,18 @@ async function getDashboardData(
       : null;
 
   if (!force && persistedDashboard && !cached) {
-    cacheDashboard(session.id, persistedDashboard, fallbackCacheTtlMs);
+    const hydratedPersisted = await decorateDashboardForSession(session, {
+      ...persistedDashboard,
+      fetchedAt: new Date().toISOString(),
+    });
+    upsertPersistedDashboard({
+      accountKey: session.accountKey,
+      goal: session.goal,
+      dashboard: hydratedPersisted,
+    });
+    cacheDashboard(session.id, hydratedPersisted, fallbackCacheTtlMs);
     void liveRefreshDashboardData(session, persistedDashboard);
-    return persistedDashboard;
+    return hydratedPersisted;
   }
 
   return liveRefreshDashboardData(session, cached?.data ?? persistedDashboard);
@@ -349,6 +395,17 @@ app.get('/api/health', (_request, response) => {
     supportsPerUserAuth: true,
     providers: ['garmin', 'strava'],
     stravaConfigured: isStravaConfigured(),
+    llm: {
+      enabled: Boolean(config.llmProvider && config.llmBaseUrl && config.llmModel),
+      provider: config.llmProvider || null,
+      model: config.llmModel || null,
+      minIntervalMinutes: Math.round(config.llmMinIntervalMs / 60_000),
+    },
+    sync: {
+      providerRefreshMinutes: Math.round(backgroundRefreshMs / 60_000),
+      cacheTtlMinutes: Math.round(cacheTtlMs / 60_000),
+      fallbackCacheTtlMinutes: Math.round(fallbackCacheTtlMs / 60_000),
+    },
     frontendMode: 'static-ready',
     fetchedAt: new Date().toISOString(),
   });
@@ -637,6 +694,62 @@ app.get('/api/dashboard', async (request, response) => {
   const data = await getDashboardData(session, { force: forceRefresh });
   response.setHeader('Set-Cookie', buildSessionCookie(session.id));
   response.json(data);
+});
+
+app.post('/api/checkin', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const energy = typeof request.body?.energy === 'string' ? request.body.energy.trim() : '';
+  const legs = typeof request.body?.legs === 'string' ? request.body.legs.trim() : '';
+  const mood = typeof request.body?.mood === 'string' ? request.body.mood.trim() : '';
+  const note = typeof request.body?.note === 'string' ? request.body.note : null;
+
+  if (!['low', 'ok', 'high'].includes(energy) || !['heavy', 'normal', 'fresh'].includes(legs) || !['flat', 'steady', 'great'].includes(mood)) {
+    response.status(400).json({
+      message: 'El check-in diario necesita energía, piernas y estado mental válidos.',
+    });
+    return;
+  }
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  upsertDailyCheckIn({
+    accountKey: session.accountKey,
+    date: todayIso,
+    energy: energy as 'low' | 'ok' | 'high',
+    legs: legs as 'heavy' | 'normal' | 'fresh',
+    mood: mood as 'flat' | 'steady' | 'great',
+    note,
+  });
+
+  const cached = cachedDashboards.get(session.id)?.data ?? getPersistedUserState(session.accountKey)?.dashboard ?? null;
+  if (cached) {
+    const decorated = await decorateDashboardForSession(session, {
+      ...cached,
+      fetchedAt: new Date().toISOString(),
+    }, {
+      forceCoachRegeneration: true,
+    });
+    upsertPersistedDashboard({
+      accountKey: session.accountKey,
+      goal: session.goal,
+      dashboard: decorated,
+    });
+    cacheDashboard(session.id, decorated, cacheTtlMs);
+  } else {
+    invalidateSessionCache(session.id);
+  }
+
+  response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+  response.json({
+    ok: true,
+    date: todayIso,
+  });
 });
 
 app.get('/api/activities/:activityId/route', async (request, response) => {
