@@ -34,7 +34,7 @@ type LlmPayload = {
   }>;
 };
 
-function llmEnabled() {
+export function llmEnabled() {
   return Boolean(config.llmBaseUrl && config.llmModel && config.llmProvider);
 }
 
@@ -227,7 +227,7 @@ ${JSON.stringify({
 `.trim();
 }
 
-async function callOllama(prompt: string): Promise<string> {
+async function callOllama(prompt: string, options: { json?: boolean } = {}): Promise<string> {
   const response = await fetch(new URL('/api/generate', config.llmBaseUrl), {
     method: 'POST',
     headers: {
@@ -237,7 +237,7 @@ async function callOllama(prompt: string): Promise<string> {
       model: config.llmModel,
       prompt,
       stream: false,
-      format: 'json',
+      ...(options.json ? { format: 'json' } : {}),
       options: {
         temperature: 0.2,
       },
@@ -252,7 +252,7 @@ async function callOllama(prompt: string): Promise<string> {
   return payload.response;
 }
 
-async function callOpenAiCompatible(prompt: string): Promise<string> {
+async function callOpenAiCompatible(prompt: string, options: { json?: boolean } = {}): Promise<string> {
   const headers = new Headers({
     'Content-Type': 'application/json',
   });
@@ -266,11 +266,13 @@ async function callOpenAiCompatible(prompt: string): Promise<string> {
     body: JSON.stringify({
       model: config.llmModel,
       temperature: 0.2,
-      response_format: { type: 'json_object' },
+      ...(options.json ? { response_format: { type: 'json_object' } } : {}),
       messages: [
         {
           role: 'system',
-          content: 'Eres un entrenador de running que responde JSON estricto.',
+          content: options.json
+            ? 'Eres un entrenador de running que responde JSON estricto.'
+            : 'Eres un entrenador de running pragmático. Respondes en español, breve, concreto y sin inventar datos.',
         },
         {
           role: 'user',
@@ -390,8 +392,8 @@ export async function generateCoachSnapshot(input: {
     const prompt = buildPrompt(input.dashboard, input.checkIns);
     const raw =
       config.llmProvider === 'ollama'
-        ? await callOllama(prompt)
-        : await callOpenAiCompatible(prompt);
+        ? await callOllama(prompt, { json: true })
+        : await callOpenAiCompatible(prompt, { json: true });
     return {
       snapshot: parseCoachPayload(raw, fallback),
       inputHash,
@@ -462,4 +464,85 @@ export function applyCoachSnapshotToDashboard(input: {
       weeks: adjustedWeeks,
     },
   };
+}
+
+function buildChatPrompt(input: {
+  dashboard: DashboardData;
+  checkIns: DailyCheckInRecord[];
+  question: string;
+}) {
+  return `
+Eres Race Room Coach.
+Responde en español, en tono claro y práctico, como entrenador.
+Usa SOLO el contexto suministrado.
+Si falta una métrica, dilo explícitamente.
+No inventes datos ni prometas mejoras.
+No reescribas el plan entero salvo que el usuario lo pida; da consejo accionable.
+Limita la respuesta a 180 palabras.
+
+Contexto:
+${JSON.stringify({
+    provider: input.dashboard.provider,
+    goal: input.dashboard.goal,
+    overview: input.dashboard.overview,
+    adaptive: input.dashboard.adaptive,
+    fitnessSummary: input.dashboard.fitnessSummary,
+    coach: input.dashboard.coach,
+    latestCheckIn: latestCheckIn(input.checkIns),
+    recentRuns: input.dashboard.recentRuns.slice(0, 5),
+    weeklyRunning: input.dashboard.weeklyRunning.slice(-4),
+    plan: {
+      summary: input.dashboard.plan.summary,
+      weeks: input.dashboard.plan.weeks.slice(0, 2).map((week) => ({
+        title: week.title,
+        focus: week.focus,
+        targetKm: week.targetKm,
+        coachNote: week.coachNote ?? null,
+      })),
+    },
+  })}
+
+Pregunta del usuario:
+${input.question}
+`.trim();
+}
+
+function buildChatFallback(input: {
+  dashboard: DashboardData;
+  checkIns: DailyCheckInRecord[];
+  question: string;
+}) {
+  const latest = latestCheckIn(input.checkIns);
+  const energy = latest
+    ? `Hoy marcas energía ${latest.energy}, piernas ${latest.legs} y cabeza ${latest.mood}.`
+    : 'Hoy todavía no hay check-in subjetivo.';
+  return clipText(
+    `${input.dashboard.coach.todayMessage ?? input.dashboard.fitnessSummary.body} ${energy} ` +
+      `Tu pregunta fue: "${input.question}". ` +
+      `Con el motor base puedo apoyarme en el resumen actual y el plan, pero para respuestas abiertas necesitas Gemma 4 activo.`,
+    420,
+  );
+}
+
+export async function answerCoachQuestion(input: {
+  dashboard: DashboardData;
+  checkIns: DailyCheckInRecord[];
+  question: string;
+}): Promise<string> {
+  const fallback = buildChatFallback(input);
+
+  if (!llmEnabled()) {
+    return fallback;
+  }
+
+  try {
+    const prompt = buildChatPrompt(input);
+    const raw =
+      config.llmProvider === 'ollama'
+        ? await callOllama(prompt)
+        : await callOpenAiCompatible(prompt);
+    return clipText(raw, 520);
+  } catch {
+    return fallback;
+  }
 }

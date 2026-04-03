@@ -336,7 +336,12 @@
 
 .coach-strip {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+.coach-stack {
+  display: grid;
   gap: 1rem;
 }
 
@@ -471,7 +476,6 @@
 }
 
 .checkin-help,
-.coach-footnote,
 .checkin-latest-note {
   margin: 0;
   color: var(--muted);
@@ -533,6 +537,97 @@
 
 .coach-micro-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.coach-chat-panel {
+  display: grid;
+  gap: 0.9rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 18%),
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.11), transparent 30%),
+    var(--panel);
+}
+
+.coach-chat-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.coach-chat-head h3 {
+  font-size: 1rem;
+}
+
+.coach-chat-messages {
+  display: grid;
+  gap: 0.65rem;
+  max-height: min(46vh, 520px);
+  overflow: auto;
+  padding-right: 0.2rem;
+  align-content: start;
+}
+
+.coach-chat-bubble {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+}
+
+.coach-chat-bubble.user {
+  background: rgba(62, 148, 253, 0.08);
+  border-color: rgba(62, 148, 253, 0.18);
+}
+
+.coach-chat-bubble.assistant {
+  background: #252a33;
+}
+
+.coach-chat-bubble p,
+.coach-chat-empty {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.65;
+}
+
+.coach-chat-empty {
+  color: var(--muted);
+}
+
+.coach-chat-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.coach-chat-form textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #252a33;
+  color: var(--heading);
+  padding: 0.9rem 1rem;
+  font-family: var(--sans);
+}
+
+.coach-chat-form textarea:focus {
+  outline: 1px solid var(--heading);
+  outline-offset: 1px;
+}
+
+.coach-chat-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+}
+
+.coach-chat-actions small {
+  color: var(--muted);
+  max-width: 42ch;
 }
 
 .auth-shell {
@@ -2102,6 +2197,12 @@
   }
 
   .checkin-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .coach-chat-head,
+  .coach-chat-actions {
     flex-direction: column;
     align-items: stretch;
   }

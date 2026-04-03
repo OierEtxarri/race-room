@@ -52,7 +52,7 @@ STRAVA_REDIRECT_URI=http://localhost:8787/api/session/strava/callback
 Para activar Gemma 4 en local con Ollama:
 
 ```bash
-ollama pull gemma4:e4b
+ollama pull gemma4:e2b
 ```
 
 Y añade además:
@@ -60,7 +60,7 @@ Y añade además:
 ```env
 LLM_PROVIDER=ollama
 LLM_BASE_URL=http://127.0.0.1:11434
-LLM_MODEL=gemma4:e4b
+LLM_MODEL=gemma4:e2b
 LLM_MIN_INTERVAL_MINUTES=360
 
 DASHBOARD_BACKGROUND_REFRESH_MINUTES=60

@@ -37,6 +37,7 @@ import {
 } from './lib/sessionStore.ts';
 import {
   applyCoachSnapshotToDashboard,
+  answerCoachQuestion,
   generateCoachSnapshot,
 } from './lib/llmCoach.ts';
 import {
@@ -750,6 +751,52 @@ app.post('/api/checkin', async (request, response) => {
     ok: true,
     date: todayIso,
   });
+});
+
+app.post('/api/coach/chat', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const question = typeof request.body?.question === 'string' ? request.body.question.trim() : '';
+  if (!question) {
+    response.status(400).json({
+      message: 'Necesito una pregunta para el coach.',
+    });
+    return;
+  }
+
+  if (question.length > 600) {
+    response.status(400).json({
+      message: 'La pregunta es demasiado larga. Intenta resumirla.',
+    });
+    return;
+  }
+
+  try {
+    const dashboard = await getDashboardData(session);
+    const answer = await answerCoachQuestion({
+      dashboard,
+      checkIns: listRecentDailyCheckIns(session.accountKey, 7),
+      question,
+    });
+
+    response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+    response.json({
+      ok: true,
+      answer,
+      provider: dashboard.provider.key,
+      llmEnabled: dashboard.coach.enabled,
+    });
+  } catch (error) {
+    response.status(502).json({
+      message: error instanceof Error ? error.message : 'No se pudo consultar al coach.',
+    });
+  }
 });
 
 app.get('/api/activities/:activityId/route', async (request, response) => {

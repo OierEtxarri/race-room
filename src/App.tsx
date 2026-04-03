@@ -1,4 +1,13 @@
-import { startTransition, useEffect, useEffectEvent, useRef, useState, type FormEvent } from 'react';
+import {
+  Suspense,
+  lazy,
+  startTransition,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react';
 import {
   Area,
   AreaChart,
@@ -11,7 +20,6 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ActivityRouteMap } from './components/ActivityRouteMap';
 import type { ActivityRoute, DashboardData, SessionPayload, UserGoal } from './types';
 import './App.css';
 
@@ -41,6 +49,11 @@ type CheckInState = {
   status: 'idle' | 'saving' | 'success' | 'error';
   message: string | null;
   editing: boolean;
+};
+type CoachChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
 };
 type RouteState =
   | { status: 'idle'; data: null; error: null }
@@ -78,6 +91,12 @@ const runOverlayTemplate = {
   headline: 'Blur card',
   description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
 };
+const ActivityRouteMap = lazy(async () => {
+  const module = await import('./components/ActivityRouteMap');
+  return {
+    default: module.ActivityRouteMap,
+  };
+});
 
 const chartOptions: Array<{
   key: ChartMetric;
@@ -850,21 +869,28 @@ function drawGlassPanel(
   context.clip();
 
   const baseGradient = context.createLinearGradient(x, y, x, y + height);
-  baseGradient.addColorStop(0, 'rgba(58,58,62,0.68)');
-  baseGradient.addColorStop(1, 'rgba(28,28,30,0.54)');
+  baseGradient.addColorStop(0, 'rgba(64,64,68,0.72)');
+  baseGradient.addColorStop(1, 'rgba(26,26,28,0.6)');
   context.fillStyle = baseGradient;
   context.fillRect(x, y, width, height);
 
-  const glowA = context.createRadialGradient(x + width * 0.22, y + height * 0.2, 0, x + width * 0.22, y + height * 0.2, width * 0.38);
-  glowA.addColorStop(0, 'rgba(255,255,255,0.16)');
-  glowA.addColorStop(1, 'rgba(255,255,255,0)');
-  context.fillStyle = glowA;
+  const surfaceLight = context.createLinearGradient(x, y, x, y + height * 0.42);
+  surfaceLight.addColorStop(0, 'rgba(255,255,255,0.12)');
+  surfaceLight.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = surfaceLight;
   context.fillRect(x, y, width, height);
 
-  const glowB = context.createRadialGradient(x + width * 0.78, y + height * 0.72, 0, x + width * 0.78, y + height * 0.72, width * 0.32);
-  glowB.addColorStop(0, 'rgba(255,255,255,0.1)');
-  glowB.addColorStop(1, 'rgba(255,255,255,0)');
-  context.fillStyle = glowB;
+  const innerBloom = context.createRadialGradient(
+    x + width * 0.76,
+    y + height * 0.7,
+    0,
+    x + width * 0.76,
+    y + height * 0.7,
+    width * 0.24,
+  );
+  innerBloom.addColorStop(0, 'rgba(255,255,255,0.09)');
+  innerBloom.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = innerBloom;
   context.fillRect(x, y, width, height);
   context.restore();
 
@@ -873,15 +899,6 @@ function drawGlassPanel(
     stroke: 'rgba(255,255,255,0.72)',
     lineWidth: 2,
   });
-
-  context.save();
-  context.beginPath();
-  context.moveTo(x + radius, y + 1);
-  context.lineTo(x + width - radius, y + 1);
-  context.strokeStyle = 'rgba(255,255,255,0.34)';
-  context.lineWidth = 1.5;
-  context.stroke();
-  context.restore();
 }
 
 function drawRouteOverlay(input: {
@@ -2005,6 +2022,15 @@ function App() {
     message: null,
     editing: true,
   });
+  const [coachChatDraft, setCoachChatDraft] = useState('');
+  const [coachChatMessages, setCoachChatMessages] = useState<CoachChatMessage[]>([]);
+  const [coachChatState, setCoachChatState] = useState<{
+    status: 'idle' | 'sending' | 'error';
+    message: string | null;
+  }>({
+    status: 'idle',
+    message: null,
+  });
   const [selectedMetric, setSelectedMetric] = useState<ChartMetric>('sleepHours');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
@@ -2080,6 +2106,12 @@ function App() {
       status: 'idle',
       message: null,
       editing: true,
+    });
+    setCoachChatDraft('');
+    setCoachChatMessages([]);
+    setCoachChatState({
+      status: 'idle',
+      message: null,
     });
     setLoginState({
       status: 'idle',
@@ -2285,6 +2317,33 @@ function App() {
     state.status === 'ready' ? state.data.checkIn.latest?.date : null,
     state.status === 'ready' ? state.data.checkIn.latest?.createdAt : null,
     state.status === 'ready' ? state.data.checkIn.needsToday : null,
+  ]);
+
+  useEffect(() => {
+    if (state.status !== 'ready') {
+      return;
+    }
+
+    setCoachChatMessages(
+      state.data.coach.todayMessage
+        ? [
+            {
+              id: `coach-${state.data.coach.generatedAt ?? state.data.fetchedAt}`,
+              role: 'assistant',
+              text: state.data.coach.todayMessage,
+            },
+          ]
+        : [],
+    );
+    setCoachChatDraft('');
+    setCoachChatState({
+      status: 'idle',
+      message: null,
+    });
+  }, [
+    state.status,
+    state.status === 'ready' ? state.data.provider.key : null,
+    state.status === 'ready' ? state.data.athlete.name : null,
   ]);
 
   useEffect(() => {
@@ -2507,6 +2566,58 @@ function App() {
         status: 'error',
         message: error instanceof Error ? error.message : 'No se pudo guardar el check-in.',
         editing: true,
+      });
+    }
+  };
+
+  const submitCoachChat = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const question = coachChatDraft.trim();
+    if (!sessionIdRef.current || !question || state.status !== 'ready') {
+      return;
+    }
+
+    const userMessage: CoachChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text: question,
+    };
+    setCoachChatMessages((current) => [...current, userMessage]);
+    setCoachChatDraft('');
+    setCoachChatState({
+      status: 'sending',
+      message: null,
+    });
+
+    try {
+      const response = await apiFetch('/api/coach/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          question,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? 'No se pudo consultar al coach.');
+      }
+
+      setCoachChatMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: payload.answer as string,
+        },
+      ]);
+      setCoachChatState({
+        status: 'idle',
+        message: null,
+      });
+    } catch (error) {
+      setCoachChatState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'No se pudo consultar al coach.',
       });
     }
   };
@@ -3193,8 +3304,10 @@ function App() {
             </div>
           )}
         </article>
+      </section>
 
-        <aside className="panel coach-daily-panel">
+      <section className="coach-stack">
+        <article className="panel coach-daily-panel">
           <div className="panel-head">
             <div>
               <p className="eyebrow">Race Room Coach</p>
@@ -3231,12 +3344,69 @@ function App() {
               <small>{latestCheckIn ? formatCheckInValue('mood', latestCheckIn.mood) : 'Sin check-in de hoy'}</small>
             </article>
           </div>
+        </article>
 
-          <p className="coach-footnote">
-            El proveedor no se refresca cada dos minutos. Primero se reutiliza el snapshot persistido; Gemma solo entra
-            cuando cambian señales relevantes o cuando tú confirmas cómo te encuentras hoy.
-          </p>
-        </aside>
+        <article className="panel coach-chat-panel">
+          <div className="coach-chat-head">
+            <div>
+              <p className="eyebrow">Chat</p>
+              <h3>{data.coach.enabled ? 'Pregunta a Gemma sobre tu estado' : 'Pregunta al coach'}</h3>
+            </div>
+            <span className={`checkin-status ${data.coach.enabled ? 'done' : 'pending'}`}>
+              {data.coach.enabled ? 'Gemma on demand' : 'Motor base'}
+            </span>
+          </div>
+
+          <div className="coach-chat-messages">
+            {coachChatMessages.length ? (
+              coachChatMessages.slice(-6).map((message) => (
+                <article className={`coach-chat-bubble ${message.role}`} key={message.id}>
+                  <span className="metric-label">{message.role === 'user' ? 'Tú' : 'Race Room Coach'}</span>
+                  <p>{message.text}</p>
+                </article>
+              ))
+            ) : (
+              <p className="coach-chat-empty">
+                Haz una pregunta concreta sobre fatiga, readiness, volumen, ritmo o cómo interpretar tus últimos
+                entrenos.
+              </p>
+            )}
+          </div>
+
+          <form className="coach-chat-form" onSubmit={submitCoachChat}>
+            <textarea
+              disabled={coachChatState.status === 'sending'}
+              maxLength={600}
+              onChange={(event) => setCoachChatDraft(event.target.value)}
+              placeholder={
+                data.coach.enabled
+                  ? 'Ejemplo: ¿Tiene sentido aflojar mañana si hoy tengo HRV baja pero piernas buenas?'
+                  : 'Gemma no está activa. Puedes preguntar igual y Race Room responderá con el contexto base.'
+              }
+              rows={3}
+              value={coachChatDraft}
+            />
+            <div className="coach-chat-actions">
+              <small>
+                {data.coach.enabled
+                  ? 'Consulta puntual. No hay streaming ni llamadas en segundo plano.'
+                  : 'Si activas Gemma 4, esta caja pasa a responder con el modelo; mientras tanto usa el contexto base.'}
+              </small>
+              <button
+                className="secondary-button"
+                disabled={coachChatState.status === 'sending' || !coachChatDraft.trim()}
+                type="submit"
+              >
+                {coachChatState.status === 'sending'
+                  ? 'Pensando...'
+                  : data.coach.enabled
+                    ? 'Preguntar a Gemma'
+                    : 'Preguntar al coach'}
+              </button>
+            </div>
+            {coachChatState.message ? <p className="checkin-feedback error">{coachChatState.message}</p> : null}
+          </form>
+        </article>
       </section>
 
       <section className="metrics-grid">
@@ -3292,7 +3462,15 @@ function App() {
                   {data.athlete.location ? ` · ${data.athlete.location}` : ''}
                 </p>
                 {routeState.status === 'ready' ? (
-                  <ActivityRouteMap route={routeState.data} title={selectedRun.name} />
+                  <Suspense
+                    fallback={
+                      <div className="route-map empty">
+                        <span>[ LOADING MAP ]</span>
+                      </div>
+                    }
+                  >
+                    <ActivityRouteMap route={routeState.data} title={selectedRun.name} />
+                  </Suspense>
                 ) : routeState.status === 'loading' ? (
                   <div className="route-map empty">
                     <span>[ LOADING ROUTE ]</span>
