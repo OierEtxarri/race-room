@@ -18,7 +18,7 @@
 .dashboard-layout {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  gap: 1.25rem;
+  gap: 1.35rem;
   align-items: start;
 }
 
@@ -29,13 +29,11 @@
 
 .dashboard-sidebar-inner {
   display: grid;
-  gap: 0.8rem;
+  gap: 0.85rem;
   padding: 1rem;
-  border-radius: 24px;
+  border-radius: 30px;
   border: 1px solid var(--line);
   background: var(--panel);
-  backdrop-filter: blur(32px) saturate(165%);
-  -webkit-backdrop-filter: blur(32px) saturate(165%);
   box-shadow: var(--shadow-soft);
   position: relative;
   overflow: hidden;
@@ -45,8 +43,57 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 34%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 22%),
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.1), transparent 32%);
   pointer-events: none;
+}
+
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.brand-badge {
+  width: 48px;
+  height: 48px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 36%),
+    linear-gradient(135deg, #3e94fd, #3078ff);
+  color: #f9f6eb;
+  font-weight: 800;
+  letter-spacing: -0.05em;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 18px 30px rgba(10, 18, 30, 0.26);
+}
+
+.brand-copy {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.brand-copy strong {
+  color: var(--heading);
+  font-size: 1rem;
+  line-height: 1.05;
+}
+
+.brand-copy small {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-brand {
+  margin-bottom: 0.15rem;
 }
 
 .sidebar-nav {
@@ -58,10 +105,10 @@
   display: grid;
   gap: 0.2rem;
   text-align: left;
-  padding: 0.9rem 0.95rem;
-  border-radius: 20px;
+  padding: 0.95rem 1rem;
+  border-radius: 22px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.06);
+  background: #2a2f37;
   color: var(--heading);
   cursor: pointer;
   position: relative;
@@ -77,7 +124,7 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 55%);
+  background: linear-gradient(135deg, rgba(62, 148, 253, 0.18), transparent 62%);
   opacity: 0;
   transition: opacity 220ms ease;
   pointer-events: none;
@@ -92,11 +139,11 @@
 }
 
 .sidebar-button.active {
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.34);
+  background: #3a4049;
+  border-color: rgba(255, 255, 255, 0.22);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 14px 32px rgba(8, 15, 28, 0.26);
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 18px 32px rgba(0, 0, 0, 0.24);
 }
 
 .dashboard-content {
@@ -142,9 +189,7 @@
 .run-list-panel {
   border: 1px solid var(--line);
   background: var(--panel);
-  border-radius: 26px;
-  backdrop-filter: blur(34px) saturate(165%);
-  -webkit-backdrop-filter: blur(34px) saturate(165%);
+  border-radius: 30px;
   box-shadow: var(--shadow-soft);
 }
 
@@ -154,7 +199,8 @@
   gap: 1.5rem;
   padding: 2rem;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.035)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 22%),
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.18), transparent 34%),
     var(--panel-strong);
 }
 
@@ -176,7 +222,9 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent 32%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 24%),
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.04), transparent 28%);
   pointer-events: none;
 }
 
@@ -261,7 +309,7 @@
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.55rem 0.85rem;
-  background: rgba(255, 255, 255, 0.06);
+  background: #262b33;
   font-size: 0.78rem;
   font-family: var(--mono);
   letter-spacing: 0.06em;
@@ -271,9 +319,9 @@
 .warning-banner {
   margin-top: 1rem;
   padding: 0.9rem 1rem;
-  border-radius: 12px;
-  border: 1px solid var(--accent);
-  background: rgba(255, 127, 107, 0.08);
+  border-radius: 18px;
+  border: 1px solid rgba(223, 62, 62, 0.3);
+  background: rgba(223, 62, 62, 0.1);
   color: var(--text);
   font-size: 0.9rem;
   max-width: 70ch;
@@ -297,7 +345,8 @@
   gap: 1.5rem;
   padding: 2rem;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 18%),
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.16), transparent 32%),
     var(--panel-strong);
 }
 
@@ -305,6 +354,12 @@
 .goal-editor {
   display: grid;
   gap: 1rem;
+}
+
+.auth-copy {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
 }
 
 .provider-switch {
@@ -316,7 +371,7 @@
 .provider-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
+  background: #2a2f37;
   color: var(--heading);
   padding: 0.8rem 1rem;
   font-family: var(--mono);
@@ -330,18 +385,18 @@
 }
 
 .provider-pill.selected {
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.34);
+  background: #3a4049;
+  border-color: rgba(255, 255, 255, 0.2);
   color: var(--heading);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .provider-note {
   display: grid;
   gap: 0.45rem;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  background: #262b33;
   padding: 1rem 1.1rem;
 }
 
@@ -358,7 +413,8 @@
   padding: 1.4rem;
   align-content: start;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 18%),
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.04), transparent 28%),
     var(--surface);
 }
 
@@ -384,8 +440,8 @@
 .form-field input {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: #262b33;
   color: var(--heading);
   padding: 0.85rem 0.95rem;
   font-family: var(--mono);
@@ -432,7 +488,7 @@
   inset: 0;
   border-radius: 50%;
   border: 3px solid rgba(255, 255, 255, 0.08);
-  border-top-color: var(--heading);
+  border-top-color: var(--accent);
   border-right-color: var(--accent);
   animation: brand-spin 1s linear infinite;
 }
@@ -443,7 +499,7 @@
   width: 58px;
   height: 58px;
   border-radius: 50%;
-  background: var(--surface);
+  background: #262b33;
   color: var(--heading);
   border: 1px solid var(--line-strong);
   font-family: var(--display);
@@ -471,11 +527,9 @@
   display: grid;
   gap: 0.28rem;
   padding: 1rem 1.1rem;
-  border-radius: 12px;
+  border-radius: 22px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  background: #262b33;
   transition:
     transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
     background 220ms ease,
@@ -483,18 +537,18 @@
 }
 
 .sync-chip.live {
-  background: var(--surface);
+  background: #262b33;
   border-color: var(--line-strong);
 }
 
 .sync-chip.syncing {
-  background: var(--surface);
-  border-color: var(--heading);
+  background: #262b33;
+  border-color: var(--accent);
 }
 
 .sync-chip.warning {
-  background: var(--surface);
-  border-color: var(--accent);
+  background: rgba(223, 62, 62, 0.08);
+  border-color: rgba(223, 62, 62, 0.26);
 }
 
 .sync-chip strong {
@@ -505,11 +559,9 @@
   display: grid;
   gap: 0.4rem;
   padding: 1.15rem 1.2rem;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 28px;
+  background: #22262e;
   border: 1px solid var(--line);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
   transition:
     transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
     border-color 240ms ease,
@@ -518,8 +570,8 @@
 }
 
 .score-card.primary {
-  background: linear-gradient(180deg, rgba(138, 180, 255, 0.34), rgba(138, 180, 255, 0.18));
-  border-color: rgba(196, 217, 255, 0.48);
+  background: linear-gradient(180deg, rgba(62, 148, 253, 0.32), rgba(48, 120, 255, 0.18));
+  border-color: rgba(62, 148, 253, 0.34);
   color: var(--heading);
 }
 
@@ -556,15 +608,36 @@
 
 .metric-card {
   padding: 1.2rem;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 28px;
+  background: #20242c;
   border: 1px solid var(--line);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
   transition:
     transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
     border-color 240ms ease,
     background 240ms ease;
+  position: relative;
+}
+
+.metric-card::after {
+  content: '';
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 6px rgba(62, 148, 253, 0.08);
+}
+
+.metric-card:nth-child(3n + 2)::after {
+  background: var(--danger);
+  box-shadow: 0 0 0 6px rgba(223, 62, 62, 0.08);
+}
+
+.metric-card:nth-child(3n)::after {
+  background: var(--warning);
+  box-shadow: 0 0 0 6px rgba(242, 195, 60, 0.08);
 }
 
 .metric-card strong {
@@ -625,7 +698,7 @@
 
 .segmented-button {
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.05);
+  background: #2a2f37;
   color: var(--heading);
   border-radius: 999px;
   padding: 0.65rem 0.9rem;
@@ -640,9 +713,9 @@
 }
 
 .segmented-button.selected {
-  background: rgba(255, 255, 255, 0.18);
+  background: #3a4049;
   color: var(--heading);
-  border-color: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.22);
 }
 
 .chart-wrap {
@@ -689,19 +762,19 @@
 }
 
 .adaptive-badge.push {
-  background: var(--heading);
-  border-color: var(--heading);
-  color: var(--bg);
+  background: var(--accent);
+  border-color: rgba(62, 148, 253, 0.4);
+  color: #fff;
 }
 
 .adaptive-badge.steady {
-  background: var(--surface);
+  background: #2a2f37;
   border-color: var(--line-strong);
   color: var(--heading);
 }
 
 .adaptive-badge.protect {
-  background: transparent;
+  background: rgba(242, 195, 60, 0.08);
   border-color: var(--warning);
   color: var(--warning);
 }
@@ -715,11 +788,9 @@
   display: grid;
   gap: 0.35rem;
   padding: 1rem;
-  border-radius: 22px;
+  border-radius: 24px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  background: #252a33;
   transition:
     transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
     border-color 220ms ease,
@@ -740,23 +811,23 @@
 
 .advice-card {
   padding: 1.1rem;
-  border-radius: 12px;
+  border-radius: 24px;
   border: 1px solid var(--line);
 }
 
 .advice-card.accent {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.28);
+  background: #20242c;
+  border-color: rgba(62, 148, 253, 0.2);
 }
 
 .advice-card.calm {
-  background: rgba(255, 255, 255, 0.08);
+  background: #22262e;
   border-color: var(--line-strong);
 }
 
 .advice-card.warning {
-  background: rgba(242, 200, 121, 0.08);
-  border-color: rgba(242, 200, 121, 0.36);
+  background: rgba(242, 195, 60, 0.08);
+  border-color: rgba(242, 195, 60, 0.26);
 }
 
 .advice-card h3,
@@ -797,23 +868,19 @@
 
 .run-select.selected {
   border-color: var(--line-strong);
-  border-radius: 20px;
+  border-radius: 24px;
   padding: 1rem;
-  background: rgba(255, 255, 255, 0.08);
+  background: #2a2f37;
 }
 
 .run-spotlight {
   padding: 1.2rem;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04)),
-    var(--surface);
+  background: #20242d;
 }
 
 .run-list-panel {
   padding: 1rem 1.1rem;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03)),
-    var(--surface);
+  background: #20242d;
 }
 
 .run-spotlight-meta {
@@ -846,11 +913,9 @@
   display: grid;
   gap: 0.3rem;
   padding: 0.95rem 1rem;
-  border-radius: 22px;
+  border-radius: 24px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  background: #252a33;
 }
 
 .overlay-single-card strong {
@@ -920,11 +985,12 @@
   margin-top: 1rem;
   margin-bottom: 1rem;
   border: 1px solid var(--line);
-  border-radius: 22px;
-  background: rgba(12, 18, 28, 0.46);
+  border-radius: 26px;
+  background:
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.12), transparent 35%),
+    #171b22;
   padding: 0.75rem;
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .route-map svg {
@@ -1019,9 +1085,9 @@
   gap: 0.25rem;
   text-align: left;
   padding: 1rem;
-  border-radius: 16px;
+  border-radius: 24px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.05);
+  background: #252a33;
   color: var(--heading);
   cursor: pointer;
   transition:
@@ -1035,8 +1101,8 @@
 }
 
 .week-tab.selected {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.3);
+  background: #313741;
+  border-color: rgba(62, 148, 253, 0.28);
   color: var(--heading);
 }
 
@@ -1046,11 +1112,9 @@
 
 .selected-week-panel {
   padding: 1.25rem;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 26px;
+  background: #20242c;
   border: 1px solid var(--line);
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
 }
 
 .weeks-grid {
@@ -1063,8 +1127,8 @@
   font: inherit;
   text-align: left;
   padding: 1.25rem;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: 28px;
+  background: #20242c;
   border: 1px solid var(--line);
   cursor: pointer;
   transition:
@@ -1075,8 +1139,8 @@
 }
 
 .week-card.selected {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.26);
+  background: #262b33;
+  border-color: rgba(62, 148, 253, 0.22);
 }
 
 .week-head {
@@ -1103,7 +1167,7 @@
 }
 
 .day-row.intensity-medio {
-  border-left: 4px solid var(--heading);
+  border-left: 4px solid rgba(245, 245, 245, 0.5);
   padding-left: 0.75rem;
 }
 
@@ -1198,7 +1262,7 @@
 .day-button {
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: #2a2f37;
   color: var(--heading);
   padding: 0.6rem 0.9rem;
   font: inherit;
@@ -1230,15 +1294,15 @@
 }
 
 .status-panel.error {
-  background: rgba(255, 127, 107, 0.08);
-  border-color: var(--accent);
+  background: rgba(223, 62, 62, 0.08);
+  border-color: rgba(223, 62, 62, 0.24);
 }
 
 .action-button {
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(62, 148, 253, 0.24);
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(177, 209, 255, 0.4), rgba(145, 188, 255, 0.2));
-  color: var(--heading);
+  background: linear-gradient(180deg, #3e94fd, #3078ff);
+  color: #fff;
   padding: 0.9rem 1.2rem;
   font-family: var(--mono);
   text-transform: uppercase;
@@ -1253,7 +1317,7 @@
 .secondary-button {
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: #22262e;
   color: var(--heading);
   padding: 0.9rem 1.2rem;
   font-family: var(--mono);
@@ -1276,13 +1340,13 @@
 }
 
 .recharts-tooltip-cursor {
-  stroke: rgba(145, 164, 184, 0.18);
+  stroke: rgba(62, 148, 253, 0.16);
 }
 
 .recharts-default-tooltip {
-  background: rgba(0, 0, 0, 0.98) !important;
-  border: 1px solid var(--line-strong) !important;
-  border-radius: 12px;
+  background: #171b22 !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 18px;
   box-shadow: none;
 }
 
@@ -1308,6 +1372,10 @@
 .fitness-summary-panel {
   display: grid;
   gap: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 18%),
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.12), transparent 28%),
+    var(--panel);
 }
 
 .fitness-summary-copy {
@@ -1315,10 +1383,40 @@
   color: var(--text);
 }
 
+.fitness-chip-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.fitness-chip-strip span {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 180px;
+  padding: 0.8rem 0.95rem;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: #22262e;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.fitness-chip-strip strong {
+  color: var(--heading);
+  font-size: 0.98rem;
+}
+
 .fitness-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.75rem;
+}
+
+.fitness-lead-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.9fr);
+  gap: 1rem;
+  align-items: stretch;
 }
 
 .fitness-summary-notes {
@@ -1329,6 +1427,153 @@
   font-size: 0.74rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.fitness-visual-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.fitness-chart-card {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1.2rem;
+  border-radius: 28px;
+  border: 1px solid var(--line);
+  background: #20242c;
+  min-width: 0;
+}
+
+.fitness-chart-card--lead {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 20%),
+    radial-gradient(circle at top right, rgba(62, 148, 253, 0.16), transparent 34%),
+    #20242c;
+}
+
+.fitness-chart-card--signal {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 18%),
+    radial-gradient(circle at bottom right, rgba(242, 195, 60, 0.12), transparent 30%),
+    #20242c;
+}
+
+.fitness-chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.8rem;
+}
+
+.fitness-chart-headline {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.8rem;
+}
+
+.fitness-chart-head--stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.fitness-chart-head .eyebrow {
+  margin-bottom: 0.4rem;
+}
+
+.fitness-chart-head h3 {
+  font-size: 1.22rem;
+}
+
+.fitness-chart-tag {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.45rem 0.7rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  background: #252a33;
+}
+
+.fitness-chart-badge {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 112px;
+  padding: 0.72rem 0.9rem;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 32%),
+    #252a33;
+  text-align: right;
+}
+
+.fitness-chart-badge small {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fitness-chart-badge strong {
+  color: var(--heading);
+  font-size: 1.18rem;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.fitness-chart-wrap.compact {
+  height: 220px;
+  min-width: 0;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 24%),
+    #1d2128;
+  padding: 0.5rem 0.35rem 0.2rem;
+}
+
+.fitness-chart-wrap.feature {
+  height: 320px;
+}
+
+.fitness-chart-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.fitness-chart-stats span {
+  display: grid;
+  gap: 0.22rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.fitness-chart-stats strong {
+  color: var(--heading);
+  font-size: 1rem;
+}
+
+.fitness-empty-copy {
+  color: var(--muted);
+  line-height: 1.55;
+  min-height: 220px;
+  display: grid;
+  align-items: center;
+}
+
+.fitness-visual-grid--wide {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -1358,12 +1603,12 @@
   .run-select:hover,
   .provider-pill:hover,
   .secondary-button:hover {
-    border-color: rgba(255, 255, 255, 0.28);
-    background: rgba(255, 255, 255, 0.11);
+    border-color: rgba(255, 255, 255, 0.18);
+    background: #313741;
   }
 
   .action-button:hover {
-    filter: brightness(1.08);
+    filter: brightness(1.06);
   }
 }
 
@@ -1380,7 +1625,7 @@
 
   .sidebar-nav {
     grid-auto-flow: column;
-    grid-auto-columns: minmax(180px, 1fr);
+    grid-auto-columns: minmax(200px, 1fr);
     overflow: auto;
     padding-bottom: 0.2rem;
   }
@@ -1419,7 +1664,7 @@
   .status-panel,
   .auth-panel,
   .goal-editor {
-    border-radius: 24px;
+    border-radius: 26px;
     padding: 1.15rem;
   }
 
@@ -1435,6 +1680,14 @@
 
   .hero-identity h1 {
     font-size: clamp(2.7rem, 14vw, 4rem);
+  }
+
+  .hero-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-button {
+    min-height: 5.5rem;
   }
 
   .run-row,
@@ -1464,9 +1717,63 @@
   }
 
   .fitness-summary-grid,
+  .fitness-lead-grid,
+  .fitness-visual-grid,
   .chart-stat-strip,
   .plan-kpis {
     grid-template-columns: 1fr;
+  }
+
+  .fitness-chart-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .fitness-chart-headline {
+    flex-direction: column;
+  }
+
+  .fitness-chart-badge {
+    text-align: left;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 540px) {
+  #root {
+    width: min(100%, calc(100% - 1rem));
+    padding: 0.5rem 0 2rem;
+  }
+
+  .dashboard-layout,
+  .dashboard-content,
+  .app-shell {
+    gap: 0.85rem;
+  }
+
+  .dashboard-sidebar-inner,
+  .hero-panel,
+  .panel,
+  .auth-panel,
+  .goal-editor,
+  .status-panel {
+    padding: 1rem;
+    border-radius: 24px;
+  }
+
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fitness-chip-strip {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-nav {
+    grid-auto-columns: minmax(170px, 1fr);
   }
 }
 

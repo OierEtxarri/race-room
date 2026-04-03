@@ -36,7 +36,7 @@ type RouteState =
   | { status: 'ready'; data: ActivityRoute; error: null }
   | { status: 'error'; data: null; error: string };
 type RunOverlayTemplateId = 'routeGlass';
-type DashboardSectionId = 'summary' | 'fitness' | 'plan' | 'advice' | 'sessions' | 'insights';
+type DashboardSectionId = 'summary' | 'fitness' | 'plan' | 'sessions';
 type AvatarSize = 'sm' | 'lg';
 
 type ChartMetric = 'sleepHours' | 'readiness' | 'hrv' | 'steps';
@@ -105,9 +105,7 @@ const dashboardSections: Array<{
   { id: 'summary', label: 'Resumen', note: 'Visión rápida y métricas clave' },
   { id: 'sessions', label: 'Sesiones', note: 'Rodajes recientes y export glass' },
   { id: 'plan', label: 'Plan', note: 'Semanas, sesiones y roadmap' },
-  { id: 'fitness', label: 'Fitness', note: 'Estado actual y ajuste adaptativo' },
-  { id: 'insights', label: 'Tendencias', note: 'Métricas y evolución semanal' },
-  { id: 'advice', label: 'Consejos', note: 'Qué priorizar ahora mismo' },
+  { id: 'fitness', label: 'Fitness', note: 'Estado actual, tendencias y ajuste adaptativo' },
 ];
 
 function BrandSpinner({ label, detail }: { label: string; detail: string }) {
@@ -181,17 +179,18 @@ function RouteMiniMap({
   const padding = 16;
   const width = 320;
   const height = 192;
+  const projected = points.map(([lat, lng]) => {
+    const x = padding + ((lng - minLng) / lngSpan) * (width - padding * 2);
+    const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
+    return [x, y] as const;
+  });
 
-  const svgPoints = points
-    .map(([lat, lng]) => {
-      const x = padding + ((lng - minLng) / lngSpan) * (width - padding * 2);
-      const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
+  const svgPoints = projected
+    .map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`)
     .join(' ');
 
-  const start = svgPoints.split(' ')[0]?.split(',') ?? ['0', '0'];
-  const end = svgPoints.split(' ').at(-1)?.split(',') ?? ['0', '0'];
+  const milestones = pickRouteMilestones(projected);
+  const gradientId = `route-gradient-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24)}`;
 
   return (
     <div className="route-map" aria-label={`Mapa del recorrido de ${title}`}>
@@ -200,11 +199,24 @@ function RouteMiniMap({
           <pattern id="route-grid" width="16" height="16" patternUnits="userSpaceOnUse">
             <circle cx="1" cy="1" r="1" fill="rgba(255,255,255,0.1)" />
           </pattern>
+          <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#3E94FD" />
+            <stop offset="58%" stopColor="#5B8FFF" />
+            <stop offset="82%" stopColor="#F2C33C" />
+            <stop offset="100%" stopColor="#DF3E3E" />
+          </linearGradient>
         </defs>
         <rect width={width} height={height} fill="url(#route-grid)" />
-        <polyline points={svgPoints} fill="none" stroke="rgba(158, 215, 255, 0.96)" strokeWidth="2.5" />
-        <circle cx={start[0]} cy={start[1]} r="4" fill="rgba(255,255,255,0.96)" />
-        <circle cx={end[0]} cy={end[1]} r="4" fill="rgba(168, 225, 255, 1)" />
+        <polyline points={svgPoints} fill="none" stroke={`url(#${gradientId})`} strokeWidth="2.8" />
+        {milestones.first ? <circle cx={milestones.first[0]} cy={milestones.first[1]} r="4" fill="#f9f6eb" /> : null}
+        {milestones.warm ? <circle cx={milestones.warm[0]} cy={milestones.warm[1]} r="3.5" fill="#3E94FD" /> : null}
+        {milestones.mid ? <circle cx={milestones.mid[0]} cy={milestones.mid[1]} r="3.5" fill="#F2C33C" /> : null}
+        {milestones.finish ? (
+          <>
+            <circle cx={milestones.finish[0]} cy={milestones.finish[1]} r="5" fill="#DF3E3E" />
+            <circle cx={milestones.finish[0]} cy={milestones.finish[1]} r="2.25" fill="#f9f6eb" />
+          </>
+        ) : null}
       </svg>
       <div className="route-map-meta">
         <span>START</span>
@@ -230,6 +242,26 @@ function projectRoutePoints(points: ActivityRoute['points'], width: number, heig
     const y = height - padding - ((lat - minLat) / latSpan) * (height - padding * 2);
     return [x, y] as const;
   });
+}
+
+function pickRouteMilestones<T>(points: T[]) {
+  if (!points.length) {
+    return {
+      first: null as T | null,
+      warm: null as T | null,
+      mid: null as T | null,
+      finish: null as T | null,
+    };
+  }
+
+  const milestoneAt = (ratio: number) => points[Math.min(points.length - 1, Math.max(0, Math.round((points.length - 1) * ratio)))] ?? null;
+
+  return {
+    first: points[0] ?? null,
+    warm: milestoneAt(0.34),
+    mid: milestoneAt(0.68),
+    finish: points[points.length - 1] ?? null,
+  };
 }
 
 function wrapCanvasText(
@@ -634,13 +666,18 @@ function drawSignatureRouteOverlay(
   height: number,
 ) {
   const projected = projectRoutePoints(route.points, width, height, 14);
+  const milestones = pickRouteMilestones(projected);
 
   context.save();
   context.translate(x, y);
   context.lineJoin = 'round';
   context.lineCap = 'round';
 
-  context.strokeStyle = 'rgba(141, 212, 255, 0.2)';
+  const routeGlow = context.createLinearGradient(0, 0, width, height);
+  routeGlow.addColorStop(0, 'rgba(62, 148, 253, 0.22)');
+  routeGlow.addColorStop(0.76, 'rgba(242, 195, 60, 0.18)');
+  routeGlow.addColorStop(1, 'rgba(223, 62, 62, 0.18)');
+  context.strokeStyle = routeGlow;
   context.lineWidth = 20;
   context.beginPath();
   projected.forEach(([pointX, pointY], index) => {
@@ -652,7 +689,12 @@ function drawSignatureRouteOverlay(
   });
   context.stroke();
 
-  context.strokeStyle = '#9ED7FF';
+  const routeStroke = context.createLinearGradient(0, 0, width, height);
+  routeStroke.addColorStop(0, '#3E94FD');
+  routeStroke.addColorStop(0.58, '#5B8FFF');
+  routeStroke.addColorStop(0.82, '#F2C33C');
+  routeStroke.addColorStop(1, '#DF3E3E');
+  context.strokeStyle = routeStroke;
   context.lineWidth = 7;
   context.beginPath();
   projected.forEach(([pointX, pointY], index) => {
@@ -670,9 +712,25 @@ function drawSignatureRouteOverlay(
   context.beginPath();
   context.arc(startX, startY, 6, 0, Math.PI * 2);
   context.fill();
-  context.fillStyle = '#BEE8FF';
+  if (milestones.warm) {
+    context.fillStyle = '#3E94FD';
+    context.beginPath();
+    context.arc(milestones.warm[0], milestones.warm[1], 5, 0, Math.PI * 2);
+    context.fill();
+  }
+  if (milestones.mid) {
+    context.fillStyle = '#F2C33C';
+    context.beginPath();
+    context.arc(milestones.mid[0], milestones.mid[1], 5, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.fillStyle = '#DF3E3E';
   context.beginPath();
   context.arc(endX, endY, 7, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#F9F6EB';
+  context.beginPath();
+  context.arc(endX, endY, 3, 0, Math.PI * 2);
   context.fill();
   context.restore();
 }
@@ -2189,7 +2247,13 @@ function App() {
     return (
       <main className="app-shell">
         <section className="status-panel">
-          <p className="eyebrow">Garmin Race Room</p>
+          <div className="brand-lockup">
+            <span className="brand-badge" aria-hidden="true">RR</span>
+            <div className="brand-copy">
+              <strong>Race Room</strong>
+              <small>Adaptive running dashboard</small>
+            </div>
+          </div>
           <BrandSpinner
             label="Cargando tu último estado"
             detail="Primero restauro la sesión y el plan persistido; después refresco el proveedor activo."
@@ -2204,8 +2268,15 @@ function App() {
       <main className="app-shell auth-shell">
         <section className="auth-panel">
           <div className="auth-copy">
-            <p className="eyebrow">Garmin Race Room</p>
-            <h1>Entra con Garmin o Strava</h1>
+            <div className="brand-lockup">
+              <span className="brand-badge" aria-hidden="true">RR</span>
+              <div className="brand-copy">
+                <strong>Race Room</strong>
+                <small>Garmin + Strava</small>
+              </div>
+            </div>
+            <p className="eyebrow">Race Room</p>
+            <h1>Entra en Race Room con Garmin o Strava</h1>
             <p className="lead">
               Elige el proveedor con el que quieres cargar tus datos. Garmin entra por credenciales efímeras;
               Strava entra por OAuth. En ambos casos persisto solo el objetivo y el último dashboard/plan generado.
@@ -2375,12 +2446,22 @@ function App() {
     null;
   const averageValue = metricAverage(data.wellnessTrend, selectedMetric);
   const peakValue = metricPeak(data.wellnessTrend, selectedMetric);
+  const readinessWindow = data.wellnessTrend.filter((entry) => entry.readiness !== null).slice(-14);
+  const sleepWindow = data.wellnessTrend.filter((entry) => entry.sleepHours !== null).slice(-14);
+  const weeklyRunningWindow = data.weeklyRunning.slice(-6);
+  const vo2Window = data.vo2Trend.filter((entry) => entry.value !== null).slice(-10);
+  const selectedMetricCurrentValue = data.wellnessTrend.at(-1)?.[selectedMetric] ?? null;
+  const readinessLatest = readinessWindow.at(-1)?.readiness ?? null;
+  const weeklyRunningLatest = weeklyRunningWindow.at(-1)?.distanceKm ?? null;
+  const vo2Latest = vo2Window.at(-1)?.value ?? null;
   const selectedWeekKm = selectedWeek ? plannedDistance(selectedWeek) : 0;
   const selectedKeySession = selectedWeek ? keySession(selectedWeek) : null;
   const selectedLongRun = selectedWeek ? longRun(selectedWeek) : null;
   const selectedWeekQualityDays = selectedWeek
     ? selectedWeek.days.filter((day) => day.intensity === 'alto' || day.intensity === 'medio' || day.intensity === 'carrera').length
     : 0;
+  const volumeRatio = data.adaptive.signals.volumeRatio;
+  const acuteChronicRatio = data.adaptive.signals.acuteChronicRatio;
   const nextSyncAt = new Date(data.fetchedAt).getTime() + serverRefreshMs;
   const nextSyncIn = nextSyncAt - clockNow;
   const syncTone = data.fallbackReason ? 'warning' : isRefreshing ? 'syncing' : 'live';
@@ -2478,6 +2559,13 @@ function App() {
     <main className="dashboard-layout">
       <aside className="dashboard-sidebar">
         <div className="dashboard-sidebar-inner">
+          <div className="brand-lockup sidebar-brand">
+            <span className="brand-badge" aria-hidden="true">RR</span>
+            <div className="brand-copy">
+              <strong>Race Room</strong>
+              <small>{data.provider.label}</small>
+            </div>
+          </div>
           <p className="eyebrow">Navegación</p>
           <nav className="sidebar-nav" aria-label="Secciones del dashboard">
             {dashboardSections.map((section) => (
@@ -2498,7 +2586,7 @@ function App() {
       <div className="dashboard-content">
       <section className="hero-panel dashboard-section" id="section-summary">
         <div className="hero-copy">
-          <p className="eyebrow">Garmin Race Room</p>
+          <p className="eyebrow">Race Room</p>
           <div className="hero-identity">
             <AthleteAvatar avatarUrl={athleteAvatarUrl} name={data.athlete.name} size="lg" />
             <div className="hero-identity-copy">
@@ -2519,11 +2607,6 @@ function App() {
             <span>{data.goal.daysToRace} días para {data.goal.raceTitle.toLowerCase()}</span>
             <span>{data.goal.totalWeeks} semanas de plan</span>
             {data.athlete.location ? <span>{data.athlete.location}</span> : null}
-            <span>
-              {data.provider.key === 'garmin'
-                ? 'Re-login Garmin automático activo'
-                : 'Refresh OAuth de Strava automático activo'}
-            </span>
           </div>
           <div className="hero-actions">
             <div className={`sync-chip ${syncTone}`}>
@@ -2922,7 +3005,7 @@ function App() {
       <section className="panel fitness-summary-panel dashboard-section" id="section-fitness">
         <div className="panel-head">
           <div>
-            <p className="eyebrow">Estado fitness</p>
+            <p className="eyebrow">Fitness y tendencias</p>
             <h2>{data.fitnessSummary.title}</h2>
           </div>
           <span className={`adaptive-badge ${data.adaptive.overall}`}>
@@ -2931,6 +3014,27 @@ function App() {
         </div>
 
         <p className="fitness-summary-copy">{data.fitnessSummary.body}</p>
+
+        <div className="fitness-chip-strip">
+          <span>
+            Necesidad principal
+            <strong>{data.adaptive.primaryNeed}</strong>
+          </span>
+          <span>
+            Ratio volumen
+            <strong>{volumeRatio !== null ? `${volumeRatio.toFixed(2)}x` : 'Sin dato'}</strong>
+          </span>
+          <span>
+            ACWR
+            <strong>{acuteChronicRatio !== null ? acuteChronicRatio.toFixed(2) : 'Sin dato'}</strong>
+          </span>
+          {data.adaptive.signals.keySessionRelocatedTo ? (
+            <span>
+              Reubicación
+              <strong>{data.adaptive.signals.keySessionRelocatedTo}</strong>
+            </span>
+          ) : null}
+        </div>
 
         <div className="fitness-summary-grid">
           <article className="stat-pill">
@@ -2961,163 +3065,298 @@ function App() {
           </article>
         </div>
 
-        <div className="fitness-summary-notes">
-          <span>{data.adaptive.primaryNeed}</span>
-          {data.adaptive.signals.keySessionRelocatedTo ? (
-            <span>Sesión clave reubicada al {data.adaptive.signals.keySessionRelocatedTo}</span>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="insight-grid dashboard-section" id="section-insights">
-        <article className="panel chart-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Métrica interactiva</p>
-              <h2>{selectedMetricMeta.label} en contexto</h2>
+        <div className="fitness-lead-grid">
+          <article className="fitness-chart-card fitness-chart-card--lead">
+            <div className="fitness-chart-head fitness-chart-head--stack">
+              <div className="fitness-chart-headline">
+                <div>
+                  <p className="eyebrow">Tendencia principal</p>
+                  <h3>{selectedMetricMeta.label} en contexto</h3>
+                </div>
+                <div className="fitness-chart-badge">
+                  <small>Último valor</small>
+                  <strong>{formatChartMetric(selectedMetric, selectedMetricCurrentValue)}</strong>
+                </div>
+              </div>
+              <div className="segmented-control">
+                {chartOptions.map((option) => (
+                  <button
+                    key={option.key}
+                    className={`segmented-button ${selectedMetric === option.key ? 'selected' : ''}`}
+                    onClick={() => setSelectedMetric(option.key)}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="segmented-control">
-              {chartOptions.map((option) => (
-                <button
-                  key={option.key}
-                  className={`segmented-button ${selectedMetric === option.key ? 'selected' : ''}`}
-                  onClick={() => setSelectedMetric(option.key)}
-                  type="button"
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
 
-          <p className="chart-description">{selectedMetricMeta.description}</p>
+            <p className="chart-description">{selectedMetricMeta.description}</p>
 
-          <div className="chart-wrap tall">
-            <ResponsiveContainer width="100%" height="100%">
-              {selectedMetric === 'steps' ? (
-                <BarChart data={data.wellnessTrend}>
-                  <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} />
-                  <Tooltip />
-                  <Bar dataKey="steps" radius={[8, 8, 0, 0]} name="Pasos">
-                    {data.wellnessTrend.map((entry) => (
-                      <Cell key={entry.date} fill={selectedMetricMeta.tone} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              ) : (
-                <AreaChart data={data.wellnessTrend}>
-                  <defs>
-                    <linearGradient id="metricFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={selectedMetricMeta.tone} stopOpacity={0.34} />
-                      <stop offset="95%" stopColor={selectedMetricMeta.tone} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} />
-                  <Tooltip />
-                  <Area
-                    type="monotone"
-                    dataKey={selectedMetric}
-                    stroke={selectedMetricMeta.tone}
-                    fill="url(#metricFill)"
-                    strokeWidth={2}
-                    name={selectedMetricMeta.label}
-                  />
-                </AreaChart>
-              )}
-            </ResponsiveContainer>
-          </div>
-
-          <div className="chart-stat-strip">
-            <article className="stat-pill">
-              <span className="metric-label">Media 14d</span>
-              <strong>{formatChartMetric(selectedMetric, averageValue)}</strong>
-            </article>
-            <article className="stat-pill">
-              <span className="metric-label">Mejor día</span>
-              <strong>{peakValue ? peakValue.label : 'Sin dato'}</strong>
-            </article>
-            <article className="stat-pill">
-              <span className="metric-label">Valor pico</span>
-              <strong>{formatChartMetric(selectedMetric, peakValue?.[selectedMetric] ?? null)}</strong>
-            </article>
-          </div>
-        </article>
-
-        <article className="panel chart-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Carga</p>
-              <h2>Volumen semanal de running</h2>
-            </div>
-          </div>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.weeklyRunning}>
-                <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
-                <XAxis dataKey="weekLabel" tickLine={false} axisLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Bar dataKey="distanceKm" radius={[8, 8, 0, 0]} name="Km">
-                  {data.weeklyRunning.map((entry) => (
-                    <Cell
-                      key={entry.weekLabel}
-                      fill={entry.runCount >= 4 ? 'var(--heading)' : 'var(--warning)'}
+            <div className="chart-wrap tall fitness-chart-wrap feature">
+              <ResponsiveContainer width="100%" height="100%">
+                {selectedMetric === 'steps' ? (
+                  <BarChart data={data.wellnessTrend}>
+                    <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
+                    <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                    <YAxis tickLine={false} axisLine={false} />
+                    <Tooltip />
+                    <Bar dataKey="steps" radius={[10, 10, 0, 0]} name="Pasos">
+                      {data.wellnessTrend.map((entry, index) => (
+                        <Cell
+                          key={entry.date}
+                          fill={
+                            index === data.wellnessTrend.length - 1
+                              ? 'var(--accent)'
+                              : index === data.wellnessTrend.length - 2
+                                ? 'var(--warning)'
+                                : 'rgba(255, 255, 255, 0.22)'
+                          }
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                ) : (
+                    <AreaChart data={data.wellnessTrend}>
+                      <defs>
+                        <linearGradient id="metricFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor={selectedMetricMeta.tone} stopOpacity={0.34} />
+                        <stop offset="95%" stopColor={selectedMetricMeta.tone} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
+                    <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                    <YAxis hide />
+                    <Tooltip />
+                    <Area
+                      type="monotone"
+                      dataKey={selectedMetric}
+                      stroke={selectedMetricMeta.tone}
+                      fill="url(#metricFill)"
+                      strokeWidth={2.4}
+                      name={selectedMetricMeta.label}
+                      dot={false}
+                      activeDot={{ r: 4.5, stroke: selectedMetricMeta.tone, strokeWidth: 2, fill: '#14181f' }}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
                     />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </article>
-
-        <article className="panel chart-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Rendimiento</p>
-              <h2>Tendencia de VO2 Max</h2>
+                  </AreaChart>
+                )}
+              </ResponsiveContainer>
             </div>
-          </div>
-          <div className="chart-wrap">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data.vo2Trend}>
-                <defs>
-                  <linearGradient id="vo2Fill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--heading)" stopOpacity={0.24} />
-                    <stop offset="95%" stopColor="var(--heading)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Area type="monotone" dataKey="value" stroke="var(--heading)" fill="url(#vo2Fill)" strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </article>
-      </section>
 
-      <section className="dashboard-section" id="section-advice">
-        <article className="panel advice-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Consejos</p>
-              <h2>Lo importante para {data.goal.label}</h2>
-            </div>
-          </div>
-          <div className="advice-list">
-            {data.advice.map((item) => (
-              <article className={`advice-card ${item.tone}`} key={item.title}>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
+            <div className="chart-stat-strip">
+              <article className="stat-pill">
+                <span className="metric-label">Media 14d</span>
+                <strong>{formatChartMetric(selectedMetric, averageValue)}</strong>
               </article>
-            ))}
-          </div>
-        </article>
+              <article className="stat-pill">
+                <span className="metric-label">Mejor día</span>
+                <strong>{peakValue ? peakValue.label : 'Sin dato'}</strong>
+              </article>
+              <article className="stat-pill">
+                <span className="metric-label">Valor pico</span>
+                <strong>{formatChartMetric(selectedMetric, peakValue?.[selectedMetric] ?? null)}</strong>
+              </article>
+            </div>
+          </article>
+
+          <article className="fitness-chart-card fitness-chart-card--signal">
+            <div className="fitness-chart-head">
+              <div>
+                <p className="eyebrow">Recuperación</p>
+                <h3>Readiness y sueño</h3>
+              </div>
+              <div className="fitness-chart-badge">
+                <small>{data.provider.supportsWellness ? 'Última readiness' : 'Estado'}</small>
+                <strong>{data.provider.supportsWellness ? metricValue(readinessLatest) : 'Sin dato'}</strong>
+              </div>
+            </div>
+            {readinessWindow.length ? (
+              <>
+                <div className="fitness-chart-wrap compact">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={readinessWindow}>
+                      <defs>
+                        <linearGradient id="fitnessReadinessFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="var(--accent)" stopOpacity={0.32} />
+                          <stop offset="95%" stopColor="var(--accent)" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="rgba(255, 255, 255, 0.06)" vertical={false} />
+                      <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                      <YAxis hide domain={['dataMin - 5', 'dataMax + 5']} />
+                      <Tooltip />
+                      <Area
+                        type="monotone"
+                        dataKey="readiness"
+                        stroke="var(--accent)"
+                        fill="url(#fitnessReadinessFill)"
+                        strokeWidth={2.4}
+                        name="Readiness"
+                        dot={false}
+                        activeDot={{ r: 4.5, stroke: 'var(--accent)', strokeWidth: 2, fill: '#14181f' }}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="fitness-chart-stats">
+                  <span>
+                    Última lectura
+                    <strong>{metricValue(readinessWindow.at(-1)?.readiness ?? null)}</strong>
+                  </span>
+                  <span>
+                    Sueño medio
+                    <strong>{sleepWindow.length ? `${metricAverage(sleepWindow, 'sleepHours')?.toFixed(1)} h` : 'Sin dato'}</strong>
+                  </span>
+                  <span>
+                    Noches cortas
+                    <strong>{data.adaptive.signals.lowSleepDays7d}</strong>
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p className="fitness-empty-copy">
+                Este proveedor no trae señales de recuperación suficientes para dibujar una curva útil.
+              </p>
+            )}
+          </article>
+        </div>
+
+        <div className="fitness-visual-grid fitness-visual-grid--wide">
+          <article className="fitness-chart-card">
+            <div className="fitness-chart-head">
+              <div>
+                <p className="eyebrow">Carga</p>
+                <h3>Volumen reciente</h3>
+              </div>
+              <div className="fitness-chart-badge">
+                <small>Última semana</small>
+                <strong>{metricValue(weeklyRunningLatest, ' km', 1)}</strong>
+              </div>
+            </div>
+            {weeklyRunningWindow.length ? (
+              <>
+                <div className="fitness-chart-wrap compact">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={weeklyRunningWindow}>
+                      <CartesianGrid stroke="rgba(255, 255, 255, 0.06)" vertical={false} />
+                      <XAxis dataKey="weekLabel" tickLine={false} axisLine={false} />
+                      <YAxis hide />
+                      <Tooltip />
+                      <Bar dataKey="distanceKm" radius={[10, 10, 0, 0]} name="Km">
+                        {weeklyRunningWindow.map((entry, index) => (
+                          <Cell
+                            key={entry.weekLabel}
+                            fill={index === weeklyRunningWindow.length - 1 ? 'var(--accent)' : index === weeklyRunningWindow.length - 2 ? 'var(--warning)' : 'rgba(255,255,255,0.22)'}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="fitness-chart-stats">
+                  <span>
+                    7 días
+                    <strong>{metricValue(data.adaptive.signals.recent7Km, ' km', 1)}</strong>
+                  </span>
+                  <span>
+                    Base
+                    <strong>{metricValue(data.adaptive.signals.baselineWeeklyKm, ' km', 1)}</strong>
+                  </span>
+                  <span>
+                    Rodajes
+                    <strong>{weeklyRunningWindow.at(-1)?.runCount ?? 0}</strong>
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p className="fitness-empty-copy">Aún no hay histórico suficiente para representar la carga.</p>
+            )}
+          </article>
+
+          <article className="fitness-chart-card">
+            <div className="fitness-chart-head">
+              <div>
+                <p className="eyebrow">Rendimiento</p>
+                <h3>VO2 y consistencia</h3>
+              </div>
+              <div className="fitness-chart-badge">
+                <small>Último VO2</small>
+                <strong>{metricValue(vo2Latest, '', 0)}</strong>
+              </div>
+            </div>
+            {vo2Window.length ? (
+              <>
+                <div className="fitness-chart-wrap compact">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={vo2Window}>
+                      <defs>
+                        <linearGradient id="fitnessVo2Fill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="var(--warning)" stopOpacity={0.28} />
+                          <stop offset="95%" stopColor="var(--warning)" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="rgba(255, 255, 255, 0.06)" vertical={false} />
+                      <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                      <YAxis hide domain={['dataMin - 1', 'dataMax + 1']} />
+                      <Tooltip />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        stroke="var(--warning)"
+                        fill="url(#fitnessVo2Fill)"
+                        strokeWidth={2.4}
+                        name="VO2 Max"
+                        dot={false}
+                        activeDot={{ r: 4.5, stroke: 'var(--warning)', strokeWidth: 2, fill: '#14181f' }}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="fitness-chart-stats">
+                  <span>
+                    Último VO2
+                    <strong>{metricValue(vo2Window.at(-1)?.value ?? null, '', 0)}</strong>
+                  </span>
+                  <span>
+                    Calidad
+                    <strong>{data.adaptive.signals.qualitySessions14d}</strong>
+                  </span>
+                  <span>
+                    Cumplimiento
+                    <strong>{formatComplianceRate(data.adaptive.signals.complianceRate7d)}</strong>
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="fitness-empty-copy">
+                  No hay VO2 Max reciente, pero la consistencia sigue mandando el bloque.
+                </p>
+                <div className="fitness-chart-stats">
+                  <span>
+                    Calidad 14d
+                    <strong>{data.adaptive.signals.qualitySessions14d}</strong>
+                  </span>
+                  <span>
+                    Sesiones hechas
+                    <strong>{data.adaptive.signals.completedSessions7d}</strong>
+                  </span>
+                  <span>
+                    Días bajos
+                    <strong>{data.adaptive.signals.lowReadinessDays7d}</strong>
+                  </span>
+                </div>
+              </>
+            )}
+          </article>
+        </div>
       </section>
 
       <footer className="footer-note">

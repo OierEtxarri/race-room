@@ -1,33 +1,33 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 
 :root {
-  --bg: #0b1220;
-  --bg-deep: #070d17;
-  --panel: rgba(29, 39, 56, 0.52);
-  --panel-strong: rgba(25, 35, 52, 0.68);
-  --surface: rgba(255, 255, 255, 0.09);
-  --surface-strong: rgba(255, 255, 255, 0.15);
+  --bg: #14181f;
+  --bg-deep: #101012;
+  --panel: #1d2129;
+  --panel-strong: #20242d;
+  --surface: #282d36;
+  --surface-strong: #323842;
   --surface-ghost: transparent;
-  --heading: #ffffff;
-  --text: rgba(245, 247, 255, 0.92);
-  --muted: rgba(220, 228, 242, 0.62);
-  --line: rgba(255, 255, 255, 0.12);
-  --line-strong: rgba(255, 255, 255, 0.22);
-  --accent: #9bc7ff;
-  --accent-deep: #6ea8ff;
-  --accent-soft: rgba(155, 199, 255, 0.22);
-  --blue: #9bc7ff;
-  --blue-soft: rgba(155, 199, 255, 0.14);
-  --amber: #f2c879;
-  --warning: #f2c879;
-  --amber-soft: rgba(242, 200, 121, 0.16);
-  --danger: #ff7f6b;
-  --danger-soft: rgba(255, 127, 107, 0.16);
-  --success: #6fd4a2;
-  --shadow-soft: 0 24px 70px rgba(0, 0, 0, 0.26);
-  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
-  --display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif;
-  --mono: 'SFMono-Regular', 'SF Mono', 'Space Mono', ui-monospace, monospace;
+  --heading: #f9f6eb;
+  --text: rgba(249, 246, 235, 0.92);
+  --muted: rgba(245, 245, 245, 0.62);
+  --line: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.18);
+  --accent: #3e94fd;
+  --accent-deep: #3078ff;
+  --accent-soft: rgba(62, 148, 253, 0.18);
+  --blue: #3e94fd;
+  --blue-soft: rgba(48, 120, 255, 0.18);
+  --amber: #f2c33c;
+  --warning: #f2c33c;
+  --amber-soft: rgba(242, 195, 60, 0.14);
+  --danger: #df3e3e;
+  --danger-soft: rgba(223, 62, 62, 0.16);
+  --success: #3e94fd;
+  --shadow-soft: 0 28px 70px rgba(0, 0, 0, 0.42);
+  --sans: 'Red Hat Display', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --display: 'Red Hat Display', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --mono: 'Space Mono', ui-monospace, monospace;
 }
 
 * {
@@ -49,10 +49,10 @@ body {
   color: var(--text);
   font-family: var(--sans);
   background:
-    radial-gradient(circle at 15% 18%, rgba(138, 188, 255, 0.2), transparent 26%),
-    radial-gradient(circle at 82% 16%, rgba(191, 214, 255, 0.12), transparent 22%),
-    radial-gradient(circle at 50% 100%, rgba(117, 196, 255, 0.12), transparent 34%),
-    linear-gradient(180deg, #101827 0%, #0b1220 52%, #070d17 100%);
+    radial-gradient(circle at 72% 12%, rgba(48, 120, 255, 0.32), transparent 24%),
+    radial-gradient(circle at 68% 54%, rgba(62, 148, 253, 0.14), transparent 28%),
+    radial-gradient(circle at 18% 28%, rgba(8, 11, 20, 0.68), transparent 26%),
+    linear-gradient(180deg, #1a1e26 0%, #14181f 30%, #101012 100%);
   min-height: 100vh;
   background-attachment: fixed;
   overflow-x: hidden;
@@ -63,32 +63,33 @@ body::before,
 body::after {
   content: '';
   position: fixed;
-  inset: auto;
-  border-radius: 999px;
   pointer-events: none;
-  filter: blur(70px);
-  opacity: 0.9;
   z-index: -1;
 }
 
 body::before {
-  top: 4rem;
-  left: -4rem;
-  width: 22rem;
-  height: 22rem;
-  background: rgba(146, 194, 255, 0.12);
+  inset: 0;
+  opacity: 0.28;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.035) 0.6px, transparent 0.6px),
+    radial-gradient(rgba(255, 255, 255, 0.02) 0.5px, transparent 0.5px);
+  background-size: 6px 6px, 14px 14px;
+  background-position: 0 0, 2px 3px;
 }
 
 body::after {
-  right: -5rem;
-  bottom: 10vh;
-  width: 18rem;
-  height: 18rem;
-  background: rgba(192, 215, 255, 0.08);
+  top: 8rem;
+  right: -6rem;
+  width: 24rem;
+  height: 24rem;
+  border-radius: 999px;
+  filter: blur(90px);
+  opacity: 0.38;
+  background: rgba(48, 120, 255, 0.22);
 }
 
 #root {
-  width: min(1320px, calc(100% - 2rem));
+  width: min(1380px, calc(100% - 2rem));
   margin: 0 auto;
   padding: 1.5rem 0 3rem;
 }
@@ -109,14 +110,14 @@ h3 {
 h1 {
   font-family: var(--display);
   font-size: clamp(3.1rem, 6vw, 5.2rem);
-  line-height: 0.95;
-  letter-spacing: -0.05em;
-  font-weight: 700;
+  line-height: 0.92;
+  letter-spacing: -0.055em;
+  font-weight: 600;
 }
 
 h2 {
-  font-family: var(--sans);
-  font-size: clamp(1.5rem, 2.4vw, 2.1rem);
+  font-family: var(--display);
+  font-size: clamp(1.45rem, 2.4vw, 2rem);
   line-height: 1.1;
   font-weight: 600;
 }
@@ -131,7 +132,7 @@ h3 {
   font-family: var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  color: var(--muted);
+  color: rgba(245, 245, 245, 0.45);
   margin-bottom: 0.75rem;
 }
 
