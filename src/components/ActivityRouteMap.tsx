@@ -18,10 +18,33 @@ function FitRouteBounds({ points }: { points: LatLngTuple[] }) {
       return;
     }
 
-    map.fitBounds(latLngBounds(points), {
-      padding: [24, 24],
-      maxZoom: 16,
-    });
+    const bounds = latLngBounds(points);
+    const fit = () => {
+      map.invalidateSize(false);
+      map.fitBounds(bounds, {
+        padding: [30, 30],
+        maxZoom: 15,
+      });
+    };
+
+    const frameId = requestAnimationFrame(fit);
+    const settleTimer = window.setTimeout(fit, 180);
+    const animationTimer = window.setTimeout(fit, 420);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        fit();
+      });
+      observer.observe(map.getContainer());
+    }
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.clearTimeout(settleTimer);
+      window.clearTimeout(animationTimer);
+      observer?.disconnect();
+    };
   }, [map, points]);
 
   return null;

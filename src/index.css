@@ -17,6 +17,9 @@
   --accent: #3e94fd;
   --accent-deep: #3078ff;
   --accent-soft: rgba(62, 148, 253, 0.18);
+  --accent-warm: #ff5b4d;
+  --accent-warm-deep: #dc4339;
+  --accent-warm-soft: rgba(255, 91, 77, 0.18);
   --blue: #3e94fd;
   --blue-soft: rgba(48, 120, 255, 0.18);
   --amber: #f2c33c;
@@ -50,8 +53,11 @@ body {
   color: var(--text);
   font-family: var(--sans);
   background:
+    radial-gradient(circle at 14% 14%, rgba(255, 91, 77, 0.16), transparent 20%),
     radial-gradient(circle at 72% 12%, rgba(48, 120, 255, 0.32), transparent 24%),
+    radial-gradient(circle at 84% 72%, rgba(255, 91, 77, 0.12), transparent 26%),
     radial-gradient(circle at 68% 54%, rgba(62, 148, 253, 0.14), transparent 28%),
+    radial-gradient(circle at 42% 82%, rgba(242, 195, 60, 0.08), transparent 24%),
     radial-gradient(circle at 18% 28%, rgba(8, 11, 20, 0.68), transparent 26%),
     linear-gradient(180deg, #1a1e26 0%, #14181f 30%, #101012 100%);
   min-height: 100vh;
@@ -86,13 +92,15 @@ body::after {
   border-radius: 999px;
   filter: blur(90px);
   opacity: 0.38;
-  background: rgba(48, 120, 255, 0.22);
+  background:
+    radial-gradient(circle at 30% 35%, rgba(48, 120, 255, 0.24), transparent 42%),
+    radial-gradient(circle at 72% 62%, rgba(255, 91, 77, 0.18), transparent 44%);
 }
 
 #root {
-  width: min(1380px, calc(100% - 2rem));
+  width: min(1680px, calc(100% - clamp(1rem, 2.2vw, 2.75rem)));
   margin: 0 auto;
-  padding: 1.5rem 0 3rem;
+  padding: 1.2rem 0 3rem;
 }
 
 h1,

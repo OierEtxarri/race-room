@@ -1968,10 +1968,14 @@ async function buildGarminDashboardData(input: {
     startDate: wellnessStart,
     endDate: referenceDate,
   });
-  const vo2Range = await garminClient.callJson(input.auth, 'get_vo2max_range', {
+  const maxMetricsRange = await garminClient.callJson(input.auth, 'get_max_metrics_range', {
     startDate: runningStart,
     endDate: referenceDate,
   });
+  const vo2Range = await garminClient.callJson(input.auth, 'get_vo2max_range', {
+    startDate: runningStart,
+    endDate: referenceDate,
+  }).catch(() => null);
   const trainingStatusRaw = await garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate });
   const racePredictionsRaw = await garminClient.callJson(input.auth, 'get_race_predictions');
   const runningActivitiesRaw = await garminClient.callJson(input.auth, 'get_activities_by_date', {
@@ -1991,7 +1995,16 @@ async function buildGarminDashboardData(input: {
   const hrvSeries = normalizeRangeSeries(hrvRange, extractHrv);
   const readinessSeries = normalizeRangeSeries(readinessRange, extractReadiness);
   const stepsSeries = normalizeSteps(stepsRange);
-  const vo2Series = normalizeRangeSeries(vo2Range, extractVo2);
+  const vo2SeriesFromMaxMetrics = normalizeRangeSeries(maxMetricsRange, extractVo2);
+  const vo2SeriesFromLegacyRange = normalizeRangeSeries(vo2Range, extractVo2);
+  const vo2Series =
+    vo2SeriesFromMaxMetrics.some((entry) => entry.value !== null) ? vo2SeriesFromMaxMetrics : vo2SeriesFromLegacyRange;
+  const latestVo2 =
+    vo2Series.filter((entry) => entry.value !== null).at(-1)?.value ??
+    extractVo2(trainingStatusRaw) ??
+    extractVo2(dailySummary) ??
+    extractVo2(userProfile) ??
+    null;
   const wellnessTrend = mergeWellnessSeries({
     steps: stepsSeries,
     sleep: sleepSeries,
@@ -2048,7 +2061,7 @@ async function buildGarminDashboardData(input: {
       sleepScore: extractSleepScore(Array.isArray(sleepRange) ? sleepRange.at(-1) : sleepRange),
       hrv: hrvSeries.at(-1)?.value ?? null,
       readiness: readinessSeries.at(-1)?.value ?? null,
-      vo2Max: vo2Series.filter((entry) => entry.value !== null).at(-1)?.value ?? null,
+      vo2Max: latestVo2,
       trainingStatus,
       weightKg: extractLatestWeight(bodyCompositionRaw),
       predictedGoalSeconds: estimateGoalPrediction(racePredictions, goalMeta.distanceKm),

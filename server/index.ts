@@ -218,6 +218,7 @@ async function decorateDashboardForSession(
   const checkIns = listRecentDailyCheckIns(session.accountKey, 7);
   const persistedCoach = getPersistedCoachState(session.accountKey);
   const { snapshot, inputHash } = await generateCoachSnapshot({
+    accountKey: session.accountKey,
     dashboard,
     checkIns,
     persistedState: persistedCoach,
@@ -401,6 +402,8 @@ app.get('/api/health', (_request, response) => {
       enabled: Boolean(config.llmProvider && config.llmBaseUrl && config.llmModel),
       provider: config.llmProvider || null,
       model: config.llmModel || null,
+      routerModel: config.llmRouterModel || null,
+      embeddingModel: config.llmEmbeddingModel || null,
       minIntervalMinutes: Math.round(config.llmMinIntervalMs / 60_000),
     },
     sync: {
@@ -781,6 +784,7 @@ app.post('/api/coach/chat', async (request, response) => {
   try {
     const dashboard = await getDashboardData(session);
     const answer = await answerCoachQuestion({
+      accountKey: session.accountKey,
       dashboard,
       checkIns: listRecentDailyCheckIns(session.accountKey, 7),
       question,
@@ -789,7 +793,12 @@ app.post('/api/coach/chat', async (request, response) => {
     response.setHeader('Set-Cookie', buildSessionCookie(session.id));
     response.json({
       ok: true,
-      answer,
+      answer: answer.answer,
+      action: answer.action,
+      followUp: answer.followUp,
+      tools: answer.tools,
+      memory: answer.memory,
+      source: answer.source,
       provider: dashboard.provider.key,
       llmEnabled: dashboard.coach.enabled,
     });

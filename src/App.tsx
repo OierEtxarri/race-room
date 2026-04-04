@@ -55,6 +55,18 @@ type CoachChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  action?: string | null;
+  followUp?: string | null;
+  memory?: Array<{
+    title: string;
+    detail: string;
+  }>;
+  tools?: Array<{
+    name: string;
+    label: string;
+    detail: string;
+  }>;
+  source?: 'gemma4' | 'fallback';
 };
 type WhatIfDraft = {
   raceDate: string;
@@ -70,7 +82,7 @@ type WhatIfState = {
 };
 type VoiceTarget = 'checkin' | 'coach' | 'whatif';
 type VoiceState = {
-  status: 'idle' | 'recording' | 'unsupported';
+  status: 'idle' | 'requesting' | 'recording' | 'unsupported';
   target: VoiceTarget | null;
   message: string | null;
 };
@@ -80,7 +92,11 @@ type RouteState =
   | { status: 'ready'; data: ActivityRoute; error: null }
   | { status: 'error'; data: null; error: string };
 type RunOverlayTemplateId = 'routeGlass';
-type DashboardSectionId = 'summary' | 'fitness' | 'plan' | 'sessions';
+type DashboardSectionId = 'summary' | 'sessions' | 'plan' | 'coach' | 'fitness';
+type PageTransitionState = {
+  from: DashboardSectionId;
+  direction: 'forward' | 'backward';
+} | null;
 type AvatarSize = 'sm' | 'lg';
 
 type SpeechRecognitionResultLike = {
@@ -95,12 +111,16 @@ type SpeechRecognitionEventLike = Event & {
   results: ArrayLike<SpeechRecognitionResultLike>;
 };
 
+type SpeechRecognitionErrorEventLike = Event & {
+  error?: string;
+};
+
 type SpeechRecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
   onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
   onend: (() => void) | null;
   start: () => void;
   stop: () => void;
@@ -158,6 +178,14 @@ function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
     }).webkitSpeechRecognition;
 
   return candidate ?? null;
+}
+
+function isLikelyMobileDevice() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  return window.matchMedia?.('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod/i.test(window.navigator.userAgent);
 }
 
 function isBoneStudioMode() {
@@ -231,8 +259,23 @@ const dashboardSections: Array<{
   { id: 'summary', label: 'Resumen', note: 'Visión rápida y métricas clave' },
   { id: 'sessions', label: 'Sesiones', note: 'Rodajes recientes y export glass' },
   { id: 'plan', label: 'Plan', note: 'Semanas, sesiones y roadmap' },
+  { id: 'coach', label: 'Coach', note: 'Gemma 4, check-in, voz y escenarios' },
   { id: 'fitness', label: 'Fitness', note: 'Estado actual, tendencias y ajuste adaptativo' },
 ];
+
+function dashboardSectionIndex(sectionId: DashboardSectionId) {
+  return dashboardSections.findIndex((section) => section.id === sectionId);
+}
+
+function initialDashboardSection(): DashboardSectionId {
+  if (typeof window === 'undefined') {
+    return 'summary';
+  }
+
+  const hash = window.location.hash.replace(/^#/, '');
+  const match = dashboardSections.find((section) => section.id === hash);
+  return match?.id ?? 'summary';
+}
 
 function BrandSpinner({ label, detail }: { label: string; detail: string }) {
   return (
@@ -800,6 +843,7 @@ async function drawStaticRouteMapCard(
   height: number,
   radius = 28,
 ) {
+  const matteFill = '#0A1015';
   const viewport = staticMapViewport(route, width, height, 28);
   const startTileX = Math.floor(viewport.originX / staticTileSize);
   const endTileX = Math.floor((viewport.originX + width) / staticTileSize);
@@ -842,9 +886,20 @@ async function drawStaticRouteMapCard(
   const tiles = await Promise.all(tileJobs);
 
   context.save();
+  context.shadowColor = 'rgba(0,0,0,0.28)';
+  context.shadowBlur = 34;
+  context.shadowOffsetY = 14;
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    fill: matteFill,
+  });
+  context.restore();
+
+  context.save();
   drawRoundedRect(context, x, y, width, height, radius);
   context.clip();
-  context.fillStyle = '#11161D';
+  context.globalCompositeOperation = 'source-over';
+  context.fillStyle = matteFill;
   context.fillRect(x, y, width, height);
 
   tiles.forEach((tile) => {
@@ -854,7 +909,7 @@ async function drawStaticRouteMapCard(
   });
 
   context.save();
-  context.globalAlpha = 0.34;
+  context.globalAlpha = 0.12;
   context.globalCompositeOperation = 'screen';
   tiles.forEach((tile) => {
     if (tile.hillshade) {
@@ -863,11 +918,11 @@ async function drawStaticRouteMapCard(
   });
   context.restore();
 
-  context.fillStyle = 'rgba(14, 18, 24, 0.32)';
+  context.fillStyle = 'rgba(6, 10, 15, 0.015)';
   context.fillRect(x, y, width, height);
 
   context.save();
-  context.globalAlpha = 0.16;
+  context.globalAlpha = 0.035;
   tiles.forEach((tile) => {
     if (tile.labels) {
       context.drawImage(tile.labels, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
@@ -930,15 +985,15 @@ async function drawStaticRouteMapCard(
   context.fill();
 
   const overlayGradient = context.createLinearGradient(x, y, x, y + height);
-  overlayGradient.addColorStop(0, 'rgba(20, 24, 31, 0.08)');
-  overlayGradient.addColorStop(1, 'rgba(20, 24, 31, 0.26)');
+  overlayGradient.addColorStop(0, 'rgba(12, 17, 24, 0)');
+  overlayGradient.addColorStop(1, 'rgba(12, 17, 24, 0.02)');
   context.fillStyle = overlayGradient;
   context.fillRect(x, y, width, height);
   context.restore();
 
   fillRoundedPanel(context, x, y, width, height, {
     radius,
-    stroke: 'rgba(255,255,255,0.12)',
+    stroke: 'rgba(255,255,255,0.2)',
     lineWidth: 1.5,
   });
 }
@@ -1405,21 +1460,38 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
   context.font = '500 24px "Space Grotesk", sans-serif';
   wrapCanvasText(context, description, leftX, cardY + 344, leftWidth, 32, 3);
 
-  const statRows = [
-    { y: cardY + 430, label: 'Distancia', value: `${input.run.distanceKm.toFixed(1)} km` },
-    { y: cardY + 504, label: 'Tiempo', value: formatDuration(input.run.durationSeconds) },
-    { y: cardY + 578, label: 'Ritmo', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+  const statColumns = [
+    {
+      x: leftX,
+      rows: [
+        { y: cardY + 430, label: 'Distancia', value: `${input.run.distanceKm.toFixed(1)} km` },
+        { y: cardY + 528, label: 'Tiempo', value: formatDuration(input.run.durationSeconds) },
+      ],
+    },
+    {
+      x: leftX + 188,
+      rows: [
+        { y: cardY + 430, label: 'Ritmo', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+        { y: cardY + 528, label: 'FC media', value: input.run.averageHeartRate ? `${input.run.averageHeartRate} bpm` : 'Sin FC' },
+      ],
+    },
   ];
 
-  statRows.forEach((item) => {
-    context.fillStyle = 'rgba(255,255,255,0.7)';
-    context.font = '500 20px "Space Grotesk", sans-serif';
-    context.fillText(item.label, leftX, item.y);
-    context.fillStyle = '#FFFFFF';
-    context.font = '700 42px "Space Grotesk", sans-serif';
-    context.fillText(item.value, leftX + 136, item.y + 2);
+  statColumns.forEach((column) => {
+    column.rows.forEach((item) => {
+      context.fillStyle = 'rgba(255,255,255,0.68)';
+      context.font = '500 18px "Space Grotesk", sans-serif';
+      context.fillText(item.label, column.x, item.y);
+      context.fillStyle = '#FFFFFF';
+      context.font = '700 28px "Space Grotesk", sans-serif';
+      context.fillText(item.value, column.x, item.y + 40);
+    });
   });
 
+  fillRoundedPanel(context, mapX, mapY, mapWidth, mapHeight, {
+    radius: 30,
+    fill: '#0A1015',
+  });
   await drawStaticRouteMapCard(context, input.route, mapX, mapY, mapWidth, mapHeight, 30);
 }
 
@@ -1975,18 +2047,6 @@ function formatCheckInValue(
   return options.find((option) => option.value === value)?.label ?? value;
 }
 
-function coachEngineLabel(coach: DashboardData['coach']) {
-  if (coach.source === 'gemma4') {
-    return coach.model ?? 'Gemma 4';
-  }
-
-  if (coach.enabled) {
-    return 'Fallback validado';
-  }
-
-  return 'Reglas base';
-}
-
 function formatExecutionDelta(value: number | null) {
   if (value === null || value === 0) {
     return 'Sin dato';
@@ -2167,7 +2227,8 @@ function App() {
   const [routeState, setRouteState] = useState<RouteState>(idleRouteState);
   const [isExportingRunImage, setIsExportingRunImage] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [activeSection, setActiveSection] = useState<DashboardSectionId>('summary');
+  const [activeSection, setActiveSection] = useState<DashboardSectionId>(initialDashboardSection);
+  const [pageTransition, setPageTransition] = useState<PageTransitionState>(null);
   const [scheduleState, setScheduleState] = useState<ScheduleState>({
     key: null,
     status: 'idle',
@@ -2176,6 +2237,11 @@ function App() {
   const [clockNow, setClockNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
   const voiceRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const microphoneReadyRef = useRef(false);
+  const checkInNoteRef = useRef<HTMLTextAreaElement | null>(null);
+  const coachChatTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const whatIfNoteRef = useRef<HTMLTextAreaElement | null>(null);
+  const previousSectionRef = useRef<DashboardSectionId>(initialDashboardSection());
   const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
 
   useEffect(() => {
@@ -2478,6 +2544,10 @@ function App() {
               id: `coach-${state.data.coach.generatedAt ?? state.data.fetchedAt}`,
               role: 'assistant',
               text: state.data.coach.todayMessage,
+              action: state.data.coach.weeklyReview?.nextMove ?? null,
+              followUp: state.data.coach.latestDebrief?.nextStep ?? null,
+              tools: [],
+              source: state.data.coach.source,
             },
           ]
         : [],
@@ -2569,51 +2639,54 @@ function App() {
   }, [selectedRunId, state]);
 
   useEffect(() => {
-    if (state.status !== 'ready' || typeof window === 'undefined') {
+    if (typeof window === 'undefined') {
       return;
     }
 
-    const sectionElements = dashboardSections
-      .map((section) => document.getElementById(`section-${section.id}`))
-      .filter((section): section is HTMLElement => section instanceof HTMLElement);
-
-    if (!sectionElements.length) {
-      return;
-    }
-
-    let frame = 0;
-
-    const updateActiveSection = () => {
-      const viewportOffset = window.innerWidth <= 1100 ? 124 : 116;
-      let nextActive = dashboardSections[0]?.id ?? 'summary';
-
-      for (const section of sectionElements) {
-        const top = section.getBoundingClientRect().top;
-        if (top - viewportOffset <= 0) {
-          nextActive = section.id.replace('section-', '') as DashboardSectionId;
-          continue;
-        }
-        break;
+    const syncFromHash = () => {
+      const hash = window.location.hash.replace(/^#/, '');
+      const match = dashboardSections.find((section) => section.id === hash);
+      if (match) {
+        setActiveSection((current) => (current === match.id ? current : match.id));
       }
-
-      setActiveSection((current) => (current === nextActive ? current : nextActive));
     };
 
-    const requestUpdate = () => {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(updateActiveSection);
-    };
-
-    requestUpdate();
-    window.addEventListener('scroll', requestUpdate, { passive: true });
-    window.addEventListener('resize', requestUpdate);
+    syncFromHash();
+    window.addEventListener('hashchange', syncFromHash);
 
     return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener('scroll', requestUpdate);
-      window.removeEventListener('resize', requestUpdate);
+      window.removeEventListener('hashchange', syncFromHash);
     };
-  }, [state.status]);
+  }, []);
+
+  useEffect(() => {
+    const previousSection = previousSectionRef.current;
+    if (previousSection === activeSection) {
+      return;
+    }
+
+    const nextDirection =
+      dashboardSectionIndex(activeSection) >= dashboardSectionIndex(previousSection) ? 'forward' : 'backward';
+
+    setPageTransition({
+      from: previousSection,
+      direction: nextDirection,
+    });
+    previousSectionRef.current = activeSection;
+
+    if (typeof window === 'undefined') {
+      setPageTransition(null);
+      return;
+    }
+
+    const transitionTimer = window.setTimeout(() => {
+      setPageTransition(null);
+    }, 360);
+
+    return () => {
+      window.clearTimeout(transitionTimer);
+    };
+  }, [activeSection]);
 
   const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2715,7 +2788,46 @@ function App() {
     }));
   };
 
-  const toggleVoiceCapture = (target: VoiceTarget) => {
+  const focusVoiceTarget = (target: VoiceTarget) => {
+    const field =
+      target === 'coach'
+        ? coachChatTextareaRef.current
+        : target === 'checkin'
+          ? checkInNoteRef.current
+          : whatIfNoteRef.current;
+
+    field?.focus();
+    if (field) {
+      const length = field.value.length;
+      field.setSelectionRange(length, length);
+    }
+  };
+
+  const getVoiceHint = (target: VoiceTarget) =>
+    voiceState.target === target || (voiceState.target === null && voiceState.status === 'unsupported')
+      ? voiceState.message
+      : null;
+
+  const ensureMicrophoneReady = async () => {
+    if (microphoneReadyRef.current || typeof navigator === 'undefined') {
+      return true;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
+      return false;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      microphoneReadyRef.current = true;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const toggleVoiceCapture = async (target: VoiceTarget) => {
     if (voiceState.status === 'recording' && voiceRecognitionRef.current) {
       voiceRecognitionRef.current.stop();
       setVoiceState({
@@ -2728,17 +2840,35 @@ function App() {
 
     const SpeechRecognition = getSpeechRecognitionCtor();
     if (!SpeechRecognition) {
+      focusVoiceTarget(target);
       setVoiceState({
         status: 'unsupported',
-        target: null,
-        message: 'Tu navegador no soporta dictado web.',
+        target,
+        message: 'Abro el campo para que uses el dictado del teclado.',
+      });
+      return;
+    }
+
+    setVoiceState({
+      status: 'requesting',
+      target,
+      message: 'Activando micrófono…',
+    });
+
+    const hasMic = await ensureMicrophoneReady();
+    if (!hasMic && isLikelyMobileDevice()) {
+      focusVoiceTarget(target);
+      setVoiceState({
+        status: 'unsupported',
+        target,
+        message: 'En móvil, si falla el micro web, usa el dictado del teclado.',
       });
       return;
     }
 
     const recognition = new SpeechRecognition();
     voiceRecognitionRef.current = recognition;
-    recognition.continuous = false;
+    recognition.continuous = isLikelyMobileDevice();
     recognition.interimResults = false;
     recognition.lang = 'es-ES';
     recognition.onresult = (event) => {
@@ -2748,11 +2878,16 @@ function App() {
         .trim();
       applyVoiceTranscript(target, transcript);
     };
-    recognition.onerror = () => {
+    recognition.onerror = (event) => {
+      const errorCode = event.error ?? '';
+      focusVoiceTarget(target);
       setVoiceState({
         status: 'unsupported',
-        target: null,
-        message: 'No he podido capturar el audio.',
+        target,
+        message:
+          errorCode === 'not-allowed'
+            ? 'El navegador no tiene permiso de micrófono.'
+            : 'No he podido capturar el audio. Usa el dictado del teclado.',
       });
     };
     recognition.onend = () => {
@@ -2770,7 +2905,7 @@ function App() {
     setVoiceState({
       status: 'recording',
       target,
-      message: null,
+      message: 'Escuchando… toca otra vez para parar.',
     });
     recognition.start();
   };
@@ -2818,9 +2953,8 @@ function App() {
     }
   };
 
-  const submitCoachChat = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const question = coachChatDraft.trim();
+  const askCoach = async (questionInput: string) => {
+    const question = questionInput.trim();
     if (!sessionIdRef.current || !question || state.status !== 'ready') {
       return;
     }
@@ -2856,6 +2990,15 @@ function App() {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
           text: payload.answer as string,
+          action: (payload.action as string | null | undefined) ?? null,
+          followUp: (payload.followUp as string | null | undefined) ?? null,
+          memory: Array.isArray(payload.memory)
+            ? (payload.memory as Array<{ title: string; detail: string }>)
+            : [],
+          tools: Array.isArray(payload.tools)
+            ? (payload.tools as Array<{ name: string; label: string; detail: string }>)
+            : [],
+          source: ((payload.source as 'gemma4' | 'fallback' | undefined) ?? 'fallback'),
         },
       ]);
       setCoachChatState({
@@ -2868,6 +3011,11 @@ function App() {
         message: error instanceof Error ? error.message : 'No se pudo consultar al coach.',
       });
     }
+  };
+
+  const submitCoachChat = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await askCoach(coachChatDraft);
   };
 
   const submitWhatIfScenario = async (event: FormEvent<HTMLFormElement>) => {
@@ -2913,8 +3061,7 @@ function App() {
     }
   };
 
-  const submitGoal = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const saveGoal = async (goal: UserGoal) => {
     if (!sessionIdRef.current) {
       return;
     }
@@ -2924,7 +3071,7 @@ function App() {
     try {
       const response = await apiFetch('/api/session/goal', {
         method: 'PUT',
-        body: JSON.stringify(normalizeGoalInput(goalDraft)),
+        body: JSON.stringify(normalizeGoalInput(goal)),
       });
       const payload = await response.json();
 
@@ -2945,6 +3092,19 @@ function App() {
     } finally {
       setIsSavingGoal(false);
     }
+  };
+
+  const submitGoal = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await saveGoal(goalDraft);
+  };
+
+  const applyWhatIfScenario = async () => {
+    if (!whatIfState.scenario) {
+      return;
+    }
+
+    await saveGoal(whatIfState.scenario.recommendedGoal);
   };
 
   const logout = async () => {
@@ -3211,25 +3371,76 @@ function App() {
   const acuteChronicRatio = data.adaptive.signals.acuteChronicRatio;
   const latestCheckIn = data.checkIn.latest;
   const showCheckInForm = data.checkIn.needsToday || checkInState.editing;
-  const coachLabel = coachEngineLabel(data.coach);
   const weeklyReview = data.coach.weeklyReview;
   const latestDebrief = data.coach.latestDebrief;
+  const activeSectionMeta = dashboardSections.find((section) => section.id === activeSection) ?? dashboardSections[0];
+  const coachQuickPrompts = [
+    {
+      label: 'Fitness actual',
+      question: '¿Cómo interpretarías mis datos actuales de fitness y recuperación?',
+    },
+    {
+      label: 'Debrief del último entreno',
+      question: latestDebrief
+        ? `Hazme un debrief útil de ${latestDebrief.runName} y dime qué harías mañana.`
+        : 'Hazme un debrief útil del último entreno y dime qué harías mañana.',
+    },
+    {
+      label: 'Qué hago mañana',
+      question: '¿Qué entrenamiento me recomiendas mañana con mis señales actuales?',
+    },
+    {
+      label: 'Últimos entrenos',
+      question: latestDebrief
+        ? `¿Qué me dice ${latestDebrief.runName} sobre esta semana?`
+        : '¿Qué te dicen mis últimos entrenos de esta semana?',
+    },
+    {
+      label: 'Patrón pasado',
+      question: 'Busca en mi histórico algo parecido a cómo estoy ahora y compáralo.',
+    },
+    {
+      label: 'Me duele el gemelo',
+      question: 'Me duele el gemelo después de entrenar. ¿Qué me preguntarías y qué harías hoy?',
+    },
+  ];
   const nextSyncAt = new Date(data.fetchedAt).getTime() + serverRefreshMs;
   const nextSyncIn = nextSyncAt - clockNow;
   const syncTone = data.fallbackReason ? 'warning' : isRefreshing ? 'syncing' : 'live';
   const syncLabel = data.fallbackReason ? 'Modo provisional' : isRefreshing ? 'Sincronizando' : 'Live';
   const athleteAvatarUrl = data.athlete.avatarPath ? absoluteApiUrl(data.athlete.avatarPath) : null;
   const jumpToSection = (sectionId: DashboardSectionId) => {
-    const target = document.getElementById(`section-${sectionId}`);
-    if (!target) {
+    if (sectionId === activeSection) {
       return;
     }
 
-    setActiveSection(sectionId);
-    target.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
+    startTransition(() => {
+      setActiveSection(sectionId);
     });
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', `#${sectionId}`);
+      window.scrollTo({
+        top: 0,
+        behavior: 'smooth',
+      });
+    }
+  };
+  const shouldRenderSection = (sectionId: DashboardSectionId) =>
+    sectionId === activeSection || pageTransition?.from === sectionId;
+  const pageClassName = (sectionId: DashboardSectionId) => {
+    if (!shouldRenderSection(sectionId)) {
+      return 'dashboard-page hidden';
+    }
+
+    if (pageTransition?.from === sectionId) {
+      return `dashboard-page transition-outgoing ${pageTransition.direction}`;
+    }
+
+    if (pageTransition) {
+      return `dashboard-page active transition-incoming ${pageTransition.direction}`;
+    }
+
+    return 'dashboard-page active';
   };
   const exportSelectedRunImage = async () => {
     if (!selectedRun || isExportingRunImage) {
@@ -3309,7 +3520,7 @@ function App() {
 
   return (
     <main className="dashboard-layout">
-      <aside className="dashboard-sidebar">
+      <div className="dashboard-sidebar">
         <div className="dashboard-sidebar-inner">
           <div className="brand-lockup sidebar-brand">
             <span className="brand-badge" aria-hidden="true">RR</span>
@@ -3318,10 +3529,10 @@ function App() {
               <small>{data.provider.label}</small>
             </div>
           </div>
-          <p className="eyebrow">Navegación</p>
           <nav className="sidebar-nav" aria-label="Secciones del dashboard">
             {dashboardSections.map((section) => (
               <button
+                aria-current={activeSection === section.id ? 'page' : undefined}
                 className={`sidebar-button ${activeSection === section.id ? 'active' : ''}`}
                 key={section.id}
                 onClick={() => jumpToSection(section.id)}
@@ -3332,10 +3543,16 @@ function App() {
               </button>
             ))}
           </nav>
+          <div className="dashboard-sidebar-context" aria-live="polite">
+            <span>{activeSectionMeta.label}</span>
+            <small>{activeSectionMeta.note}</small>
+          </div>
         </div>
-      </aside>
+      </div>
 
       <div className="dashboard-content">
+      <div className="dashboard-page-stack">
+      <div className={pageClassName('summary')}>
       <section className="hero-panel dashboard-section" id="section-summary">
         <div className="hero-copy">
           <p className="eyebrow">Race Room</p>
@@ -3351,8 +3568,7 @@ function App() {
             </div>
           </div>
           <p className="lead">
-            Dashboard interactivo para preparar {data.goal.label} del {data.goal.raceDate}. Cruza
-            recuperación, volumen, rendimiento y plan semanal en una sola vista y arranca con el plan persistido si ya existe.
+            Cruza recuperación, volumen, sesiones y plan en una sola vista para preparar {data.goal.label} del {data.goal.raceDate}.
           </p>
           <div className="hero-meta">
             <span>{data.provider.label}</span>
@@ -3453,477 +3669,6 @@ function App() {
         </div>
       </section>
 
-      <section className="coach-strip">
-        <article className={`panel daily-checkin-panel ${data.checkIn.needsToday ? 'attention' : ''}`}>
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Check-in diario</p>
-              <h2>Cómo llegas hoy</h2>
-            </div>
-            <span className={`checkin-status ${data.checkIn.needsToday ? 'pending' : 'done'}`}>
-              {data.checkIn.needsToday ? 'Pendiente hoy' : 'Hecho hoy'}
-            </span>
-          </div>
-
-          {showCheckInForm ? (
-            <form className="checkin-form" onSubmit={submitCheckIn}>
-              <div className="checkin-grid">
-                <div className="checkin-question">
-                  <span>Energía</span>
-                  <div className="checkin-options">
-                    {checkInOptions.energy.map((option) => (
-                      <button
-                        key={option.value}
-                        className={`checkin-option ${checkInDraft.energy === option.value ? 'selected' : ''}`}
-                        disabled={checkInState.status === 'saving'}
-                        onClick={() =>
-                          setCheckInDraft((current) => ({
-                            ...current,
-                            energy: option.value,
-                          }))
-                        }
-                        type="button"
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="checkin-question">
-                  <span>Piernas</span>
-                  <div className="checkin-options">
-                    {checkInOptions.legs.map((option) => (
-                      <button
-                        key={option.value}
-                        className={`checkin-option ${checkInDraft.legs === option.value ? 'selected' : ''}`}
-                        disabled={checkInState.status === 'saving'}
-                        onClick={() =>
-                          setCheckInDraft((current) => ({
-                            ...current,
-                            legs: option.value,
-                          }))
-                        }
-                        type="button"
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="checkin-question">
-                  <span>Cabeza</span>
-                  <div className="checkin-options">
-                    {checkInOptions.mood.map((option) => (
-                      <button
-                        key={option.value}
-                        className={`checkin-option ${checkInDraft.mood === option.value ? 'selected' : ''}`}
-                        disabled={checkInState.status === 'saving'}
-                        onClick={() =>
-                          setCheckInDraft((current) => ({
-                            ...current,
-                            mood: option.value,
-                          }))
-                        }
-                        type="button"
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <label className="form-field checkin-note-field">
-                <span>Nota opcional</span>
-                <textarea
-                  disabled={checkInState.status === 'saving'}
-                  maxLength={220}
-                  onChange={(event) =>
-                    setCheckInDraft((current) => ({
-                      ...current,
-                      note: event.target.value,
-                    }))
-                  }
-                  placeholder="Fatiga acumulada, estrés, molestias o cualquier contexto útil para afinar el plan."
-                  rows={3}
-                  value={checkInDraft.note}
-                />
-                <div className="field-inline-actions">
-                  <button
-                    className="inline-voice-button"
-                    disabled={checkInState.status === 'saving'}
-                    onClick={() => toggleVoiceCapture('checkin')}
-                    type="button"
-                  >
-                    {voiceState.status === 'recording' && voiceState.target === 'checkin' ? 'Parar dictado' : 'Dictar nota'}
-                  </button>
-                  {voiceState.message && voiceState.target === null ? <small>{voiceState.message}</small> : null}
-                </div>
-              </label>
-
-              <div className="checkin-footer">
-                <p className="checkin-help">
-                  Son solo 3 señales subjetivas al día. Race Room las cruza con Garmin o Strava para ajustar el tono,
-                  el texto y los microcambios del plan sin disparar el LLM a cada sync.
-                </p>
-                <div className="checkin-actions">
-                  {!data.checkIn.needsToday ? (
-                    <button
-                      className="secondary-button"
-                      disabled={checkInState.status === 'saving'}
-                      onClick={() =>
-                        setCheckInState({
-                          status: 'idle',
-                          message: null,
-                          editing: false,
-                        })
-                      }
-                      type="button"
-                    >
-                      Cancelar
-                    </button>
-                  ) : null}
-                  <button className="action-button" disabled={checkInState.status === 'saving'} type="submit">
-                    {checkInState.status === 'saving'
-                      ? 'Guardando...'
-                      : data.checkIn.needsToday
-                        ? 'Guardar check-in de hoy'
-                        : 'Actualizar check-in'}
-                  </button>
-                </div>
-              </div>
-
-              {checkInState.message ? (
-                <p className={`checkin-feedback ${checkInState.status}`}>{checkInState.message}</p>
-              ) : null}
-            </form>
-          ) : (
-            <div className="checkin-complete">
-              <p className="checkin-help">
-                Hoy ya has dejado señal subjetiva. Si cambias de sensación más tarde, puedes actualizarla y volver a
-                afinar el coach.
-              </p>
-              <div className="checkin-summary-chips">
-                <span>
-                  Energía
-                  <strong>{formatCheckInValue('energy', latestCheckIn?.energy ?? 'ok')}</strong>
-                </span>
-                <span>
-                  Piernas
-                  <strong>{formatCheckInValue('legs', latestCheckIn?.legs ?? 'normal')}</strong>
-                </span>
-                <span>
-                  Cabeza
-                  <strong>{formatCheckInValue('mood', latestCheckIn?.mood ?? 'steady')}</strong>
-                </span>
-              </div>
-              {latestCheckIn?.note ? <p className="checkin-latest-note">“{latestCheckIn.note}”</p> : null}
-              {checkInState.message ? (
-                <p className={`checkin-feedback ${checkInState.status}`}>{checkInState.message}</p>
-              ) : null}
-              <div className="checkin-actions">
-                <button
-                  className="secondary-button"
-                  onClick={() =>
-                    setCheckInState({
-                      status: 'idle',
-                      message: null,
-                      editing: true,
-                    })
-                  }
-                  type="button"
-                >
-                  Actualizar sensación de hoy
-                </button>
-              </div>
-            </div>
-          )}
-        </article>
-      </section>
-
-      <section className="coach-stack">
-        <article className="panel coach-daily-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Race Room Coach</p>
-              <h2>{data.coach.source === 'gemma4' ? 'Gemma 4 + guardrails' : 'Ajuste validado del día'}</h2>
-            </div>
-            <span className={`checkin-status ${data.coach.source === 'gemma4' ? 'done' : 'pending'}`}>
-              {coachLabel}
-            </span>
-          </div>
-
-          <p className="coach-daily-message">
-            {data.coach.todayMessage ??
-              'Todavía no hay una lectura subjetiva de hoy. Completa el check-in para dar contexto a los datos duros.'}
-          </p>
-
-          <div className="coach-micro-grid">
-            <article className="stat-pill">
-              <span className="metric-label">Último ajuste</span>
-              <strong>{formatCoachRelativeTime(data.coach.generatedAt)}</strong>
-              <small>{data.coach.generatedAt ? new Date(data.coach.generatedAt).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : 'Sin generación todavía'}</small>
-            </article>
-            <article className="stat-pill">
-              <span className="metric-label">Próximo refresh proveedor</span>
-              <strong>{formatPollingLabel(serverRefreshMs)}</strong>
-              <small>Backend con caché viva y sync más conservador</small>
-            </article>
-            <article className="stat-pill">
-              <span className="metric-label">Estado subjetivo</span>
-              <strong>
-                {latestCheckIn
-                  ? `${formatCheckInValue('energy', latestCheckIn.energy)} · ${formatCheckInValue('legs', latestCheckIn.legs)}`
-                  : 'Pendiente'}
-              </strong>
-              <small>{latestCheckIn ? formatCheckInValue('mood', latestCheckIn.mood) : 'Sin check-in de hoy'}</small>
-            </article>
-          </div>
-        </article>
-
-        <div className="coach-insight-grid">
-          <article className="panel coach-insight-card">
-            <div className="panel-head compact">
-              <div>
-                <p className="eyebrow">Revisión semanal</p>
-                <h3>{weeklyReview?.headline ?? 'Sin revisión todavía'}</h3>
-              </div>
-              <span className={`adaptive-badge ${weeklyReview?.status ?? data.adaptive.overall}`}>
-                {formatAdaptiveOverall(weeklyReview?.status ?? data.adaptive.overall)}
-              </span>
-            </div>
-            <p className="coach-insight-copy">
-              {weeklyReview?.summary ?? 'Gemma sintetiza aquí la lectura de la semana cuando hay suficiente contexto.'}
-            </p>
-            <div className="coach-insight-foot">
-              <span className="metric-label">Próximo movimiento</span>
-              <strong>{weeklyReview?.nextMove ?? 'Mantén el bloque actual.'}</strong>
-            </div>
-          </article>
-
-          <article className="panel coach-insight-card">
-            <div className="panel-head compact">
-              <div>
-                <p className="eyebrow">Debrief post-entreno</p>
-                <h3>{latestDebrief?.runName ?? 'Último entreno'}</h3>
-              </div>
-              <span className={`checkin-status ${latestDebrief ? 'done' : 'pending'}`}>
-                {latestDebrief ? 'Listo' : 'Pendiente'}
-              </span>
-            </div>
-            <p className="coach-insight-copy">
-              {latestDebrief?.summary ?? 'Cuando entra un rodaje nuevo, Gemma resume qué ha dicho realmente ese entreno.'}
-            </p>
-            <div className="coach-insight-foot">
-              <span className="metric-label">Siguiente paso</span>
-              <strong>{latestDebrief?.nextStep ?? 'Sin ajuste todavía.'}</strong>
-            </div>
-          </article>
-        </div>
-
-        <article className="panel coach-chat-panel">
-          <div className="coach-chat-head">
-            <div>
-              <p className="eyebrow">Chat</p>
-              <h3>{data.coach.enabled ? 'Pregunta a Gemma sobre tu estado' : 'Pregunta al coach'}</h3>
-            </div>
-            <span className={`checkin-status ${data.coach.enabled ? 'done' : 'pending'}`}>
-              {data.coach.enabled ? 'Gemma on demand' : 'Motor base'}
-            </span>
-          </div>
-
-          <div className="coach-chat-messages">
-            {coachChatMessages.length ? (
-              coachChatMessages.slice(-6).map((message) => (
-                <article className={`coach-chat-bubble ${message.role}`} key={message.id}>
-                  <span className="metric-label">{message.role === 'user' ? 'Tú' : 'Race Room Coach'}</span>
-                  <p>{message.text}</p>
-                </article>
-              ))
-            ) : (
-              <p className="coach-chat-empty">
-                Haz una pregunta concreta sobre fatiga, readiness, volumen, ritmo o cómo interpretar tus últimos
-                entrenos.
-              </p>
-            )}
-          </div>
-
-          <form className="coach-chat-form" onSubmit={submitCoachChat}>
-            <textarea
-              disabled={coachChatState.status === 'sending'}
-              maxLength={600}
-              onChange={(event) => setCoachChatDraft(event.target.value)}
-              placeholder={
-                data.coach.enabled
-                  ? 'Ejemplo: ¿Tiene sentido aflojar mañana si hoy tengo HRV baja pero piernas buenas?'
-                  : 'Gemma no está activa. Puedes preguntar igual y Race Room responderá con el contexto base.'
-              }
-              rows={3}
-              value={coachChatDraft}
-            />
-            <div className="coach-chat-actions">
-              <small>
-                {data.coach.enabled
-                  ? 'Consulta puntual. Gemma pide datos concretos del dashboard cuando los necesita.'
-                  : 'Sin Gemma activa: responde el motor base con el contexto actual.'}
-              </small>
-              <div className="coach-chat-buttons">
-                <button
-                  className="inline-voice-button"
-                  onClick={() => toggleVoiceCapture('coach')}
-                  type="button"
-                >
-                  {voiceState.status === 'recording' && voiceState.target === 'coach' ? 'Parar dictado' : 'Dictar'}
-                </button>
-                <button
-                  className="secondary-button"
-                  disabled={coachChatState.status === 'sending' || !coachChatDraft.trim()}
-                  type="submit"
-                >
-                  {coachChatState.status === 'sending'
-                    ? 'Pensando...'
-                    : data.coach.enabled
-                      ? 'Preguntar a Gemma'
-                      : 'Preguntar al coach'}
-                </button>
-              </div>
-            </div>
-            {coachChatState.message ? <p className="checkin-feedback error">{coachChatState.message}</p> : null}
-          </form>
-        </article>
-
-        <article className="panel coach-chat-panel">
-          <div className="coach-chat-head">
-            <div>
-              <p className="eyebrow">What-if planner</p>
-              <h3>Simula otro objetivo o una semana limitada</h3>
-            </div>
-            <span className="checkin-status pending">On demand</span>
-          </div>
-
-          <form className="whatif-form" onSubmit={submitWhatIfScenario}>
-            <div className="field-grid">
-              <label className="form-field">
-                <span>Fecha</span>
-                <input
-                  onChange={(event) =>
-                    setWhatIfDraft((current) => ({
-                      ...current,
-                      raceDate: event.target.value,
-                    }))
-                  }
-                  type="date"
-                  value={whatIfDraft.raceDate}
-                />
-              </label>
-              <label className="form-field">
-                <span>Distancia</span>
-                <input
-                  min="3"
-                  onChange={(event) =>
-                    setWhatIfDraft((current) => ({
-                      ...current,
-                      distanceKm: Number(event.target.value),
-                    }))
-                  }
-                  step="0.1"
-                  type="number"
-                  value={whatIfDraft.distanceKm}
-                />
-              </label>
-            </div>
-
-            <div className="field-grid">
-              <label className="form-field">
-                <span>Días/semana</span>
-                <input
-                  min="2"
-                  max="7"
-                  onChange={(event) =>
-                    setWhatIfDraft((current) => ({
-                      ...current,
-                      availableDays: event.target.value,
-                    }))
-                  }
-                  placeholder="Opcional"
-                  type="number"
-                  value={whatIfDraft.availableDays}
-                />
-              </label>
-              <label className="form-field">
-                <span>Km máximos/sem</span>
-                <input
-                  min="0"
-                  onChange={(event) =>
-                    setWhatIfDraft((current) => ({
-                      ...current,
-                      maxWeeklyKm: event.target.value,
-                    }))
-                  }
-                  placeholder="Opcional"
-                  step="0.1"
-                  type="number"
-                  value={whatIfDraft.maxWeeklyKm}
-                />
-              </label>
-            </div>
-
-            <label className="form-field">
-              <span>Contexto opcional</span>
-              <textarea
-                maxLength={240}
-                onChange={(event) =>
-                  setWhatIfDraft((current) => ({
-                    ...current,
-                    note: event.target.value,
-                  }))
-                }
-                placeholder="Viajes, menos tiempo, foco en marca, molestias..."
-                rows={3}
-                value={whatIfDraft.note}
-              />
-              <div className="field-inline-actions">
-                <button className="inline-voice-button" onClick={() => toggleVoiceCapture('whatif')} type="button">
-                  {voiceState.status === 'recording' && voiceState.target === 'whatif' ? 'Parar dictado' : 'Dictar contexto'}
-                </button>
-              </div>
-            </label>
-
-            <div className="coach-chat-actions">
-              <small>Simulación rápida. No toca tu plan real hasta que tú decidas cambiar el objetivo.</small>
-              <button className="secondary-button" disabled={whatIfState.status === 'sending'} type="submit">
-                {whatIfState.status === 'sending' ? 'Simulando...' : 'Probar escenario'}
-              </button>
-            </div>
-            {whatIfState.message ? <p className="checkin-feedback error">{whatIfState.message}</p> : null}
-          </form>
-
-          {whatIfState.scenario ? (
-            <div className={`whatif-result risk-${whatIfState.scenario.risk}`}>
-              <div className="panel-head compact">
-                <div>
-                  <p className="eyebrow">Escenario</p>
-                  <h3>{whatIfState.scenario.headline}</h3>
-                </div>
-                <span className={`checkin-status ${whatIfState.scenario.risk === 'low' ? 'done' : 'pending'}`}>
-                  Riesgo {whatIfState.scenario.risk}
-                </span>
-              </div>
-              <p className="coach-insight-copy">{whatIfState.scenario.summary}</p>
-              <div className="whatif-adjustments">
-                {whatIfState.scenario.adjustments.map((item) => (
-                  <article className="stat-pill" key={item}>
-                    <strong>{item}</strong>
-                  </article>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </article>
-      </section>
-
       <section className="metrics-grid">
         <article className="metric-card">
           <span className="metric-label">Sueño</span>
@@ -3951,7 +3696,9 @@ function App() {
           <small>Actividad diaria</small>
         </article>
       </section>
+      </div>
 
+      <div className={pageClassName('sessions')}>
       <section className="dashboard-section" id="section-sessions">
         <article className="panel recent-panel">
           <div className="panel-head">
@@ -4043,8 +3790,7 @@ function App() {
                   <div className="overlay-export-copy">
                     <span className="metric-label">PNG glass sin fondo</span>
                     <p>
-                      Exporta una sola tarjeta glass, tipo iOS, con avatar, nombre, hora, lugar, resumen y mapa en
-                      paralelo a los datos, lista para montarla sobre tu foto.
+                      Exporta una tarjeta glass limpia con avatar, resumen y mapa, lista para montarla sobre tu foto.
                     </p>
                   </div>
                   <div className="overlay-single-card" aria-label="Overlay activo">
@@ -4107,7 +3853,9 @@ function App() {
           )}
         </article>
       </section>
+      </div>
 
+      <div className={pageClassName('plan')}>
       <section className="panel plan-panel dashboard-section" id="section-plan">
         <div className="panel-head">
           <div>
@@ -4123,7 +3871,7 @@ function App() {
 
         <p className="plan-summary">{data.plan.summary}</p>
         <p className="adaptive-footnote">
-          El plan se recalcula con cada sync, pero primero se carga la última versión persistida.
+          Primero cargo la última versión persistida y después recalculo sobre el proveedor activo.
           {data.provider.supportsWorkoutPush
             ? ' Si un día futuro es compatible, puedes enviarlo a Garmin desde aquí.'
             : ' En sesiones Strava el plan es de lectura y ajuste; no hay envío directo de workouts.'}
@@ -4246,8 +3994,555 @@ function App() {
             </div>
           </>
         ) : null}
-      </section>
 
+      </section>
+      </div>
+
+      <div className={pageClassName('coach')}>
+      <section className="dashboard-section" id="section-coach">
+        <article className="panel coach-chat-panel coach-primary-chat">
+          <div className="panel-head coach-chat-hero-head">
+            <div>
+              <p className="eyebrow">Coach</p>
+              <h2>Pregunta a Gemma por tu estado y tus molestias</h2>
+              <p className="coach-page-lead">
+                Puedes preguntarle por fitness actual, rodajes pasados, qué hacer mañana o cómo actuar si aparece
+                dolor tras entrenar. Escribe o dicta y Gemma cruza el contexto del dashboard con tus sesiones reales.
+              </p>
+            </div>
+          </div>
+
+          <div className="coach-chat-messages">
+            {coachChatMessages.length ? (
+              coachChatMessages.slice(-6).map((message) => (
+                <article className={`coach-chat-bubble ${message.role}`} key={message.id}>
+                  <div className="coach-chat-bubble-head">
+                    <span className="metric-label">{message.role === 'user' ? 'Tú' : 'Race Room Coach'}</span>
+                  </div>
+                  <p>{message.text}</p>
+                  {message.action ? (
+                    <div className="coach-chat-action">
+                      <span className="metric-label">Haz ahora</span>
+                      <strong>{message.action}</strong>
+                    </div>
+                  ) : null}
+                  {message.followUp ? <small className="coach-chat-followup">{message.followUp}</small> : null}
+                  {message.memory?.length ? (
+                    <div className="coach-tool-trace coach-memory-trace">
+                      {message.memory.map((memory, memoryIndex) => (
+                        <span className="coach-tool-pill coach-memory-pill" key={`${message.id}-memory-${memoryIndex}`}>
+                          <strong>{memory.title}</strong>
+                          <small>{memory.detail}</small>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {message.tools?.length ? (
+                    <div className="coach-tool-trace">
+                      {message.tools.map((tool) => (
+                        <span className="coach-tool-pill" key={`${message.id}-${tool.name}`}>
+                          <strong>{tool.label}</strong>
+                          <small>{tool.detail}</small>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </article>
+              ))
+            ) : (
+              <p className="coach-chat-empty">
+                Prueba con algo como: “¿Qué hago mañana?”, “¿Qué dicen mis últimos entrenos?” o “Me duele el gemelo tras correr”.
+              </p>
+            )}
+            {coachChatState.status === 'sending' ? (
+              <article className="coach-chat-bubble assistant thinking" aria-live="polite">
+                <div className="coach-chat-bubble-head">
+                  <span className="metric-label">Race Room Coach</span>
+                </div>
+                <div className="coach-thinking-row">
+                  <div className="coach-thinking-dots" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <p>Gemma está cruzando fitness, entrenos y plan…</p>
+                </div>
+              </article>
+            ) : null}
+          </div>
+
+          <div className="coach-chat-quick-prompts">
+            {coachQuickPrompts.map((prompt) => (
+              <button
+                className="coach-prompt-chip"
+                disabled={coachChatState.status === 'sending'}
+                key={prompt.label}
+                onClick={() => void askCoach(prompt.question)}
+                type="button"
+              >
+                {prompt.label}
+              </button>
+            ))}
+          </div>
+
+          <form className="coach-chat-form" onSubmit={submitCoachChat}>
+            <textarea
+              ref={coachChatTextareaRef}
+              disabled={coachChatState.status === 'sending'}
+              maxLength={600}
+              onChange={(event) => setCoachChatDraft(event.target.value)}
+              placeholder={
+                data.coach.enabled
+                  ? 'Ejemplo: Me duele el gemelo desde ayer. ¿Qué me preguntarías y qué harías hoy?'
+                  : 'Gemma no está activa. Puedes preguntar igual y Race Room responderá con el contexto base.'
+              }
+              rows={3}
+              value={coachChatDraft}
+            />
+            <div className="coach-chat-actions">
+              <small>Consejo breve, accionable y apoyado en tus datos actuales.</small>
+              <div className="coach-chat-buttons">
+                <button className="inline-voice-button" onClick={() => void toggleVoiceCapture('coach')} type="button">
+                  {voiceState.status === 'recording' && voiceState.target === 'coach'
+                    ? 'Parar dictado'
+                    : voiceState.status === 'requesting' && voiceState.target === 'coach'
+                      ? 'Activando...'
+                      : 'Hablar'}
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={coachChatState.status === 'sending' || !coachChatDraft.trim()}
+                  type="submit"
+                >
+                  {coachChatState.status === 'sending'
+                    ? 'Pensando...'
+                    : data.coach.enabled
+                      ? 'Preguntar a Gemma'
+                      : 'Preguntar al coach'}
+                </button>
+              </div>
+            </div>
+            {getVoiceHint('coach') ? <small className="voice-support-note">{getVoiceHint('coach')}</small> : null}
+            {coachChatState.message ? <p className="checkin-feedback error">{coachChatState.message}</p> : null}
+          </form>
+        </article>
+
+        <article className="panel coach-overview-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Ajuste del día</p>
+              <h2>Qué haría hoy con tus señales</h2>
+            </div>
+          </div>
+          <p className="coach-page-lead">
+            {data.coach.todayMessage ??
+              'Completa el check-in para cruzar mejor las sensaciones con la carga y afinar el plan.'}
+          </p>
+          <div className="plan-coach-meta">
+            <span>
+              Último ajuste
+              <strong>{formatCoachRelativeTime(data.coach.generatedAt)}</strong>
+            </span>
+            <span>
+              Estado subjetivo
+              <strong>
+                {latestCheckIn
+                  ? `${formatCheckInValue('energy', latestCheckIn.energy)} · ${formatCheckInValue('legs', latestCheckIn.legs)}`
+                  : 'Pendiente'}
+              </strong>
+            </span>
+            <span>
+              Próximo refresh
+              <strong>{formatPollingLabel(serverRefreshMs)}</strong>
+            </span>
+          </div>
+        </article>
+
+        <section className="coach-page-grid">
+          <article className={`panel daily-checkin-panel ${data.checkIn.needsToday ? 'attention' : ''}`}>
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Check-in diario</p>
+                <h2>Cómo llegas hoy</h2>
+              </div>
+              <span className={`checkin-status ${data.checkIn.needsToday ? 'pending' : 'done'}`}>
+                {data.checkIn.needsToday ? 'Pendiente hoy' : 'Hecho hoy'}
+              </span>
+            </div>
+
+            {showCheckInForm ? (
+              <form className="checkin-form" onSubmit={submitCheckIn}>
+                <div className="checkin-grid">
+                  <div className="checkin-question">
+                    <span>Energía</span>
+                    <div className="checkin-options">
+                      {checkInOptions.energy.map((option) => (
+                        <button
+                          key={option.value}
+                          className={`checkin-option ${checkInDraft.energy === option.value ? 'selected' : ''}`}
+                          disabled={checkInState.status === 'saving'}
+                          onClick={() =>
+                            setCheckInDraft((current) => ({
+                              ...current,
+                              energy: option.value,
+                            }))
+                          }
+                          type="button"
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="checkin-question">
+                    <span>Piernas</span>
+                    <div className="checkin-options">
+                      {checkInOptions.legs.map((option) => (
+                        <button
+                          key={option.value}
+                          className={`checkin-option ${checkInDraft.legs === option.value ? 'selected' : ''}`}
+                          disabled={checkInState.status === 'saving'}
+                          onClick={() =>
+                            setCheckInDraft((current) => ({
+                              ...current,
+                              legs: option.value,
+                            }))
+                          }
+                          type="button"
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="checkin-question">
+                    <span>Cabeza</span>
+                    <div className="checkin-options">
+                      {checkInOptions.mood.map((option) => (
+                        <button
+                          key={option.value}
+                          className={`checkin-option ${checkInDraft.mood === option.value ? 'selected' : ''}`}
+                          disabled={checkInState.status === 'saving'}
+                          onClick={() =>
+                            setCheckInDraft((current) => ({
+                              ...current,
+                              mood: option.value,
+                            }))
+                          }
+                          type="button"
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <label className="form-field checkin-note-field">
+                  <span>Nota opcional</span>
+                  <textarea
+                    ref={checkInNoteRef}
+                    disabled={checkInState.status === 'saving'}
+                    maxLength={220}
+                    onChange={(event) =>
+                      setCheckInDraft((current) => ({
+                        ...current,
+                        note: event.target.value,
+                      }))
+                    }
+                    placeholder="Fatiga acumulada, estrés, molestias o cualquier contexto útil para afinar el plan."
+                    rows={3}
+                    value={checkInDraft.note}
+                  />
+                  <div className="field-inline-actions">
+                    <button
+                      className="inline-voice-button"
+                      disabled={checkInState.status === 'saving'}
+                      onClick={() => void toggleVoiceCapture('checkin')}
+                      type="button"
+                    >
+                      {voiceState.status === 'recording' && voiceState.target === 'checkin'
+                        ? 'Parar dictado'
+                        : voiceState.status === 'requesting' && voiceState.target === 'checkin'
+                          ? 'Activando...'
+                          : 'Dictar nota'}
+                    </button>
+                  </div>
+                  {getVoiceHint('checkin') ? <small>{getVoiceHint('checkin')}</small> : null}
+                </label>
+
+                <div className="checkin-footer">
+                  <p className="checkin-help">
+                    Son 3 señales rápidas al día para afinar el plan y el tono del coach sin recalcular todo el dashboard.
+                  </p>
+                  <div className="checkin-actions">
+                    {!data.checkIn.needsToday ? (
+                      <button
+                        className="secondary-button"
+                        disabled={checkInState.status === 'saving'}
+                        onClick={() =>
+                          setCheckInState({
+                            status: 'idle',
+                            message: null,
+                            editing: false,
+                          })
+                        }
+                        type="button"
+                      >
+                        Cancelar
+                      </button>
+                    ) : null}
+                    <button className="action-button" disabled={checkInState.status === 'saving'} type="submit">
+                      {checkInState.status === 'saving'
+                        ? 'Guardando...'
+                        : data.checkIn.needsToday
+                          ? 'Guardar check-in de hoy'
+                          : 'Actualizar check-in'}
+                    </button>
+                  </div>
+                </div>
+
+                {checkInState.message ? (
+                  <p className={`checkin-feedback ${checkInState.status}`}>{checkInState.message}</p>
+                ) : null}
+              </form>
+            ) : (
+              <div className="checkin-complete">
+                <p className="checkin-help">
+                  Hoy ya has dejado señal subjetiva. Si cambias de sensación más tarde, puedes actualizarla y volver a
+                  afinar el coach.
+                </p>
+                <div className="checkin-summary-chips">
+                  <span>
+                    Energía
+                    <strong>{formatCheckInValue('energy', latestCheckIn?.energy ?? 'ok')}</strong>
+                  </span>
+                  <span>
+                    Piernas
+                    <strong>{formatCheckInValue('legs', latestCheckIn?.legs ?? 'normal')}</strong>
+                  </span>
+                  <span>
+                    Cabeza
+                    <strong>{formatCheckInValue('mood', latestCheckIn?.mood ?? 'steady')}</strong>
+                  </span>
+                </div>
+                {latestCheckIn?.note ? <p className="checkin-latest-note">“{latestCheckIn.note}”</p> : null}
+                {checkInState.message ? (
+                  <p className={`checkin-feedback ${checkInState.status}`}>{checkInState.message}</p>
+                ) : null}
+                <div className="checkin-actions">
+                  <button
+                    className="secondary-button"
+                    onClick={() =>
+                      setCheckInState({
+                        status: 'idle',
+                        message: null,
+                        editing: true,
+                      })
+                    }
+                    type="button"
+                  >
+                    Actualizar sensación de hoy
+                  </button>
+                </div>
+              </div>
+            )}
+          </article>
+
+          <div className="coach-insight-grid coach-page-insights">
+            <article className="panel coach-insight-card">
+              <div className="panel-head compact">
+                <div>
+                  <p className="eyebrow">Revisión semanal</p>
+                  <h3>{weeklyReview?.headline ?? 'Sin revisión todavía'}</h3>
+                </div>
+                <span className={`adaptive-badge ${weeklyReview?.status ?? data.adaptive.overall}`}>
+                  {formatAdaptiveOverall(weeklyReview?.status ?? data.adaptive.overall)}
+                </span>
+              </div>
+              <p className="coach-insight-copy">
+                {weeklyReview?.summary ?? 'Gemma sintetiza aquí la lectura de la semana cuando hay suficiente contexto.'}
+              </p>
+              <div className="coach-insight-foot">
+                <span className="metric-label">Próximo movimiento</span>
+                <strong>{weeklyReview?.nextMove ?? 'Mantén el bloque actual.'}</strong>
+              </div>
+            </article>
+
+            <article className="panel coach-insight-card">
+              <div className="panel-head compact">
+                <div>
+                  <p className="eyebrow">Debrief post-entreno</p>
+                  <h3>{latestDebrief?.runName ?? 'Último entreno'}</h3>
+                </div>
+              </div>
+              <p className="coach-insight-copy">
+                {latestDebrief?.summary ?? 'Cuando entra un rodaje nuevo, Gemma resume qué ha dicho realmente ese entreno.'}
+              </p>
+              <div className="coach-insight-foot">
+                <span className="metric-label">Haz ahora</span>
+                <strong>{latestDebrief?.nextStep ?? 'Sin ajuste todavía.'}</strong>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <article className="panel coach-chat-panel coach-whatif-panel">
+          <div className="coach-chat-head">
+            <div>
+              <p className="eyebrow">What-if planner</p>
+              <h3>Simula otro objetivo o una semana limitada</h3>
+            </div>
+          </div>
+
+          <form className="whatif-form" onSubmit={submitWhatIfScenario}>
+            <div className="field-grid">
+              <label className="form-field">
+                <span>Fecha</span>
+                <input
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      raceDate: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={whatIfDraft.raceDate}
+                />
+              </label>
+              <label className="form-field">
+                <span>Distancia</span>
+                <input
+                  min="3"
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      distanceKm: Number(event.target.value),
+                    }))
+                  }
+                  step="0.1"
+                  type="number"
+                  value={whatIfDraft.distanceKm}
+                />
+              </label>
+            </div>
+
+            <div className="field-grid">
+              <label className="form-field">
+                <span>Días/semana</span>
+                <input
+                  min="2"
+                  max="7"
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      availableDays: event.target.value,
+                    }))
+                  }
+                  placeholder="Opcional"
+                  type="number"
+                  value={whatIfDraft.availableDays}
+                />
+              </label>
+              <label className="form-field">
+                <span>Km máximos/sem</span>
+                <input
+                  min="0"
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      maxWeeklyKm: event.target.value,
+                    }))
+                  }
+                  placeholder="Opcional"
+                  step="0.1"
+                  type="number"
+                  value={whatIfDraft.maxWeeklyKm}
+                />
+              </label>
+            </div>
+
+            <label className="form-field">
+              <span>Contexto opcional</span>
+              <textarea
+                ref={whatIfNoteRef}
+                maxLength={240}
+                onChange={(event) =>
+                  setWhatIfDraft((current) => ({
+                    ...current,
+                    note: event.target.value,
+                  }))
+                }
+                placeholder="Viajes, menos tiempo, foco en marca, molestias..."
+                rows={3}
+                value={whatIfDraft.note}
+              />
+              <div className="field-inline-actions">
+                <button className="inline-voice-button" onClick={() => void toggleVoiceCapture('whatif')} type="button">
+                  {voiceState.status === 'recording' && voiceState.target === 'whatif'
+                    ? 'Parar dictado'
+                    : voiceState.status === 'requesting' && voiceState.target === 'whatif'
+                      ? 'Activando...'
+                      : 'Dictar contexto'}
+                </button>
+              </div>
+              {getVoiceHint('whatif') ? <small className="voice-support-note">{getVoiceHint('whatif')}</small> : null}
+            </label>
+
+            <div className="coach-chat-actions">
+              <small>Simulación rápida. No toca tu plan real hasta que tú decidas cambiar el objetivo.</small>
+              <button className="secondary-button" disabled={whatIfState.status === 'sending'} type="submit">
+                {whatIfState.status === 'sending' ? 'Simulando...' : 'Probar escenario'}
+              </button>
+            </div>
+            {whatIfState.message ? <p className="checkin-feedback error">{whatIfState.message}</p> : null}
+          </form>
+
+          {whatIfState.scenario ? (
+            <div className={`whatif-result risk-${whatIfState.scenario.risk}`}>
+              <div className="panel-head compact">
+                <div>
+                  <p className="eyebrow">Escenario</p>
+                  <h3>{whatIfState.scenario.headline}</h3>
+                </div>
+                <span className={`checkin-status ${whatIfState.scenario.risk === 'low' ? 'done' : 'pending'}`}>
+                  Riesgo {whatIfState.scenario.risk}
+                </span>
+              </div>
+              <p className="coach-insight-copy">{whatIfState.scenario.summary}</p>
+              <div className="coach-chat-action">
+                <span className="metric-label">Postura recomendada</span>
+                <strong>{whatIfState.scenario.stance}</strong>
+              </div>
+              <div className="whatif-adjustments">
+                {whatIfState.scenario.adjustments.map((item) => (
+                  <article className="stat-pill" key={item}>
+                    <strong>{item}</strong>
+                  </article>
+                ))}
+              </div>
+              <div className="whatif-adjustments">
+                {whatIfState.scenario.sampleWeek.map((item) => (
+                  <article className="stat-pill" key={`sample-${item}`}>
+                    <span className="metric-label">Semana tipo</span>
+                    <strong>{item}</strong>
+                  </article>
+                ))}
+              </div>
+              <div className="whatif-actions">
+                <button className="action-button" disabled={isSavingGoal} onClick={() => void applyWhatIfScenario()} type="button">
+                  {isSavingGoal ? 'Aplicando...' : 'Usar este escenario'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </article>
+      </section>
+      </div>
+
+      <div className={pageClassName('fitness')}>
       <section className="panel fitness-summary-panel dashboard-section" id="section-fitness">
         <div className="panel-head">
           <div>
@@ -4604,6 +4899,9 @@ function App() {
           </article>
         </div>
       </section>
+      </div>
+
+      </div>
 
       <footer className="footer-note">
         <span>

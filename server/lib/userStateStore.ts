@@ -47,6 +47,32 @@ type CoachStateRow = {
   generated_at: string;
 };
 
+export type CoachMemoryRecord = {
+  accountKey: string;
+  memoryKey: string;
+  kind: 'run' | 'checkin' | 'goal' | 'overview' | 'week';
+  title: string;
+  content: string;
+  contentHash: string;
+  metadata: Record<string, unknown> | null;
+  embedding: number[] | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CoachMemoryRow = {
+  account_key: string;
+  memory_key: string;
+  kind: CoachMemoryRecord['kind'];
+  title: string;
+  content: string;
+  content_hash: string;
+  metadata_json: string | null;
+  embedding_json: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PersistedUserState = {
   accountKey: string;
   goal: UserGoal;
@@ -90,6 +116,22 @@ database.exec(`
     input_hash TEXT NOT NULL,
     snapshot_json TEXT NOT NULL,
     generated_at TEXT NOT NULL
+  )
+`);
+
+database.exec(`
+  CREATE TABLE IF NOT EXISTS coach_memory (
+    account_key TEXT NOT NULL,
+    memory_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    metadata_json TEXT,
+    embedding_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_key, memory_key)
   )
 `);
 
@@ -153,6 +195,48 @@ const upsertCoachStateStatement = database.prepare(`
     generated_at = excluded.generated_at
 `);
 
+const selectCoachMemoriesStatement = database.prepare(`
+  SELECT
+    account_key,
+    memory_key,
+    kind,
+    title,
+    content,
+    content_hash,
+    metadata_json,
+    embedding_json,
+    created_at,
+    updated_at
+  FROM coach_memory
+  WHERE account_key = ?
+  ORDER BY updated_at DESC
+  LIMIT ?
+`);
+
+const upsertCoachMemoryStatement = database.prepare(`
+  INSERT INTO coach_memory (
+    account_key,
+    memory_key,
+    kind,
+    title,
+    content,
+    content_hash,
+    metadata_json,
+    embedding_json,
+    created_at,
+    updated_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(account_key, memory_key) DO UPDATE SET
+    kind = excluded.kind,
+    title = excluded.title,
+    content = excluded.content,
+    content_hash = excluded.content_hash,
+    metadata_json = excluded.metadata_json,
+    embedding_json = excluded.embedding_json,
+    updated_at = excluded.updated_at
+`);
+
 function parseDashboard(rawDashboard: string | null): DashboardData | null {
   if (!rawDashboard) {
     return null;
@@ -194,6 +278,33 @@ function mapDailyCheckInRow(row: DailyCheckInRow): DailyCheckInRecord {
     mood: row.mood as DailyCheckInRecord['mood'],
     note: row.note,
     createdAt: row.created_at,
+  };
+}
+
+function parseJsonRecord<T>(raw: string | null): T | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function mapCoachMemoryRow(row: CoachMemoryRow): CoachMemoryRecord {
+  return {
+    accountKey: row.account_key,
+    memoryKey: row.memory_key,
+    kind: row.kind,
+    title: row.title,
+    content: row.content,
+    contentHash: row.content_hash,
+    metadata: parseJsonRecord<Record<string, unknown>>(row.metadata_json),
+    embedding: parseJsonRecord<number[]>(row.embedding_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -274,4 +385,42 @@ export function upsertPersistedCoachState(input: {
 }): void {
   const normalized = normalizeAccountKey(input.accountKey);
   upsertCoachStateStatement.run(normalized, input.inputHash, input.snapshotJson, input.generatedAt);
+}
+
+export function listCoachMemories(accountKey: string, limit = 120): CoachMemoryRecord[] {
+  const normalized = normalizeAccountKey(accountKey);
+  const rows = selectCoachMemoriesStatement.all(normalized, limit) as CoachMemoryRow[];
+  return rows.map(mapCoachMemoryRow);
+}
+
+export function upsertCoachMemories(input: {
+  accountKey: string;
+  items: Array<{
+    memoryKey: string;
+    kind: CoachMemoryRecord['kind'];
+    title: string;
+    content: string;
+    contentHash: string;
+    metadata?: Record<string, unknown> | null;
+    embedding?: number[] | null;
+    createdAt?: string;
+  }>;
+}): void {
+  const normalized = normalizeAccountKey(input.accountKey);
+  const now = new Date().toISOString();
+
+  for (const item of input.items) {
+    upsertCoachMemoryStatement.run(
+      normalized,
+      item.memoryKey,
+      item.kind,
+      item.title,
+      item.content,
+      item.contentHash,
+      item.metadata ? JSON.stringify(item.metadata) : null,
+      item.embedding ? JSON.stringify(item.embedding) : null,
+      item.createdAt ?? now,
+      now,
+    );
+  }
 }

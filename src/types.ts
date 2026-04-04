@@ -198,7 +198,9 @@ export type WhatIfScenario = {
   headline: string;
   summary: string;
   risk: 'low' | 'medium' | 'high';
+  stance: string;
   adjustments: string[];
+  sampleWeek: string[];
   recommendedGoal: {
     raceDate: string;
     distanceKm: number;

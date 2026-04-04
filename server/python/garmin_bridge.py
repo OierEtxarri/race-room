@@ -185,6 +185,11 @@ def call_tool(client: Garmin, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "get_daily_steps_range":
         return client.get_daily_steps(args["startDate"], args["endDate"])
+    if name == "get_max_metrics_range":
+        return safe_daily_range(
+            date_range(args["startDate"], args["endDate"]),
+            client.get_max_metrics,
+        )
     if name == "get_vo2max_range":
         return safe_daily_range(
             date_range(args["startDate"], args["endDate"]),
