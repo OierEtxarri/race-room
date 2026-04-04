@@ -1,15 +1,42 @@
 # Race Room
 
-Dashboard responsive para Garmin Connect y Strava con login desde la propia app, plan adaptativo, export glass de entrenos y vista pensada para desktop y móvil. En la rama `feature/llm_gemma_4` añade además un coach basado en Gemma 4, check-in diario y sync más conservador.
+Dashboard responsive para Garmin Connect y Strava con login desde la propia app, plan adaptativo, coach con Gemma 4, export glass de entrenos y vistas separadas para desktop y móvil.
 
-## Vista rápida
+## Pantallas
 
 <p align="center">
-  <img src="docs/screenshots/dashboard-desktop.png" alt="Garmin Race Room en escritorio" width="880" />
+  <img src="docs/screenshots/dashboard-desktop.png" alt="Race Room - vista desktop ancha" width="980" />
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/dashboard-mobile.png" alt="Garmin Race Room en formato móvil" width="280" />
+  <img src="docs/screenshots/dashboard-summary.png" alt="Race Room - vista resumen" width="880" />
+</p>
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/dashboard-sessions.png" alt="Race Room - vista sesiones" width="100%" /><br />
+      <strong>Sesiones</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/dashboard-plan.png" alt="Race Room - vista plan" width="100%" /><br />
+      <strong>Plan</strong>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/dashboard-coach.png" alt="Race Room - vista coach" width="100%" /><br />
+      <strong>Coach</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/dashboard-fitness.png" alt="Race Room - vista fitness" width="100%" /><br />
+      <strong>Fitness</strong>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/dashboard-mobile.png" alt="Race Room - vista móvil" width="280" />
 </p>
 
 ## Qué incluye
@@ -104,6 +131,7 @@ Ejemplo real de hotspot móvil:
 - `npm run dev`: frontend + backend
 - `npm run dev:mobile`: frontend expuesto en LAN + backend
 - `npm run dev:web:mobile`: solo frontend en `0.0.0.0:5173`
+- `npm run capture:readme`: regenera las capturas del README usando un dashboard mockeado sobre el frontend de `http://127.0.0.1:5182`
 - `npm run start:api`: solo API
 - `npm run build`: typecheck + build del frontend
 - `npm run garmin:python:install`: crea el entorno Python e instala `garminconnect`
@@ -114,6 +142,7 @@ Ejemplo real de hotspot móvil:
 ## Notas
 
 - El flujo principal en este proyecto es Codex + app local. No depende de Cursor.
+- Para regenerar las capturas del README, arranca antes el frontend en `5182` con `npm run dev:web -- --host 127.0.0.1 --port 5182` y luego ejecuta `npm run capture:readme`.
 - Cada sesión de usuario guarda sus tokens de Garmin en un directorio temporal aislado y sus credenciales viven solo en memoria del backend.
 - Las sesiones de Strava guardan `access_token` y `refresh_token` solo en memoria del backend y refrescan OAuth automáticamente mientras la sesión siga viva.
 - `python-garminconnect` sigue disponible como respaldo, como vía de escritura y como referencia de autenticación.

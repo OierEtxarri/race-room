@@ -14,6 +14,7 @@
     "check": "tsc -b",
     "lint": "tsc -b",
     "preview": "vite preview",
+    "capture:readme": "wait-on http://127.0.0.1:5182 && node scripts/capture-readme-screenshots.mjs",
     "mcp:garmin": "tsx server/run-garmin-mcp.ts",
     "mcp:garmin:setup": "tsx server/run-garmin-mcp-setup.ts",
     "garmin:python:install": "python3 -m venv .venv-garmin && ./.venv-garmin/bin/pip install --upgrade pip garminconnect",

@@ -544,7 +544,7 @@
   background: rgba(223, 62, 62, 0.1);
   color: var(--text);
   font-size: 0.9rem;
-  max-width: 70ch;
+  max-width: 80ch;
 }
 
 .hero-scoreboard {
@@ -583,7 +583,7 @@
 
 .coach-page-lead {
   margin: 0;
-  max-width: 68ch;
+  max-width: 82ch;
   color: var(--text);
   line-height: 1.65;
 }
@@ -742,7 +742,7 @@
 }
 
 .checkin-help {
-  max-width: 60ch;
+  max-width: 72ch;
 }
 
 .checkin-feedback {
@@ -865,7 +865,7 @@
   margin: 0;
   color: var(--text);
   line-height: 1.6;
-  max-width: 64ch;
+  max-width: 78ch;
 }
 
 .plan-coach-meta {
@@ -1173,7 +1173,7 @@
 
 .coach-chat-actions small {
   color: var(--muted);
-  max-width: 42ch;
+  max-width: 52ch;
 }
 
 .coach-chat-buttons {
@@ -1567,7 +1567,7 @@
 .chart-description {
   margin-bottom: 1rem;
   color: var(--muted);
-  max-width: 64ch;
+  max-width: 82ch;
 }
 
 .segmented-control {
@@ -2160,7 +2160,7 @@
 }
 
 .plan-summary {
-  max-width: 72ch;
+  max-width: 88ch;
 }
 
 .week-tabs {
@@ -2468,7 +2468,7 @@
 }
 
 .fitness-summary-copy {
-  max-width: 72ch;
+  max-width: 88ch;
   color: var(--text);
 }
 
@@ -2666,8 +2666,13 @@
 }
 
 @media (min-width: 1450px) {
+  .dashboard-content {
+    gap: 1.35rem;
+  }
+
   .hero-panel {
-    grid-template-columns: minmax(0, 1.8fr) minmax(380px, 0.85fr);
+    grid-template-columns: minmax(0, 1.95fr) minmax(410px, 0.82fr);
+    gap: 2rem;
   }
 
   .metrics-grid {
@@ -2675,15 +2680,166 @@
   }
 
   .recent-layout {
-    grid-template-columns: minmax(0, 1.38fr) minmax(360px, 0.62fr);
+    grid-template-columns: minmax(0, 1.48fr) minmax(390px, 0.58fr);
+    gap: 1.35rem;
+  }
+
+  .run-spotlight {
+    padding: 1.55rem;
+  }
+
+  .run-list-panel {
+    padding: 1.25rem 1.3rem;
   }
 
   .fitness-summary-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
+  .week-tabs {
+    grid-template-columns: repeat(3, minmax(240px, 1fr));
+  }
+
+  .selected-week-panel {
+    padding: 1.45rem 1.5rem;
+  }
+
+  .weeks-grid {
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  }
+
+  .day-row {
+    grid-template-columns: 96px 1fr 168px;
+    column-gap: 1rem;
+  }
+
+  .coach-page-grid {
+    grid-template-columns: minmax(460px, 0.98fr) minmax(0, 1.02fr);
+    gap: 1.35rem;
+  }
+
+  .coach-insight-grid {
+    gap: 1.15rem;
+  }
+
+  .fitness-lead-grid {
+    grid-template-columns: minmax(0, 1.74fr) minmax(380px, 0.86fr);
+    gap: 1.35rem;
+  }
+
   .fitness-visual-grid--wide {
-    grid-template-columns: 1.15fr 0.85fr;
+    grid-template-columns: 1.08fr 0.92fr;
+    gap: 1.25rem;
+  }
+
+  .fitness-chart-wrap.feature {
+    height: 300px;
+  }
+
+  .fitness-chart-wrap.compact {
+    height: 214px;
+  }
+
+  .fitness-chart-card {
+    padding: 1.3rem;
+  }
+}
+
+@media (min-width: 1760px) {
+  .dashboard-layout {
+    gap: 1.35rem;
+  }
+
+  .dashboard-sidebar-inner {
+    padding: 1rem 1.25rem;
+  }
+
+  .hero-panel {
+    grid-template-columns: minmax(0, 2.05fr) minmax(440px, 0.78fr);
+    gap: 2.15rem;
+    padding: 2.4rem;
+  }
+
+  .hero-scoreboard {
+    grid-template-columns: 1.12fr 0.94fr 0.94fr;
+    gap: 1.2rem;
+  }
+
+  .hero-meta {
+    grid-template-columns: repeat(4, max-content);
+    gap: 0.85rem;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(5, minmax(210px, 1fr));
+    gap: 1.1rem;
+  }
+
+  .recent-layout {
+    grid-template-columns: minmax(0, 1.6fr) minmax(430px, 0.54fr);
+    gap: 1.45rem;
+  }
+
+  .route-map-canvas {
+    min-height: 360px;
+    aspect-ratio: 16 / 8;
+  }
+
+  .spotlight-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .week-tabs {
+    grid-template-columns: repeat(3, minmax(260px, 1fr));
+    gap: 0.85rem;
+  }
+
+  .plan-kpis {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.9rem;
+  }
+
+  .weeks-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .coach-chat-panel,
+  .coach-overview-panel,
+  .coach-whatif-panel,
+  .daily-checkin-panel,
+  .fitness-chart-card,
+  .selected-week-panel,
+  .run-spotlight,
+  .run-list-panel {
+    padding: 1.45rem;
+  }
+
+  .coach-page-grid {
+    grid-template-columns: minmax(520px, 0.96fr) minmax(0, 1.04fr);
+    gap: 1.45rem;
+  }
+
+  .coach-chat-messages {
+    max-height: min(48vh, 640px);
+  }
+
+  .fitness-summary-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.9rem;
+  }
+
+  .fitness-lead-grid {
+    grid-template-columns: minmax(0, 1.9fr) minmax(420px, 0.78fr);
+    gap: 1.45rem;
+  }
+
+  .fitness-chart-wrap.feature {
+    height: 286px;
+  }
+
+  .fitness-chart-wrap.compact {
+    height: 208px;
   }
 }
 
