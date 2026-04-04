@@ -981,15 +981,23 @@ function drawGlassPanel(
   context.clip();
 
   const baseGradient = context.createLinearGradient(x, y, x, y + height);
-  baseGradient.addColorStop(0, 'rgba(64,64,68,0.72)');
-  baseGradient.addColorStop(1, 'rgba(26,26,28,0.6)');
+  baseGradient.addColorStop(0, 'rgba(98,104,118,0.22)');
+  baseGradient.addColorStop(0.52, 'rgba(54,58,68,0.15)');
+  baseGradient.addColorStop(1, 'rgba(20,22,28,0.1)');
   context.fillStyle = baseGradient;
   context.fillRect(x, y, width, height);
 
   const surfaceLight = context.createLinearGradient(x, y, x, y + height * 0.42);
-  surfaceLight.addColorStop(0, 'rgba(255,255,255,0.12)');
+  surfaceLight.addColorStop(0, 'rgba(255,255,255,0.18)');
   surfaceLight.addColorStop(1, 'rgba(255,255,255,0)');
   context.fillStyle = surfaceLight;
+  context.fillRect(x, y, width, height);
+
+  const veilGradient = context.createLinearGradient(x, y, x + width, y + height);
+  veilGradient.addColorStop(0, 'rgba(255,255,255,0.06)');
+  veilGradient.addColorStop(0.45, 'rgba(255,255,255,0.02)');
+  veilGradient.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = veilGradient;
   context.fillRect(x, y, width, height);
 
   const innerBloom = context.createRadialGradient(
@@ -1000,7 +1008,7 @@ function drawGlassPanel(
     y + height * 0.7,
     width * 0.24,
   );
-  innerBloom.addColorStop(0, 'rgba(255,255,255,0.09)');
+  innerBloom.addColorStop(0, 'rgba(255,255,255,0.06)');
   innerBloom.addColorStop(1, 'rgba(255,255,255,0)');
   context.fillStyle = innerBloom;
   context.fillRect(x, y, width, height);
@@ -1008,8 +1016,8 @@ function drawGlassPanel(
 
   fillRoundedPanel(context, x, y, width, height, {
     radius,
-    stroke: 'rgba(255,255,255,0.72)',
-    lineWidth: 2,
+    stroke: 'rgba(255,255,255,0.68)',
+    lineWidth: 1.4,
   });
 }
 
