@@ -20,7 +20,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { ActivityRoute, DashboardData, SessionPayload, UserGoal } from './types';
+import { Skeleton } from 'boneyard-js/react';
+import type { ActivityRoute, DashboardData, SessionPayload, UserGoal, WhatIfScenario } from './types';
 import './App.css';
 
 type AsyncState =
@@ -55,6 +56,24 @@ type CoachChatMessage = {
   role: 'user' | 'assistant';
   text: string;
 };
+type WhatIfDraft = {
+  raceDate: string;
+  distanceKm: number;
+  availableDays: string;
+  maxWeeklyKm: string;
+  note: string;
+};
+type WhatIfState = {
+  status: 'idle' | 'sending' | 'success' | 'error';
+  message: string | null;
+  scenario: WhatIfScenario | null;
+};
+type VoiceTarget = 'checkin' | 'coach' | 'whatif';
+type VoiceState = {
+  status: 'idle' | 'recording' | 'unsupported';
+  target: VoiceTarget | null;
+  message: string | null;
+};
 type RouteState =
   | { status: 'idle'; data: null; error: null }
   | { status: 'loading'; data: null; error: null }
@@ -63,6 +82,31 @@ type RouteState =
 type RunOverlayTemplateId = 'routeGlass';
 type DashboardSectionId = 'summary' | 'fitness' | 'plan' | 'sessions';
 type AvatarSize = 'sm' | 'lg';
+
+type SpeechRecognitionResultLike = {
+  0: {
+    transcript: string;
+  };
+  isFinal: boolean;
+  length: number;
+};
+
+type SpeechRecognitionEventLike = Event & {
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
 
 type ChartMetric = 'sleepHours' | 'readiness' | 'hrv' | 'steps';
 const serverRefreshMs = 60 * 60 * 1_000;
@@ -85,12 +129,40 @@ const defaultCheckInDraft: CheckInDraft = {
   mood: 'steady',
   note: '',
 };
+const defaultWhatIfDraft = (goal: UserGoal): WhatIfDraft => ({
+  raceDate: goal.raceDate,
+  distanceKm: goal.distanceKm,
+  availableDays: '',
+  maxWeeklyKm: '',
+  note: '',
+});
 const runOverlayTemplate = {
   id: 'routeGlass' as const,
   label: 'Glass Profile',
   headline: 'Blur card',
   description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
 };
+
+function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const candidate = (window as Window & {
+    SpeechRecognition?: SpeechRecognitionCtor;
+    webkitSpeechRecognition?: SpeechRecognitionCtor;
+  }).SpeechRecognition
+    ?? (window as Window & {
+      SpeechRecognition?: SpeechRecognitionCtor;
+      webkitSpeechRecognition?: SpeechRecognitionCtor;
+    }).webkitSpeechRecognition;
+
+  return candidate ?? null;
+}
+
+function isBoneStudioMode() {
+  return typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('__bones');
+}
 const ActivityRouteMap = lazy(async () => {
   const module = await import('./components/ActivityRouteMap');
   return {
@@ -171,6 +243,46 @@ function BrandSpinner({ label, detail }: { label: string; detail: string }) {
       </div>
       <strong>{label}</strong>
       <p>{detail}</p>
+    </div>
+  );
+}
+
+function DashboardLoadingFixture() {
+  return (
+    <div className="dashboard-loading-fixture">
+      <div className="dashboard-loading-hero">
+        <div className="dashboard-loading-copy">
+          <span className="fixture-chip">Race Room</span>
+          <div className="fixture-line xl" />
+          <div className="fixture-line lg" />
+          <div className="fixture-line md" />
+        </div>
+        <div className="dashboard-loading-scoreboard">
+          <div className="fixture-stat" />
+          <div className="fixture-stat" />
+          <div className="fixture-stat" />
+        </div>
+      </div>
+      <div className="dashboard-loading-grid">
+        <div className="fixture-card tall" />
+        <div className="fixture-card" />
+        <div className="fixture-card" />
+      </div>
+    </div>
+  );
+}
+
+function RoutePanelFixture() {
+  return (
+    <div className="route-loading-fixture">
+      <div className="route-loading-map" />
+      <div className="route-loading-stats">
+        <div className="fixture-line md" />
+        <div className="fixture-line sm" />
+        <div className="fixture-stat compact" />
+        <div className="fixture-stat compact" />
+        <div className="fixture-stat compact" />
+      </div>
     </div>
   );
 }
@@ -1222,11 +1334,22 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
   const subtitle = subtitleParts.join(' · ');
   const description = buildRunDescription(input.run);
 
-  drawGlassPanel(context, 84, 122, 912, 784, 40);
+  const cardX = 24;
+  const cardY = 24;
+  const cardWidth = 1032;
+  const cardHeight = 636;
+  const leftX = cardX + 54;
+  const leftWidth = 368;
+  const mapX = cardX + 456;
+  const mapY = cardY + 84;
+  const mapWidth = 500;
+  const mapHeight = 468;
+
+  drawGlassPanel(context, cardX, cardY, cardWidth, cardHeight, 40);
 
   context.save();
-  const avatarX = 160;
-  const avatarY = 206;
+  const avatarX = leftX + 42;
+  const avatarY = cardY + 92;
   context.beginPath();
   context.arc(avatarX, avatarY, 42, 0, Math.PI * 2);
   context.closePath();
@@ -1261,47 +1384,35 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
 
   context.fillStyle = '#FFFFFF';
   context.font = '600 38px "Space Grotesk", sans-serif';
-  context.fillText(input.athleteName, 228, 192);
+  context.fillText(input.athleteName, leftX + 110, cardY + 78);
   context.fillStyle = 'rgba(255,255,255,0.76)';
   context.font = '500 22px "Space Grotesk", sans-serif';
-  context.fillText(subtitle || input.providerLabel, 228, 234);
+  context.fillText(subtitle || input.providerLabel, leftX + 110, cardY + 120);
 
   context.fillStyle = '#FFFFFF';
-  context.font = '700 70px "Space Grotesk", sans-serif';
-  context.fillText(input.run.name, 124, 358);
+  context.font = '700 54px "Space Grotesk", sans-serif';
+  wrapCanvasText(context, input.run.name, leftX, cardY + 220, leftWidth, 64, 3);
 
   context.fillStyle = 'rgba(255,255,255,0.84)';
-  context.font = '500 30px "Space Grotesk", sans-serif';
-  wrapCanvasText(context, description, 124, 418, 740, 40, 2);
+  context.font = '500 24px "Space Grotesk", sans-serif';
+  wrapCanvasText(context, description, leftX, cardY + 344, leftWidth, 32, 3);
 
-  const statColumns = [
-    { x: 124, label: 'Distancia', value: `${input.run.distanceKm.toFixed(1)} km` },
-    { x: 394, label: 'Tiempo', value: formatDuration(input.run.durationSeconds) },
-    { x: 646, label: 'Ritmo', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+  const statRows = [
+    { y: cardY + 430, label: 'Distancia', value: `${input.run.distanceKm.toFixed(1)} km` },
+    { y: cardY + 504, label: 'Tiempo', value: formatDuration(input.run.durationSeconds) },
+    { y: cardY + 578, label: 'Ritmo', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
   ];
 
-  statColumns.forEach((item) => {
+  statRows.forEach((item) => {
     context.fillStyle = 'rgba(255,255,255,0.7)';
-    context.font = '500 22px "Space Grotesk", sans-serif';
-    context.fillText(item.label, item.x, 546);
+    context.font = '500 20px "Space Grotesk", sans-serif';
+    context.fillText(item.label, leftX, item.y);
     context.fillStyle = '#FFFFFF';
-    context.font = '700 46px "Space Grotesk", sans-serif';
-    context.fillText(item.value, item.x, 596);
+    context.font = '700 42px "Space Grotesk", sans-serif';
+    context.fillText(item.value, leftX + 136, item.y + 2);
   });
 
-  await drawStaticRouteMapCard(context, input.route, 122, 650, 836, 216, 30);
-
-  fillRoundedPanel(context, 144, 674, 210, 54, {
-    radius: 999,
-    fill: 'rgba(20,24,31,0.62)',
-    stroke: 'rgba(255,255,255,0.12)',
-  });
-  context.fillStyle = 'rgba(255,255,255,0.66)';
-  context.font = '500 16px "Space Mono", monospace';
-  context.fillText('SATELLITE RELIEF', 170, 708);
-  context.fillStyle = '#FFFFFF';
-  context.font = '700 28px "Space Grotesk", sans-serif';
-  context.fillText(input.providerLabel.toUpperCase(), 170, 742);
+  await drawStaticRouteMapCard(context, input.route, mapX, mapY, mapWidth, mapHeight, 30);
 }
 
 function renderRibbonDataOverlay(context: CanvasRenderingContext2D, input: {
@@ -1589,7 +1700,7 @@ async function exportRunShareImage(input: {
   await document.fonts.ready.catch(() => undefined);
 
   const width = 1080;
-  const height = 1920;
+  const height = 684;
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -2031,6 +2142,17 @@ function App() {
     status: 'idle',
     message: null,
   });
+  const [whatIfDraft, setWhatIfDraft] = useState<WhatIfDraft>(defaultWhatIfDraft(defaultGoal));
+  const [whatIfState, setWhatIfState] = useState<WhatIfState>({
+    status: 'idle',
+    message: null,
+    scenario: null,
+  });
+  const [voiceState, setVoiceState] = useState<VoiceState>({
+    status: 'idle',
+    target: null,
+    message: null,
+  });
   const [selectedMetric, setSelectedMetric] = useState<ChartMetric>('sleepHours');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
@@ -2045,6 +2167,7 @@ function App() {
   });
   const [clockNow, setClockNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
+  const voiceRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
 
   useEffect(() => {
@@ -2111,6 +2234,17 @@ function App() {
     setCoachChatMessages([]);
     setCoachChatState({
       status: 'idle',
+      message: null,
+    });
+    setWhatIfDraft(defaultWhatIfDraft(defaultGoal));
+    setWhatIfState({
+      status: 'idle',
+      message: null,
+      scenario: null,
+    });
+    setVoiceState({
+      status: 'idle',
+      target: null,
       message: null,
     });
     setLoginState({
@@ -2285,6 +2419,11 @@ function App() {
     };
   }, []);
 
+  useEffect(() => () => {
+    voiceRecognitionRef.current?.stop();
+    voiceRecognitionRef.current = null;
+  }, []);
+
   useEffect(() => {
     if (state.status !== 'ready') {
       return;
@@ -2344,6 +2483,22 @@ function App() {
     state.status,
     state.status === 'ready' ? state.data.provider.key : null,
     state.status === 'ready' ? state.data.athlete.name : null,
+  ]);
+
+  useEffect(() => {
+    if (state.status !== 'ready') {
+      return;
+    }
+
+    setWhatIfDraft((current) => ({
+      ...current,
+      raceDate: current.raceDate || state.data.goal.raceDate,
+      distanceKm: current.distanceKm || state.data.goal.distanceKm,
+    }));
+  }, [
+    state.status,
+    state.status === 'ready' ? state.data.goal.raceDate : null,
+    state.status === 'ready' ? state.data.goal.distanceKm : null,
   ]);
 
   useEffect(() => {
@@ -2527,6 +2682,91 @@ function App() {
     window.location.assign(url.toString());
   };
 
+  const applyVoiceTranscript = (target: VoiceTarget, transcript: string) => {
+    const cleaned = transcript.trim();
+    if (!cleaned) {
+      return;
+    }
+
+    if (target === 'coach') {
+      setCoachChatDraft((current) => `${current}${current.trim() ? ' ' : ''}${cleaned}`.trim());
+      return;
+    }
+
+    if (target === 'checkin') {
+      setCheckInDraft((current) => ({
+        ...current,
+        note: `${current.note}${current.note.trim() ? ' ' : ''}${cleaned}`.trim(),
+      }));
+      return;
+    }
+
+    setWhatIfDraft((current) => ({
+      ...current,
+      note: `${current.note}${current.note.trim() ? ' ' : ''}${cleaned}`.trim(),
+    }));
+  };
+
+  const toggleVoiceCapture = (target: VoiceTarget) => {
+    if (voiceState.status === 'recording' && voiceRecognitionRef.current) {
+      voiceRecognitionRef.current.stop();
+      setVoiceState({
+        status: 'idle',
+        target: null,
+        message: null,
+      });
+      return;
+    }
+
+    const SpeechRecognition = getSpeechRecognitionCtor();
+    if (!SpeechRecognition) {
+      setVoiceState({
+        status: 'unsupported',
+        target: null,
+        message: 'Tu navegador no soporta dictado web.',
+      });
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    voiceRecognitionRef.current = recognition;
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'es-ES';
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0]?.transcript ?? '')
+        .join(' ')
+        .trim();
+      applyVoiceTranscript(target, transcript);
+    };
+    recognition.onerror = () => {
+      setVoiceState({
+        status: 'unsupported',
+        target: null,
+        message: 'No he podido capturar el audio.',
+      });
+    };
+    recognition.onend = () => {
+      voiceRecognitionRef.current = null;
+      setVoiceState((current) =>
+        current.status === 'unsupported'
+          ? current
+          : {
+              status: 'idle',
+              target: null,
+              message: null,
+            },
+      );
+    };
+    setVoiceState({
+      status: 'recording',
+      target,
+      message: null,
+    });
+    recognition.start();
+  };
+
   const submitCheckIn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!sessionIdRef.current) {
@@ -2622,6 +2862,49 @@ function App() {
     }
   };
 
+  const submitWhatIfScenario = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!sessionIdRef.current || state.status !== 'ready') {
+      return;
+    }
+
+    setWhatIfState({
+      status: 'sending',
+      message: null,
+      scenario: null,
+    });
+
+    try {
+      const response = await apiFetch('/api/coach/what-if', {
+        method: 'POST',
+        body: JSON.stringify({
+          raceDate: whatIfDraft.raceDate,
+          distanceKm: whatIfDraft.distanceKm,
+          availableDays: whatIfDraft.availableDays ? Number(whatIfDraft.availableDays) : null,
+          maxWeeklyKm: whatIfDraft.maxWeeklyKm ? Number(whatIfDraft.maxWeeklyKm) : null,
+          note: whatIfDraft.note.trim() || null,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? 'No se pudo simular el escenario.');
+      }
+
+      setWhatIfState({
+        status: 'success',
+        message: null,
+        scenario: payload.scenario as WhatIfScenario,
+      });
+    } catch (error) {
+      setWhatIfState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'No se pudo simular el escenario.',
+        scenario: null,
+      });
+    }
+  };
+
   const submitGoal = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!sessionIdRef.current) {
@@ -2666,22 +2949,55 @@ function App() {
     }
   };
 
+  if (isBoneStudioMode()) {
+    return (
+      <main className="app-shell">
+        <Skeleton
+          name="dashboard-shell"
+          loading={false}
+          fixture={<DashboardLoadingFixture />}
+          className="status-panel"
+        >
+          <DashboardLoadingFixture />
+        </Skeleton>
+        <Skeleton
+          name="route-panel"
+          loading={false}
+          fixture={<RoutePanelFixture />}
+          className="panel"
+        >
+          <RoutePanelFixture />
+        </Skeleton>
+      </main>
+    );
+  }
+
   if (state.status === 'loading') {
     return (
       <main className="app-shell">
-        <section className="status-panel">
-          <div className="brand-lockup">
-            <span className="brand-badge" aria-hidden="true">RR</span>
-            <div className="brand-copy">
-              <strong>Race Room</strong>
-              <small>Adaptive running dashboard</small>
-            </div>
-          </div>
-          <BrandSpinner
-            label="Cargando tu último estado"
-            detail="Primero restauro la sesión y el plan persistido; después refresco el proveedor activo."
-          />
-        </section>
+        <Skeleton
+          name="dashboard-shell"
+          loading
+          fixture={<DashboardLoadingFixture />}
+          className="status-panel"
+          fallback={
+            <section className="status-panel">
+              <div className="brand-lockup">
+                <span className="brand-badge" aria-hidden="true">RR</span>
+                <div className="brand-copy">
+                  <strong>Race Room</strong>
+                  <small>Adaptive running dashboard</small>
+                </div>
+              </div>
+              <BrandSpinner
+                label="Cargando tu último estado"
+                detail="Primero restauro la sesión y el plan persistido; después refresco el proveedor activo."
+              />
+            </section>
+          }
+        >
+          <DashboardLoadingFixture />
+        </Skeleton>
       </main>
     );
   }
@@ -2888,6 +3204,8 @@ function App() {
   const latestCheckIn = data.checkIn.latest;
   const showCheckInForm = data.checkIn.needsToday || checkInState.editing;
   const coachLabel = coachEngineLabel(data.coach);
+  const weeklyReview = data.coach.weeklyReview;
+  const latestDebrief = data.coach.latestDebrief;
   const nextSyncAt = new Date(data.fetchedAt).getTime() + serverRefreshMs;
   const nextSyncIn = nextSyncAt - clockNow;
   const syncTone = data.fallbackReason ? 'warning' : isRefreshing ? 'syncing' : 'live';
@@ -3224,6 +3542,17 @@ function App() {
                   rows={3}
                   value={checkInDraft.note}
                 />
+                <div className="field-inline-actions">
+                  <button
+                    className="inline-voice-button"
+                    disabled={checkInState.status === 'saving'}
+                    onClick={() => toggleVoiceCapture('checkin')}
+                    type="button"
+                  >
+                    {voiceState.status === 'recording' && voiceState.target === 'checkin' ? 'Parar dictado' : 'Dictar nota'}
+                  </button>
+                  {voiceState.message && voiceState.target === null ? <small>{voiceState.message}</small> : null}
+                </div>
               </label>
 
               <div className="checkin-footer">
@@ -3346,6 +3675,46 @@ function App() {
           </div>
         </article>
 
+        <div className="coach-insight-grid">
+          <article className="panel coach-insight-card">
+            <div className="panel-head compact">
+              <div>
+                <p className="eyebrow">Revisión semanal</p>
+                <h3>{weeklyReview?.headline ?? 'Sin revisión todavía'}</h3>
+              </div>
+              <span className={`adaptive-badge ${weeklyReview?.status ?? data.adaptive.overall}`}>
+                {formatAdaptiveOverall(weeklyReview?.status ?? data.adaptive.overall)}
+              </span>
+            </div>
+            <p className="coach-insight-copy">
+              {weeklyReview?.summary ?? 'Gemma sintetiza aquí la lectura de la semana cuando hay suficiente contexto.'}
+            </p>
+            <div className="coach-insight-foot">
+              <span className="metric-label">Próximo movimiento</span>
+              <strong>{weeklyReview?.nextMove ?? 'Mantén el bloque actual.'}</strong>
+            </div>
+          </article>
+
+          <article className="panel coach-insight-card">
+            <div className="panel-head compact">
+              <div>
+                <p className="eyebrow">Debrief post-entreno</p>
+                <h3>{latestDebrief?.runName ?? 'Último entreno'}</h3>
+              </div>
+              <span className={`checkin-status ${latestDebrief ? 'done' : 'pending'}`}>
+                {latestDebrief ? 'Listo' : 'Pendiente'}
+              </span>
+            </div>
+            <p className="coach-insight-copy">
+              {latestDebrief?.summary ?? 'Cuando entra un rodaje nuevo, Gemma resume qué ha dicho realmente ese entreno.'}
+            </p>
+            <div className="coach-insight-foot">
+              <span className="metric-label">Siguiente paso</span>
+              <strong>{latestDebrief?.nextStep ?? 'Sin ajuste todavía.'}</strong>
+            </div>
+          </article>
+        </div>
+
         <article className="panel coach-chat-panel">
           <div className="coach-chat-head">
             <div>
@@ -3389,23 +3758,161 @@ function App() {
             <div className="coach-chat-actions">
               <small>
                 {data.coach.enabled
-                  ? 'Consulta puntual. No hay streaming ni llamadas en segundo plano.'
-                  : 'Si activas Gemma 4, esta caja pasa a responder con el modelo; mientras tanto usa el contexto base.'}
+                  ? 'Consulta puntual. Gemma pide datos concretos del dashboard cuando los necesita.'
+                  : 'Sin Gemma activa: responde el motor base con el contexto actual.'}
               </small>
-              <button
-                className="secondary-button"
-                disabled={coachChatState.status === 'sending' || !coachChatDraft.trim()}
-                type="submit"
-              >
-                {coachChatState.status === 'sending'
-                  ? 'Pensando...'
-                  : data.coach.enabled
-                    ? 'Preguntar a Gemma'
-                    : 'Preguntar al coach'}
-              </button>
+              <div className="coach-chat-buttons">
+                <button
+                  className="inline-voice-button"
+                  onClick={() => toggleVoiceCapture('coach')}
+                  type="button"
+                >
+                  {voiceState.status === 'recording' && voiceState.target === 'coach' ? 'Parar dictado' : 'Dictar'}
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={coachChatState.status === 'sending' || !coachChatDraft.trim()}
+                  type="submit"
+                >
+                  {coachChatState.status === 'sending'
+                    ? 'Pensando...'
+                    : data.coach.enabled
+                      ? 'Preguntar a Gemma'
+                      : 'Preguntar al coach'}
+                </button>
+              </div>
             </div>
             {coachChatState.message ? <p className="checkin-feedback error">{coachChatState.message}</p> : null}
           </form>
+        </article>
+
+        <article className="panel coach-chat-panel">
+          <div className="coach-chat-head">
+            <div>
+              <p className="eyebrow">What-if planner</p>
+              <h3>Simula otro objetivo o una semana limitada</h3>
+            </div>
+            <span className="checkin-status pending">On demand</span>
+          </div>
+
+          <form className="whatif-form" onSubmit={submitWhatIfScenario}>
+            <div className="field-grid">
+              <label className="form-field">
+                <span>Fecha</span>
+                <input
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      raceDate: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={whatIfDraft.raceDate}
+                />
+              </label>
+              <label className="form-field">
+                <span>Distancia</span>
+                <input
+                  min="3"
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      distanceKm: Number(event.target.value),
+                    }))
+                  }
+                  step="0.1"
+                  type="number"
+                  value={whatIfDraft.distanceKm}
+                />
+              </label>
+            </div>
+
+            <div className="field-grid">
+              <label className="form-field">
+                <span>Días/semana</span>
+                <input
+                  min="2"
+                  max="7"
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      availableDays: event.target.value,
+                    }))
+                  }
+                  placeholder="Opcional"
+                  type="number"
+                  value={whatIfDraft.availableDays}
+                />
+              </label>
+              <label className="form-field">
+                <span>Km máximos/sem</span>
+                <input
+                  min="0"
+                  onChange={(event) =>
+                    setWhatIfDraft((current) => ({
+                      ...current,
+                      maxWeeklyKm: event.target.value,
+                    }))
+                  }
+                  placeholder="Opcional"
+                  step="0.1"
+                  type="number"
+                  value={whatIfDraft.maxWeeklyKm}
+                />
+              </label>
+            </div>
+
+            <label className="form-field">
+              <span>Contexto opcional</span>
+              <textarea
+                maxLength={240}
+                onChange={(event) =>
+                  setWhatIfDraft((current) => ({
+                    ...current,
+                    note: event.target.value,
+                  }))
+                }
+                placeholder="Viajes, menos tiempo, foco en marca, molestias..."
+                rows={3}
+                value={whatIfDraft.note}
+              />
+              <div className="field-inline-actions">
+                <button className="inline-voice-button" onClick={() => toggleVoiceCapture('whatif')} type="button">
+                  {voiceState.status === 'recording' && voiceState.target === 'whatif' ? 'Parar dictado' : 'Dictar contexto'}
+                </button>
+              </div>
+            </label>
+
+            <div className="coach-chat-actions">
+              <small>Simulación rápida. No toca tu plan real hasta que tú decidas cambiar el objetivo.</small>
+              <button className="secondary-button" disabled={whatIfState.status === 'sending'} type="submit">
+                {whatIfState.status === 'sending' ? 'Simulando...' : 'Probar escenario'}
+              </button>
+            </div>
+            {whatIfState.message ? <p className="checkin-feedback error">{whatIfState.message}</p> : null}
+          </form>
+
+          {whatIfState.scenario ? (
+            <div className={`whatif-result risk-${whatIfState.scenario.risk}`}>
+              <div className="panel-head compact">
+                <div>
+                  <p className="eyebrow">Escenario</p>
+                  <h3>{whatIfState.scenario.headline}</h3>
+                </div>
+                <span className={`checkin-status ${whatIfState.scenario.risk === 'low' ? 'done' : 'pending'}`}>
+                  Riesgo {whatIfState.scenario.risk}
+                </span>
+              </div>
+              <p className="coach-insight-copy">{whatIfState.scenario.summary}</p>
+              <div className="whatif-adjustments">
+                {whatIfState.scenario.adjustments.map((item) => (
+                  <article className="stat-pill" key={item}>
+                    <strong>{item}</strong>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </article>
       </section>
 
@@ -3464,17 +3971,37 @@ function App() {
                 {routeState.status === 'ready' ? (
                   <Suspense
                     fallback={
-                      <div className="route-map empty">
-                        <span>[ LOADING MAP ]</span>
-                      </div>
+                      <Skeleton
+                        name="route-panel"
+                        loading
+                        fixture={<RoutePanelFixture />}
+                        className="route-skeleton-wrap"
+                        fallback={
+                          <div className="route-map empty">
+                            <span>[ LOADING MAP ]</span>
+                          </div>
+                        }
+                      >
+                        <RoutePanelFixture />
+                      </Skeleton>
                     }
                   >
                     <ActivityRouteMap route={routeState.data} title={selectedRun.name} />
                   </Suspense>
                 ) : routeState.status === 'loading' ? (
-                  <div className="route-map empty">
-                    <span>[ LOADING ROUTE ]</span>
-                  </div>
+                  <Skeleton
+                    name="route-panel"
+                    loading
+                    fixture={<RoutePanelFixture />}
+                    className="route-skeleton-wrap"
+                    fallback={
+                      <div className="route-map empty">
+                        <span>[ LOADING ROUTE ]</span>
+                      </div>
+                    }
+                  >
+                    <RoutePanelFixture />
+                  </Skeleton>
                 ) : routeState.status === 'error' ? (
                   <div className="route-map empty">
                     <span>[ ROUTE UNAVAILABLE ]</span>
@@ -3508,8 +4035,8 @@ function App() {
                   <div className="overlay-export-copy">
                     <span className="metric-label">PNG glass sin fondo</span>
                     <p>
-                      Exporta una sola tarjeta glass, tipo iOS, con avatar, nombre, hora, lugar, resumen y la ruta
-                      debajo, lista para montarla sobre tu foto.
+                      Exporta una sola tarjeta glass, tipo iOS, con avatar, nombre, hora, lugar, resumen y mapa en
+                      paralelo a los datos, lista para montarla sobre tu foto.
                     </p>
                   </div>
                   <div className="overlay-single-card" aria-label="Overlay activo">

@@ -143,6 +143,19 @@ export type DashboardData = {
     model: string | null;
     generatedAt: string | null;
     todayMessage: string | null;
+    weeklyReview: {
+      headline: string;
+      summary: string;
+      status: 'protect' | 'steady' | 'push';
+      nextMove: string;
+    } | null;
+    latestDebrief: {
+      runId: number;
+      runName: string;
+      summary: string;
+      nextStep: string;
+      generatedAt: string;
+    } | null;
   };
   plan: {
     summary: string;
@@ -179,6 +192,17 @@ export type DashboardData = {
 export type UserGoal = {
   raceDate: string;
   distanceKm: number;
+};
+
+export type WhatIfScenario = {
+  headline: string;
+  summary: string;
+  risk: 'low' | 'medium' | 'high';
+  adjustments: string[];
+  recommendedGoal: {
+    raceDate: string;
+    distanceKm: number;
+  };
 };
 
 export type SessionPayload = {

@@ -172,6 +172,19 @@ export type DashboardData = {
     model: string | null;
     generatedAt: string | null;
     todayMessage: string | null;
+    weeklyReview: {
+      headline: string;
+      summary: string;
+      status: 'protect' | 'steady' | 'push';
+      nextMove: string;
+    } | null;
+    latestDebrief: {
+      runId: number;
+      runName: string;
+      summary: string;
+      nextStep: string;
+      generatedAt: string;
+    } | null;
   };
   plan: {
     summary: string;
@@ -1915,6 +1928,8 @@ function buildDashboardFromSource(input: {
       model: null,
       generatedAt: null,
       todayMessage: null,
+      weeklyReview: null,
+      latestDebrief: null,
     },
     plan,
     fetchedAt: new Date().toISOString(),
@@ -2234,6 +2249,8 @@ export function buildFallbackDashboardData(
       model: null,
       generatedAt: null,
       todayMessage: null,
+      weeklyReview: null,
+      latestDebrief: null,
     },
     plan: buildTrainingPlan({
       today,

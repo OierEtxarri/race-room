@@ -29,7 +29,7 @@ export const config = {
   llmProvider: process.env.LLM_PROVIDER?.trim().toLowerCase() ?? '',
   llmBaseUrl: process.env.LLM_BASE_URL?.trim() ?? '',
   llmApiKey: process.env.LLM_API_KEY?.trim() ?? '',
-  llmModel: process.env.LLM_MODEL?.trim() ?? 'gemma4:e2b',
+  llmModel: process.env.LLM_MODEL?.trim() ?? 'gemma4:e4b',
   llmMinIntervalMs: Math.max(30, Number(process.env.LLM_MIN_INTERVAL_MINUTES ?? 360)) * 60 * 1_000,
   dashboardCacheTtlMs: Math.max(5, Number(process.env.DASHBOARD_CACHE_TTL_MINUTES ?? 20)) * 60 * 1_000,
   dashboardFallbackCacheTtlMs: Math.max(1, Number(process.env.DASHBOARD_FALLBACK_CACHE_TTL_MINUTES ?? 5)) * 60 * 1_000,

@@ -39,6 +39,7 @@ import {
   applyCoachSnapshotToDashboard,
   answerCoachQuestion,
   generateCoachSnapshot,
+  planWhatIfScenario,
 } from './lib/llmCoach.ts';
 import {
   getPersistedUserState,
@@ -795,6 +796,65 @@ app.post('/api/coach/chat', async (request, response) => {
   } catch (error) {
     response.status(502).json({
       message: error instanceof Error ? error.message : 'No se pudo consultar al coach.',
+    });
+  }
+});
+
+app.post('/api/coach/what-if', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const raceDate =
+    typeof request.body?.raceDate === 'string' && request.body.raceDate.trim()
+      ? request.body.raceDate.trim()
+      : session.goal.raceDate;
+  const distanceKm = Number(request.body?.distanceKm ?? session.goal.distanceKm);
+  const availableDays =
+    request.body?.availableDays === null || request.body?.availableDays === undefined || request.body?.availableDays === ''
+      ? null
+      : Number(request.body.availableDays);
+  const maxWeeklyKm =
+    request.body?.maxWeeklyKm === null || request.body?.maxWeeklyKm === undefined || request.body?.maxWeeklyKm === ''
+      ? null
+      : Number(request.body.maxWeeklyKm);
+  const note =
+    typeof request.body?.note === 'string' && request.body.note.trim()
+      ? request.body.note.trim()
+      : null;
+
+  if (!raceDate || !Number.isFinite(new Date(raceDate).getTime()) || !Number.isFinite(distanceKm) || distanceKm <= 0) {
+    response.status(400).json({
+      message: 'Necesito una fecha y una distancia válidas para simular el escenario.',
+    });
+    return;
+  }
+
+  try {
+    const dashboard = await getDashboardData(session);
+    const scenario = await planWhatIfScenario({
+      dashboard,
+      scenario: {
+        raceDate,
+        distanceKm,
+        availableDays: Number.isFinite(availableDays ?? NaN) ? Math.max(2, Math.min(7, Math.round(availableDays as number))) : null,
+        maxWeeklyKm: Number.isFinite(maxWeeklyKm ?? NaN) ? Math.max(0, Math.round((maxWeeklyKm as number) * 10) / 10) : null,
+        note,
+      },
+    });
+
+    response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+    response.json({
+      ok: true,
+      scenario,
+    });
+  } catch (error) {
+    response.status(502).json({
+      message: error instanceof Error ? error.message : 'No se pudo simular el escenario.',
     });
   }
 });

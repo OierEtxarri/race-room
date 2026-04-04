@@ -3,6 +3,97 @@
   gap: 1.5rem;
 }
 
+.dashboard-loading-fixture,
+.route-loading-fixture {
+  display: grid;
+  gap: 1rem;
+  min-height: 260px;
+}
+
+.dashboard-loading-hero,
+.route-loading-fixture {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 1rem;
+}
+
+.dashboard-loading-copy,
+.dashboard-loading-scoreboard,
+.dashboard-loading-grid,
+.route-loading-stats {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.dashboard-loading-scoreboard {
+  grid-template-columns: 1fr;
+}
+
+.dashboard-loading-grid {
+  grid-template-columns: 1.25fr 1fr 1fr;
+}
+
+.fixture-chip,
+.fixture-line,
+.fixture-card,
+.fixture-stat,
+.route-loading-map {
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.fixture-chip {
+  width: 120px;
+  height: 34px;
+}
+
+.fixture-line {
+  height: 18px;
+}
+
+.fixture-line.xl {
+  width: 68%;
+  height: 62px;
+}
+
+.fixture-line.lg {
+  width: 56%;
+  height: 18px;
+}
+
+.fixture-line.md {
+  width: 42%;
+}
+
+.fixture-line.sm {
+  width: 28%;
+}
+
+.fixture-card {
+  min-height: 160px;
+}
+
+.fixture-card.tall {
+  min-height: 220px;
+}
+
+.fixture-stat {
+  min-height: 88px;
+}
+
+.fixture-stat.compact {
+  min-height: 72px;
+}
+
+.route-loading-map {
+  min-height: 320px;
+}
+
+.route-skeleton-wrap {
+  display: block;
+}
+
 @keyframes section-enter {
   from {
     opacity: 0;
@@ -527,16 +618,71 @@
   background: rgba(255, 255, 255, 0.02);
 }
 
+.field-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.field-inline-actions small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.inline-voice-button {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--heading);
+  border-radius: 999px;
+  padding: 0.55rem 0.9rem;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+}
+
 .coach-daily-message {
   margin: 0;
-  max-width: 52ch;
+  max-width: 38ch;
   color: var(--text);
-  font-size: 1.02rem;
-  line-height: 1.6;
+  font-size: 0.98rem;
+  line-height: 1.55;
 }
 
 .coach-micro-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.coach-insight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.coach-insight-card {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.panel-head.compact h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.coach-insight-copy {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.65;
+}
+
+.coach-insight-foot {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.coach-insight-foot strong {
+  color: var(--heading);
 }
 
 .coach-chat-panel {
@@ -623,11 +769,45 @@
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .coach-chat-actions small {
   color: var(--muted);
   max-width: 42ch;
+}
+
+.coach-chat-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.whatif-form {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.whatif-result {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border-radius: 24px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.whatif-result.risk-high {
+  border-color: rgba(239, 68, 68, 0.22);
+}
+
+.whatif-result.risk-low {
+  border-color: rgba(62, 148, 253, 0.22);
+}
+
+.whatif-adjustments {
+  display: grid;
+  gap: 0.75rem;
 }
 
 .auth-shell {
@@ -2119,6 +2299,12 @@
     grid-template-columns: 1fr;
   }
 
+  .dashboard-loading-hero,
+  .route-loading-fixture,
+  .dashboard-loading-grid {
+    grid-template-columns: 1fr;
+  }
+
   .hero-identity {
     align-items: flex-start;
   }
@@ -2132,6 +2318,10 @@
   }
 
   .recent-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .coach-insight-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -2207,6 +2397,12 @@
     align-items: stretch;
   }
 
+  .coach-chat-buttons,
+  .field-inline-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
   .spotlight-grid {
     grid-template-columns: 1fr;
   }
@@ -2237,6 +2433,10 @@
 
   .metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .whatif-adjustments {
+    grid-template-columns: 1fr;
   }
 }
 
