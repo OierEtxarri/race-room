@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import { getGarminActivityRoute, getStravaActivityRoute } from './lib/activityRoutes.ts';
 import {
@@ -58,6 +60,9 @@ const fallbackCacheTtlMs = config.dashboardFallbackCacheTtlMs;
 const backgroundRefreshMs = config.dashboardBackgroundRefreshMs;
 const stravaLoginStateTtlMs = 15 * 60 * 1_000;
 const allowedOrigins = new Set(['http://localhost:5173', config.frontendOrigin].filter(Boolean));
+const distDir = path.join(config.rootDir, 'dist');
+const distIndexPath = path.join(distDir, 'index.html');
+const hasBuiltFrontend = fs.existsSync(distIndexPath);
 
 type CachedDashboard = {
   data: DashboardData;
@@ -296,6 +301,10 @@ function buildFrontendRedirect(baseUrl: string, params: Record<string, string>):
   return url.toString();
 }
 
+function publicStravaLoginEnabled(): boolean {
+  return config.publicStravaEnabled && isStravaConfigured();
+}
+
 function pruneStravaLoginStates(): void {
   const cutoff = Date.now() - stravaLoginStateTtlMs;
   for (const [stateId, loginState] of stravaLoginStates.entries()) {
@@ -392,12 +401,16 @@ async function getDashboardData(
 }
 
 app.get('/api/health', (_request, response) => {
+  const publicProviders = ['garmin', ...(publicStravaLoginEnabled() ? ['strava'] : [])];
   response.json({
     ok: true,
+    host: config.host,
     port: config.port,
     supportsPerUserAuth: true,
     providers: ['garmin', 'strava'],
+    publicAuthProviders: publicProviders,
     stravaConfigured: isStravaConfigured(),
+    publicStravaEnabled: publicStravaLoginEnabled(),
     llm: {
       enabled: Boolean(config.llmProvider && config.llmBaseUrl && config.llmModel),
       provider: config.llmProvider || null,
@@ -411,7 +424,7 @@ app.get('/api/health', (_request, response) => {
       cacheTtlMinutes: Math.round(cacheTtlMs / 60_000),
       fallbackCacheTtlMinutes: Math.round(fallbackCacheTtlMs / 60_000),
     },
-    frontendMode: 'static-ready',
+    frontendMode: config.serveStaticFrontend ? 'single-origin' : 'proxy-ready',
     fetchedAt: new Date().toISOString(),
   });
 });
@@ -531,6 +544,15 @@ app.get('/api/session/strava/start', (request, response) => {
       typeof request.query.distanceKm === 'string' ? Number(request.query.distanceKm) : undefined,
   });
 
+  if (!publicStravaLoginEnabled()) {
+    response.redirect(
+      buildFrontendRedirect(returnTo, {
+        auth_error: 'Strava no está disponible en este despliegue público.',
+      }),
+    );
+    return;
+  }
+
   if (!isStravaConfigured()) {
     response.redirect(
       buildFrontendRedirect(returnTo, {
@@ -555,6 +577,15 @@ app.get('/api/session/strava/callback', async (request, response) => {
   const stateId = typeof request.query.state === 'string' ? request.query.state : '';
   const loginState = stravaLoginStates.get(stateId) ?? null;
   const returnTo = loginState?.returnTo ?? config.frontendAppUrl;
+
+  if (!publicStravaLoginEnabled()) {
+    response.redirect(
+      buildFrontendRedirect(returnTo, {
+        auth_error: 'Strava no está habilitado en este despliegue.',
+      }),
+    );
+    return;
+  }
 
   if (stateId) {
     stravaLoginStates.delete(stateId);
@@ -1020,8 +1051,33 @@ app.post('/api/plan/workout', async (request, response) => {
   }
 });
 
-const server = app.listen(config.port, () => {
-  console.info(`[api] Garmin + Strava dashboard disponible en http://localhost:${config.port}`);
+if (config.serveStaticFrontend && hasBuiltFrontend) {
+  app.use(express.static(distDir, {
+    index: false,
+  }));
+
+  app.use((request, response, next) => {
+    if (!hasBuiltFrontend || (request.method !== 'GET' && request.method !== 'HEAD')) {
+      next();
+      return;
+    }
+
+    if (request.path.startsWith('/api/')) {
+      next();
+      return;
+    }
+
+    response.sendFile(distIndexPath);
+  });
+}
+
+const server = app.listen(config.port, config.host, () => {
+  console.info(
+    `[api] Race Room disponible en http://${config.host}:${config.port} (${config.serveStaticFrontend && hasBuiltFrontend ? 'single-origin' : 'api-only'})`,
+  );
+  if (config.serveStaticFrontend && !hasBuiltFrontend) {
+    console.warn(`[api] No se ha encontrado ${distIndexPath}. Ejecuta "npm run build" antes de usar start:prod.`);
+  }
   refreshTimer = setInterval(() => {
     pruneExpiredSessions();
     pruneStravaLoginStates();

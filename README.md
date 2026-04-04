@@ -63,9 +63,14 @@ Crea un `.env` en la raíz del proyecto.
 Mínimo para local:
 
 ```env
+NODE_ENV=development
+HOST=127.0.0.1
 PORT=8787
 FRONTEND_ORIGIN=http://localhost:5173
 FRONTEND_APP_URL=http://localhost:5173/
+SERVE_STATIC_FRONTEND=false
+SESSION_COOKIE_SECURE=false
+PUBLIC_STRAVA_ENABLED=true
 ```
 
 Para Strava añade además:
@@ -133,11 +138,80 @@ Ejemplo real de hotspot móvil:
 - `npm run dev:web:mobile`: solo frontend en `0.0.0.0:5173`
 - `npm run capture:readme`: regenera las capturas del README usando un dashboard mockeado sobre el frontend de `http://127.0.0.1:5182`
 - `npm run start:api`: solo API
+- `npm run start:prod`: sirve frontend compilado + API desde Express en un único origen
 - `npm run build`: typecheck + build del frontend
 - `npm run garmin:python:install`: crea el entorno Python e instala `garminconnect`
 - `npm run garmin:python:setup`: hace el primer login interactivo usando tus credenciales de `.env` y guarda tokens en `~/.garminconnect`
 - `npm run mcp:garmin`: arranca el servidor MCP local
 - `npm run mcp:garmin:setup`: setup interactivo del MCP para guardar tokens en `~/.garmin-mcp/`
+
+## Producción con Cloudflare Tunnel + Access
+
+La app ya soporta un despliegue de un solo origen: Express puede servir `dist` y `/api/*` desde el mismo proceso. Para exponerla de forma privada a Internet desde este equipo:
+
+1. Prepara un `.env` de producción:
+
+```env
+NODE_ENV=production
+HOST=127.0.0.1
+PORT=8787
+
+FRONTEND_ORIGIN=https://race.tu-dominio.com
+FRONTEND_APP_URL=https://race.tu-dominio.com/
+
+SERVE_STATIC_FRONTEND=true
+SESSION_COOKIE_SECURE=true
+PUBLIC_STRAVA_ENABLED=false
+
+LLM_PROVIDER=ollama
+LLM_BASE_URL=http://127.0.0.1:11434
+LLM_MODEL=gemma4:e2b
+```
+
+2. Genera el frontend y arranca la app:
+
+```bash
+npm run build
+npm run start:prod
+```
+
+3. Instala `cloudflared` siguiendo la documentación oficial de Cloudflare y crea un named tunnel:
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create race-room
+cloudflared tunnel route dns race-room race.tu-dominio.com
+```
+
+4. Crea `~/.cloudflared/config.yml` usando el ejemplo de [`docs/cloudflare/cloudflared-config.example.yml`](docs/cloudflare/cloudflared-config.example.yml) y apunta el túnel a `http://127.0.0.1:8787`.
+
+5. Instala el servicio persistente de Cloudflare:
+
+```bash
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+6. Crea la aplicación self-hosted en Cloudflare Access para `https://race.tu-dominio.com/*`:
+   - Identity Provider: Google
+   - Policy `Allow`: solo tu cuenta Gmail exacta
+   - Policy implícita: `Deny`
+   - Session duration recomendada: `30 days`
+
+7. Ejecuta Race Room también como servicio `systemd` usando el ejemplo de [`docs/cloudflare/race-room.service.example`](docs/cloudflare/race-room.service.example):
+
+```bash
+sudo cp docs/cloudflare/race-room.service.example /etc/systemd/system/race-room.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now race-room
+```
+
+Notas de producción:
+
+- El frontend público queda servido por Express; no expongas Vite a Internet.
+- La cookie de sesión de Race Room puede marcarse como `Secure` con `SESSION_COOKIE_SECURE=true`.
+- `PUBLIC_STRAVA_ENABLED=false` oculta Strava en la UI y bloquea sus rutas públicas, así no necesitas bypass de Access para el callback OAuth.
+- El único puerto que debe quedar expuesto al exterior es el del túnel saliente de Cloudflare; la app local escucha en `127.0.0.1`.
 
 ## Notas
 
@@ -156,3 +230,4 @@ Ejemplo real de hotspot móvil:
 - GitHub Pages solo sirve el frontend. Para producción necesitas desplegar también la API en otro host y definir `FRONTEND_ORIGIN` en el backend y `VITE_API_BASE_URL` en el build del frontend.
 - No voy a persistir tokens OAuth de usuarios en el repositorio ni en GitHub Pages. Eso no es seguro y Pages no puede ejecutar el backend que necesita el login de Garmin. La opción mantenible es: frontend en Pages y API+SQLite en un host pequeño aparte.
 - El workflow de Pages está en `.github/workflows/deploy-pages.yml` y usa `VITE_APP_BASE=/garmin-interactive/`. Configura `VITE_API_BASE_URL` como variable del repositorio en GitHub.
+- En producción single-origin, deja `VITE_API_BASE_URL` vacío para que el frontend use rutas relativas `/api`.

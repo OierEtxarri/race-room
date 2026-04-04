@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { config } from '../config.ts';
 
 export type UserGoal = {
   raceDate: string;
@@ -283,10 +284,25 @@ export function pruneExpiredSessions(): void {
   }
 }
 
+function cookieAttributes(maxAgeSeconds: number): string {
+  const attributes = [
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAgeSeconds}`,
+  ];
+
+  if (config.sessionCookieSecure) {
+    attributes.push('Secure');
+  }
+
+  return attributes.join('; ');
+}
+
 export function buildSessionCookie(sessionId: string): string {
-  return `${sessionCookieName}=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionTtlMs / 1_000)}`;
+  return `${sessionCookieName}=${sessionId}; ${cookieAttributes(Math.floor(sessionTtlMs / 1_000))}`;
 }
 
 export function buildClearSessionCookie(): string {
-  return `${sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  return `${sessionCookieName}=; ${cookieAttributes(0)}`;
 }

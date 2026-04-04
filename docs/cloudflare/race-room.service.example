@@ -1,0 +1,17 @@
+[Unit]
+Description=Race Room production server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_WITH_USER
+Group=REPLACE_WITH_USER
+WorkingDirectory=/home/REPLACE_WITH_USER/path/to/garmin-connect
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env npm run start:prod
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -40,6 +40,10 @@ type LoginState =
   | { status: 'hydrating'; error: null }
   | { status: 'error'; error: string };
 type LoginProvider = 'garmin' | 'strava';
+type HealthPayload = {
+  publicAuthProviders?: string[];
+  publicStravaEnabled?: boolean;
+};
 type CheckInDraft = {
   energy: 'low' | 'ok' | 'high';
   legs: 'heavy' | 'normal' | 'fresh';
@@ -2189,6 +2193,7 @@ function App() {
     status: 'idle',
     error: null,
   });
+  const [publicAuthProviders, setPublicAuthProviders] = useState<LoginProvider[]>(['garmin', 'strava']);
   const [loginProvider, setLoginProvider] = useState<LoginProvider>('garmin');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -2243,6 +2248,7 @@ function App() {
   const whatIfNoteRef = useRef<HTMLTextAreaElement | null>(null);
   const previousSectionRef = useRef<DashboardSectionId>(initialDashboardSection());
   const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
+  const stravaPublicLoginEnabled = publicAuthProviders.includes('strava');
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -2434,6 +2440,31 @@ function App() {
     }
   });
 
+  const bootstrapHealth = useEffectEvent(async () => {
+    try {
+      const response = await fetch(apiUrl('/api/health'));
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as HealthPayload;
+      const nextProviders = (payload.publicAuthProviders ?? ['garmin']).filter(
+        (provider): provider is LoginProvider => provider === 'garmin' || provider === 'strava',
+      );
+
+      if (!nextProviders.length) {
+        return;
+      }
+
+      setPublicAuthProviders(nextProviders);
+      if (!nextProviders.includes('strava')) {
+        setLoginProvider((current) => (current === 'strava' ? 'garmin' : current));
+      }
+    } catch {
+      // Keep the optimistic dual-login UI when health metadata is unavailable.
+    }
+  });
+
   const pollDashboard = useEffectEvent(() => {
     if (!sessionIdRef.current) {
       return;
@@ -2462,6 +2493,7 @@ function App() {
       });
     }
 
+    void bootstrapHealth();
     void bootstrapSession(redirect.sessionId);
 
     const pollId = window.setInterval(() => {
@@ -2751,6 +2783,10 @@ function App() {
   };
 
   const beginStravaLogin = () => {
+    if (!stravaPublicLoginEnabled) {
+      return;
+    }
+
     setLoginState({
       status: 'submitting',
       error: null,
@@ -3179,17 +3215,18 @@ function App() {
               <span className="brand-badge" aria-hidden="true">RR</span>
               <div className="brand-copy">
                 <strong>Race Room</strong>
-                <small>Garmin + Strava</small>
+                <small>{stravaPublicLoginEnabled ? 'Garmin + Strava' : 'Garmin'}</small>
               </div>
             </div>
             <p className="eyebrow">Race Room</p>
-            <h1>Entra en Race Room con Garmin o Strava</h1>
+            <h1>{stravaPublicLoginEnabled ? 'Entra en Race Room con Garmin o Strava' : 'Entra en Race Room con Garmin'}</h1>
             <p className="lead">
-              Elige el proveedor con el que quieres cargar tus datos. Garmin entra por credenciales efímeras;
-              Strava entra por OAuth. En ambos casos persisto solo el objetivo y el último dashboard/plan generado.
+              {stravaPublicLoginEnabled
+                ? 'Elige el proveedor con el que quieres cargar tus datos. Garmin entra por credenciales efímeras; Strava entra por OAuth. En ambos casos persisto solo el objetivo y el último dashboard/plan generado.'
+                : 'Este despliegue público expone solo Garmin. El login usa credenciales efímeras y la app persiste únicamente tu objetivo y el último dashboard/plan generado.'}
             </p>
             <div className="hero-meta">
-              <span>Login dual Garmin + Strava</span>
+              <span>{stravaPublicLoginEnabled ? 'Login dual Garmin + Strava' : 'Login Garmin protegido'}</span>
               <span>Session ID efímero por usuario</span>
               <span>Plan persistido en SQLite</span>
             </div>
@@ -3205,14 +3242,16 @@ function App() {
               >
                 Garmin
               </button>
-              <button
-                className={`provider-pill ${loginProvider === 'strava' ? 'selected' : ''}`}
-                disabled={isAuthBusy}
-                onClick={() => setLoginProvider('strava')}
-                type="button"
-              >
-                Strava
-              </button>
+              {stravaPublicLoginEnabled ? (
+                <button
+                  className={`provider-pill ${loginProvider === 'strava' ? 'selected' : ''}`}
+                  disabled={isAuthBusy}
+                  onClick={() => setLoginProvider('strava')}
+                  type="button"
+                >
+                  Strava
+                </button>
+              ) : null}
             </div>
 
             {loginProvider === 'garmin' ? (
@@ -3300,7 +3339,7 @@ function App() {
                     ? 'Cargando dashboard...'
                     : 'Entrar con Garmin'}
               </button>
-            ) : (
+            ) : stravaPublicLoginEnabled ? (
               <button
                 className="action-button"
                 disabled={isAuthBusy}
@@ -3309,7 +3348,7 @@ function App() {
               >
                 {loginState.status === 'submitting' ? 'Redirigiendo a Strava...' : 'Entrar con Strava'}
               </button>
-            )}
+            ) : null}
 
             {isAuthBusy ? (
               <BrandSpinner

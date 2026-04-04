@@ -16,16 +16,39 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+function booleanEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+
+  return ['1', 'true', 'yes', 'on'].includes(value);
+}
+
+const nodeEnv = process.env.NODE_ENV?.trim() || 'development';
+const frontendOrigin =
+  process.env.FRONTEND_ORIGIN?.trim() ?? 'http://localhost:5173';
+const frontendAppUrl =
+  process.env.FRONTEND_APP_URL?.trim() ?? frontendOrigin ?? 'http://localhost:5173/';
+
 export const config = {
   rootDir,
+  nodeEnv,
+  host: process.env.HOST?.trim() || '127.0.0.1',
   port: Number(process.env.PORT ?? 8787),
   garminEmail: process.env.GARMIN_EMAIL?.trim() ?? '',
   garminPassword: process.env.GARMIN_PASSWORD?.trim() ?? '',
-  frontendOrigin: process.env.FRONTEND_ORIGIN?.trim() ?? 'http://localhost:5173',
-  frontendAppUrl: process.env.FRONTEND_APP_URL?.trim() ?? process.env.FRONTEND_ORIGIN?.trim() ?? 'http://localhost:5173/',
+  frontendOrigin,
+  frontendAppUrl,
   stravaClientId: process.env.STRAVA_CLIENT_ID?.trim() ?? '',
   stravaClientSecret: process.env.STRAVA_CLIENT_SECRET?.trim() ?? '',
   stravaRedirectUri: process.env.STRAVA_REDIRECT_URI?.trim() ?? '',
+  publicStravaEnabled: booleanEnv('PUBLIC_STRAVA_ENABLED', nodeEnv !== 'production'),
+  sessionCookieSecure: booleanEnv(
+    'SESSION_COOKIE_SECURE',
+    frontendAppUrl.startsWith('https://'),
+  ),
+  serveStaticFrontend: booleanEnv('SERVE_STATIC_FRONTEND', nodeEnv === 'production'),
   llmProvider: process.env.LLM_PROVIDER?.trim().toLowerCase() ?? '',
   llmBaseUrl: process.env.LLM_BASE_URL?.trim() ?? '',
   llmApiKey: process.env.LLM_API_KEY?.trim() ?? '',

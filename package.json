@@ -10,6 +10,7 @@
     "dev:api": "tsx watch server/index.ts",
     "dev:mobile": "concurrently -k \"npm:dev:api\" \"npm:dev:web:mobile\"",
     "start:api": "tsx server/index.ts",
+    "start:prod": "NODE_ENV=production SERVE_STATIC_FRONTEND=true PUBLIC_STRAVA_ENABLED=false tsx server/index.ts",
     "build": "tsc -b && vite build",
     "check": "tsc -b",
     "lint": "tsc -b",
