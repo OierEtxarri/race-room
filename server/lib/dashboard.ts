@@ -32,11 +32,12 @@ type RawDateValue = {
   value: NullableNumber;
 };
 
-type RunSummary = {
+type ActivitySummary = {
   id: number;
   name: string;
   date: string;
   timeLabel: string | null;
+  sortKey: string;
   distanceKm: number;
   durationSeconds: number;
   paceSecondsPerKm: number | null;
@@ -45,7 +46,11 @@ type RunSummary = {
   trainingEffect: number | null;
   trainingLoad: number | null;
   workoutId: number | null;
+  activityKey: string;
+  activityLabel: string;
+  isRunLike: boolean;
 };
+type RunSummary = ActivitySummary;
 
 type TrainingDay = {
   date: string;
@@ -140,6 +145,7 @@ export type DashboardData = {
     label: string;
     value: number | null;
   }>;
+  recentActivities: ActivitySummary[];
   recentRuns: RunSummary[];
   fitnessSummary: {
     title: string;
@@ -525,31 +531,149 @@ function pickReferenceDate(today: Date): string {
   return isoDate(subDays(today, 1));
 }
 
-function normalizeActivityDateParts(rawDate: string): { date: string; timeLabel: string | null } {
+function normalizeActivityDateParts(rawDate: string): { date: string; timeLabel: string | null; sortKey: string } {
   const candidate = rawDate.includes(' ') ? rawDate.replace(' ', 'T') : rawDate;
   const parsed = new Date(candidate);
 
   if (Number.isNaN(parsed.getTime())) {
+    const date = rawDate.slice(0, 10);
+    const timeLabel = rawDate.length >= 16 ? rawDate.slice(11, 16) : null;
     return {
-      date: rawDate.slice(0, 10),
-      timeLabel: rawDate.length >= 16 ? rawDate.slice(11, 16) : null,
+      date,
+      timeLabel,
+      sortKey: `${date}T${timeLabel ?? '00:00'}`,
+    };
+  }
+
+  const date = format(parsed, 'yyyy-MM-dd');
+  const timeLabel = format(parsed, 'HH:mm');
+  return {
+    date,
+    timeLabel,
+    sortKey: `${date}T${timeLabel}`,
+  };
+}
+
+function isRunLikeActivityKey(activityKey: string): boolean {
+  return [
+    'run',
+    'running',
+    'trail_run',
+    'trail_running',
+    'virtual_run',
+    'treadmill_run',
+    'treadmill_running',
+    'track_run',
+    'track_running',
+    'road_run',
+    'jog',
+  ].some((token) => activityKey.includes(token));
+}
+
+function classifyActivityKey(rawKey: string | null): Pick<ActivitySummary, 'activityKey' | 'activityLabel' | 'isRunLike'> {
+  const activityKey = (rawKey ?? 'activity')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    || 'activity';
+
+  if (activityKey.includes('trail')) {
+    return {
+      activityKey,
+      activityLabel: 'Trail',
+      isRunLike: isRunLikeActivityKey(activityKey),
+    };
+  }
+
+  if (isRunLikeActivityKey(activityKey)) {
+    return {
+      activityKey,
+      activityLabel: 'Carrera',
+      isRunLike: true,
+    };
+  }
+
+  if (activityKey.includes('ride') || activityKey.includes('cycl') || activityKey.includes('bike')) {
+    return {
+      activityKey,
+      activityLabel: 'Bici',
+      isRunLike: false,
+    };
+  }
+
+  if (activityKey.includes('walk')) {
+    return {
+      activityKey,
+      activityLabel: 'Caminata',
+      isRunLike: false,
+    };
+  }
+
+  if (activityKey.includes('hike')) {
+    return {
+      activityKey,
+      activityLabel: 'Senderismo',
+      isRunLike: false,
+    };
+  }
+
+  if (activityKey.includes('swim')) {
+    return {
+      activityKey,
+      activityLabel: 'Natación',
+      isRunLike: false,
+    };
+  }
+
+  if (
+    activityKey.includes('strength') ||
+    activityKey.includes('gym') ||
+    activityKey.includes('workout') ||
+    activityKey.includes('training')
+  ) {
+    return {
+      activityKey,
+      activityLabel: 'Workout',
+      isRunLike: false,
     };
   }
 
   return {
-    date: format(parsed, 'yyyy-MM-dd'),
-    timeLabel: format(parsed, 'HH:mm'),
+    activityKey,
+    activityLabel: 'Actividad',
+    isRunLike: false,
   };
 }
 
-function normalizeRun(activity: unknown): RunSummary | null {
+function classifyGarminActivity(activity: unknown): Pick<ActivitySummary, 'activityKey' | 'activityLabel' | 'isRunLike'> {
+  const rawKey = pickString(
+    activity,
+    [
+      'activityType.typeKey',
+      'activityTypeDTO.typeKey',
+      'activityType.typeId',
+      'typeKey',
+      'activityTypeKey',
+    ],
+    ['activitytype', 'typekey'],
+  );
+  return classifyActivityKey(rawKey);
+}
+
+function classifyStravaActivity(activity: unknown): Pick<ActivitySummary, 'activityKey' | 'activityLabel' | 'isRunLike'> {
+  const rawKey = pickString(activity, ['sport_type', 'sportType', 'type'], ['sporttype', 'type']);
+  return classifyActivityKey(rawKey);
+}
+
+function normalizeGarminActivity(activity: unknown): ActivitySummary | null {
   const id = pickNumber(activity, ['activityId', 'activityUUID'], ['activityid']);
   const rawDate =
     pickString(activity, ['startTimeLocal', 'startTimeGMT', 'calendarDate'], ['starttime', 'date']) ??
     null;
   const distanceKm = normalizeDistanceKm(
     getPath(activity, 'distance') ?? getPath(activity, 'distanceInMeters') ?? getPath(activity, 'summaryDTO.distance'),
-  );
+  ) ?? 0;
   const durationSeconds =
     normalizeDurationSeconds(
       getPath(activity, 'movingDuration') ??
@@ -558,18 +682,20 @@ function normalizeRun(activity: unknown): RunSummary | null {
         getPath(activity, 'summaryDTO.duration'),
     ) ?? 0;
 
-  if (id === null || !rawDate || !distanceKm || durationSeconds <= 0) {
+  if (id === null || !rawDate || durationSeconds <= 0) {
     return null;
   }
 
   const paceSecondsPerKm = distanceKm > 0 ? durationSeconds / distanceKm : null;
-  const { date, timeLabel } = normalizeActivityDateParts(rawDate);
+  const { date, timeLabel, sortKey } = normalizeActivityDateParts(rawDate);
+  const activityMeta = classifyGarminActivity(activity);
 
   return {
     id,
-    name: pickString(activity, ['activityName'], ['name']) ?? 'Entrenamiento',
+    name: pickString(activity, ['activityName'], ['name']) ?? activityMeta.activityLabel,
     date,
     timeLabel,
+    sortKey,
     distanceKm,
     durationSeconds,
     paceSecondsPerKm: paceSecondsPerKm ? round(paceSecondsPerKm, 0) : null,
@@ -578,39 +704,43 @@ function normalizeRun(activity: unknown): RunSummary | null {
     trainingEffect: pickNumber(activity, ['aerobicTrainingEffect'], ['trainingeffect']),
     trainingLoad: pickNumber(activity, ['activityTrainingLoad', 'summaryDTO.activityTrainingLoad'], ['trainingload']),
     workoutId: pickNumber(activity, ['workoutId'], ['workoutid']),
+    activityKey: activityMeta.activityKey,
+    activityLabel: activityMeta.activityLabel,
+    isRunLike: activityMeta.isRunLike,
   };
 }
 
-function isStravaRunActivity(activity: unknown): boolean {
-  const sportType = pickString(activity, ['sport_type', 'sportType'], ['sporttype'])?.toLowerCase() ?? '';
-  const type = pickString(activity, ['type'], ['type'])?.toLowerCase() ?? '';
-  return sportType.includes('run') || type.includes('run');
-}
-
-function normalizeStravaRun(activity: unknown): RunSummary | null {
-  if (!isStravaRunActivity(activity)) {
+function normalizeRun(activity: unknown): RunSummary | null {
+  const summary = normalizeGarminActivity(activity);
+  if (!summary || !summary.isRunLike || summary.distanceKm <= 0) {
     return null;
   }
 
+  return summary;
+}
+
+function normalizeStravaActivity(activity: unknown): ActivitySummary | null {
   const id = pickNumber(activity, ['id'], ['id']);
   const rawDate = pickString(activity, ['start_date_local', 'start_date'], ['startdate']);
-  const distanceKm = normalizeDistanceKm(getPath(activity, 'distance'));
+  const distanceKm = normalizeDistanceKm(getPath(activity, 'distance')) ?? 0;
   const durationSeconds =
     normalizeDurationSeconds(getPath(activity, 'moving_time') ?? getPath(activity, 'elapsed_time')) ?? 0;
 
-  if (id === null || !rawDate || !distanceKm || durationSeconds <= 0) {
+  if (id === null || !rawDate || durationSeconds <= 0) {
     return null;
   }
 
   const paceSecondsPerKm = distanceKm > 0 ? durationSeconds / distanceKm : null;
   const workoutType = pickNumber(activity, ['workout_type'], ['workouttype']);
-  const { date, timeLabel } = normalizeActivityDateParts(rawDate);
+  const { date, timeLabel, sortKey } = normalizeActivityDateParts(rawDate);
+  const activityMeta = classifyStravaActivity(activity);
 
   return {
     id,
-    name: pickString(activity, ['name'], ['name']) ?? 'Actividad Strava',
+    name: pickString(activity, ['name'], ['name']) ?? activityMeta.activityLabel,
     date,
     timeLabel,
+    sortKey,
     distanceKm,
     durationSeconds,
     paceSecondsPerKm: paceSecondsPerKm ? round(paceSecondsPerKm, 0) : null,
@@ -619,7 +749,19 @@ function normalizeStravaRun(activity: unknown): RunSummary | null {
     trainingEffect: null,
     trainingLoad: null,
     workoutId: workoutType,
+    activityKey: activityMeta.activityKey,
+    activityLabel: activityMeta.activityLabel,
+    isRunLike: activityMeta.isRunLike,
   };
+}
+
+function normalizeStravaRun(activity: unknown): RunSummary | null {
+  const summary = normalizeStravaActivity(activity);
+  if (!summary || !summary.isRunLike || summary.distanceKm <= 0) {
+    return null;
+  }
+
+  return summary;
 }
 
 function normalizeRangeSeries(
@@ -1765,6 +1907,7 @@ function buildDashboardFromSource(input: {
   primaryDevice: string | null;
   avatarPath: string | null;
   runningActivities: RunSummary[];
+  recentActivities: ActivitySummary[];
   wellnessTrend: DashboardData['wellnessTrend'];
   vo2Trend: DashboardData['vo2Trend'];
   overviewSeed: Omit<DashboardData['overview'], 'averageWeeklyKm' | 'longestRunKm' | 'predictedGoalSeconds'> & {
@@ -1776,8 +1919,11 @@ function buildDashboardFromSource(input: {
   const goalMeta = buildGoalMeta(input.goal, input.today);
   const raceDate = parseISO(goalMeta.raceDate);
   const weeklyRunning = groupWeeklyRunning(input.runningActivities);
+  const recentActivities = [...input.recentActivities]
+    .sort((left, right) => right.sortKey.localeCompare(left.sortKey))
+    .slice(0, 12);
   const recentRuns = [...input.runningActivities]
-    .sort((left, right) => right.date.localeCompare(left.date))
+    .sort((left, right) => right.sortKey.localeCompare(left.sortKey))
     .slice(0, 8);
   const averageWeeklyKm = average(weeklyRunning.map((entry) => entry.distanceKm));
   const longestRunKm = input.runningActivities.reduce((max, run) => Math.max(max, run.distanceKm), 0) || null;
@@ -1913,6 +2059,7 @@ function buildDashboardFromSource(input: {
     wellnessTrend: input.wellnessTrend,
     weeklyRunning,
     vo2Trend: input.vo2Trend,
+    recentActivities,
     recentRuns,
     fitnessSummary,
     adaptive,
@@ -1978,18 +2125,20 @@ async function buildGarminDashboardData(input: {
   }).catch(() => null);
   const trainingStatusRaw = await garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate });
   const racePredictionsRaw = await garminClient.callJson(input.auth, 'get_race_predictions');
-  const runningActivitiesRaw = await garminClient.callJson(input.auth, 'get_activities_by_date', {
+  const activitiesRaw = await garminClient.callJson(input.auth, 'get_activities_by_date', {
     startDate: runningStart,
     endDate: runningEnd,
-    activityType: 'running',
   });
   const bodyCompositionRaw = await garminClient.callJson(input.auth, 'get_body_composition', {
     startDate: weightStart,
     endDate: referenceDate,
   });
 
-  const runningActivities = Array.isArray(runningActivitiesRaw)
-    ? runningActivitiesRaw.map(normalizeRun).filter((run): run is RunSummary => run !== null)
+  const recentActivities = Array.isArray(activitiesRaw)
+    ? activitiesRaw.map(normalizeGarminActivity).filter((activity): activity is ActivitySummary => activity !== null)
+    : [];
+  const runningActivities = Array.isArray(activitiesRaw)
+    ? activitiesRaw.map(normalizeRun).filter((run): run is RunSummary => run !== null)
     : [];
   const sleepSeries = normalizeRangeSeries(sleepRange, extractSleepHours);
   const hrvSeries = normalizeRangeSeries(hrvRange, extractHrv);
@@ -2043,6 +2192,7 @@ async function buildGarminDashboardData(input: {
     primaryDevice,
     avatarPath: avatarUrl ? '/api/athlete/avatar' : null,
     runningActivities,
+    recentActivities,
     wellnessTrend,
     vo2Trend: vo2Series.map((entry) => ({
       date: entry.date,
@@ -2082,6 +2232,9 @@ async function buildStravaDashboardData(input: {
   const athlete = await getStravaAthlete(input.auth);
   const stats = await getStravaAthleteStats(input.auth).catch(() => null);
   const activities = await listStravaActivities(input.auth, { after: runningStart });
+  const recentActivities = activities
+    .map(normalizeStravaActivity)
+    .filter((activity): activity is ActivitySummary => activity !== null);
   const runningActivities = activities
     .map(normalizeStravaRun)
     .filter((run): run is RunSummary => run !== null);
@@ -2115,6 +2268,7 @@ async function buildStravaDashboardData(input: {
     primaryDevice: null,
     avatarPath: pickString(athlete, ['profile_medium', 'profile'], ['profile']) ? '/api/athlete/avatar' : null,
     runningActivities,
+    recentActivities,
     wellnessTrend: [],
     vo2Trend: [],
     overviewSeed: {
@@ -2233,6 +2387,7 @@ export function buildFallbackDashboardData(
     wellnessTrend: [],
     weeklyRunning: [],
     vo2Trend: [],
+    recentActivities: [],
     recentRuns: [],
     fitnessSummary: {
       title: `Sin datos reales de ${provider.label}`,

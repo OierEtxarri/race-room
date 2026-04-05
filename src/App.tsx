@@ -21,7 +21,14 @@ import {
   YAxis,
 } from 'recharts';
 import { Skeleton } from 'boneyard-js/react';
-import type { ActivityRoute, DashboardData, SessionPayload, UserGoal, WhatIfScenario } from './types';
+import type {
+  ActivityRoute,
+  DashboardActivitySummary,
+  DashboardData,
+  SessionPayload,
+  UserGoal,
+  WhatIfScenario,
+} from './types';
 import './App.css';
 
 type AsyncState =
@@ -102,6 +109,43 @@ type PageTransitionState = {
   direction: 'forward' | 'backward';
 } | null;
 type AvatarSize = 'sm' | 'lg';
+type StaticRouteMapTile = {
+  image: HTMLImageElement | null;
+  hillshade: HTMLImageElement | null;
+  labels: HTMLImageElement | null;
+  offsetX: number;
+  offsetY: number;
+};
+type AnimatedRoutePoint = {
+  x: number;
+  y: number;
+  progress: number;
+  distanceKm: number;
+  elapsedSeconds: number;
+  paceSecondsPerKm: number | null;
+};
+type AnimatedRouteSegment = {
+  start: AnimatedRoutePoint;
+  end: AnimatedRoutePoint;
+  color: string;
+};
+type RecentActivity = DashboardActivitySummary;
+type PreparedStaticRouteMap = {
+  tiles: StaticRouteMapTile[];
+  mapSurface: HTMLCanvasElement;
+  projectedPoints: Array<readonly [number, number]>;
+  animatedPoints: AnimatedRoutePoint[];
+  animatedSegments: AnimatedRouteSegment[];
+};
+type PrepareStaticRouteMapOptions = {
+  maxZoom?: number;
+  hillshadeOpacity?: number;
+  labelOpacity?: number;
+};
+type VideoExportFormat = {
+  mimeType: string;
+  extension: 'webm' | 'mp4';
+};
 
 type SpeechRecognitionResultLike = {
   0: {
@@ -166,6 +210,43 @@ const runOverlayTemplate = {
   headline: 'Blur card',
   description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
 };
+const routeVideoDurationMs = 12_000;
+const routeVideoFps = 30;
+const canvasDisplayFontFamily =
+  '"SF Pro Display", "SF Pro Text", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif';
+const canvasTextFontFamily =
+  '"SF Pro Text", "SF Pro Display", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif';
+
+function canvasDisplayFont(sizePx: number, weight: number | string) {
+  return `${weight} ${sizePx}px ${canvasDisplayFontFamily}`;
+}
+
+function canvasTextFont(sizePx: number, weight: number | string) {
+  return `${weight} ${sizePx}px ${canvasTextFontFamily}`;
+}
+
+const routeVideoFormatCandidates: VideoExportFormat[] = [
+  {
+    mimeType: 'video/webm;codecs=vp9,opus',
+    extension: 'webm',
+  },
+  {
+    mimeType: 'video/webm;codecs=vp8,opus',
+    extension: 'webm',
+  },
+  {
+    mimeType: 'video/webm',
+    extension: 'webm',
+  },
+  {
+    mimeType: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    extension: 'mp4',
+  },
+  {
+    mimeType: 'video/mp4',
+    extension: 'mp4',
+  },
+];
 
 function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') {
@@ -381,6 +462,84 @@ function projectRoutePoints(points: ActivityRoute['points'], width: number, heig
   });
 }
 
+function distanceBetweenGeoPointsKm(start: [number, number], end: [number, number]) {
+  const earthRadiusKm = 6_371;
+  const latDelta = ((end[0] - start[0]) * Math.PI) / 180;
+  const lngDelta = ((end[1] - start[1]) * Math.PI) / 180;
+  const startLat = (start[0] * Math.PI) / 180;
+  const endLat = (end[0] * Math.PI) / 180;
+  const a =
+    Math.sin(latDelta / 2) ** 2 +
+    Math.cos(startLat) * Math.cos(endLat) * Math.sin(lngDelta / 2) ** 2;
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function lerpNumber(start: number, end: number, ratio: number) {
+  return start + (end - start) * ratio;
+}
+
+function drawPolyline(
+  context: CanvasRenderingContext2D,
+  points: Array<readonly [number, number]>,
+  strokeStyle: string,
+  lineWidth: number,
+) {
+  if (points.length < 2) {
+    return;
+  }
+
+  context.strokeStyle = strokeStyle;
+  context.lineWidth = lineWidth;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+  points.forEach(([pointX, pointY], index) => {
+    if (index === 0) {
+      context.moveTo(pointX, pointY);
+    } else {
+      context.lineTo(pointX, pointY);
+    }
+  });
+  context.stroke();
+}
+
+function downloadBlobAsset(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+function pickRouteVideoExportFormat(): VideoExportFormat | null {
+  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
+    return null;
+  }
+
+  if (typeof MediaRecorder.isTypeSupported !== 'function') {
+    return routeVideoFormatCandidates[0] ?? null;
+  }
+
+  return routeVideoFormatCandidates.find((candidate) => MediaRecorder.isTypeSupported(candidate.mimeType)) ?? null;
+}
+
+function supportsRouteVideoExport() {
+  if (typeof window === 'undefined' || typeof HTMLCanvasElement === 'undefined') {
+    return false;
+  }
+
+  return typeof MediaRecorder !== 'undefined'
+    && typeof HTMLCanvasElement.prototype.captureStream === 'function'
+    && pickRouteVideoExportFormat() !== null;
+}
+
 function wrapCanvasText(
   context: CanvasRenderingContext2D,
   text: string,
@@ -432,16 +591,25 @@ function drawRoundedRect(
   height: number,
   radius: number,
 ) {
+  const clampedRadius = Math.max(0, Math.min(radius, width / 2, height / 2));
+
+  if (clampedRadius <= 0) {
+    context.beginPath();
+    context.rect(x, y, width, height);
+    context.closePath();
+    return;
+  }
+
   context.beginPath();
-  context.moveTo(x + radius, y);
-  context.lineTo(x + width - radius, y);
-  context.quadraticCurveTo(x + width, y, x + width, y + radius);
-  context.lineTo(x + width, y + height - radius);
-  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-  context.lineTo(x + radius, y + height);
-  context.quadraticCurveTo(x, y + height, x, y + height - radius);
-  context.lineTo(x, y + radius);
-  context.quadraticCurveTo(x, y, x + radius, y);
+  context.moveTo(x + clampedRadius, y);
+  context.lineTo(x + width - clampedRadius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + clampedRadius);
+  context.lineTo(x + width, y + height - clampedRadius);
+  context.quadraticCurveTo(x + width, y + height, x + width - clampedRadius, y + height);
+  context.lineTo(x + clampedRadius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - clampedRadius);
+  context.lineTo(x, y + clampedRadius);
+  context.quadraticCurveTo(x, y, x + clampedRadius, y);
   context.closePath();
 }
 
@@ -453,8 +621,8 @@ function fillRoundedPanel(
   height: number,
   options: {
     radius?: number;
-    fill?: string;
-    stroke?: string;
+    fill?: string | CanvasGradient | CanvasPattern;
+    stroke?: string | CanvasGradient | CanvasPattern;
     lineWidth?: number;
   } = {},
 ) {
@@ -499,10 +667,10 @@ function drawMetricCard(
   }
 
   context.fillStyle = '#999999';
-  context.font = '500 20px "Space Mono", monospace';
+  context.font = canvasTextFont(20, 500);
   context.fillText(label, x + 28, y + 40);
   context.fillStyle = '#FFFFFF';
-  context.font = accent ? '600 54px "Doto", "Space Mono", monospace' : '700 42px "Space Grotesk", sans-serif';
+  context.font = accent ? canvasDisplayFont(54, 600) : canvasDisplayFont(42, 700);
   context.fillText(value, x + 28, y + 104);
 }
 
@@ -522,7 +690,7 @@ function drawOverlayPill(
   } = {},
 ) {
   context.save();
-  context.font = options.font ?? '500 18px "Space Mono", monospace';
+  context.font = options.font ?? canvasTextFont(18, 500);
   const paddingX = options.paddingX ?? 24;
   const height = options.height ?? 54;
   const radius = options.radius ?? 999;
@@ -550,7 +718,7 @@ function measureOverlayPillWidth(
   } = {},
 ) {
   context.save();
-  context.font = options.font ?? '500 18px "Space Mono", monospace';
+  context.font = options.font ?? canvasTextFont(18, 500);
   const paddingX = options.paddingX ?? 24;
   const width = context.measureText(text).width + paddingX * 2;
   context.restore();
@@ -575,10 +743,10 @@ function drawOverlayStat(
   context.save();
   context.textAlign = align;
   context.fillStyle = options.labelColor ?? 'rgba(255,255,255,0.72)';
-  context.font = options.labelFont ?? '500 20px "Space Mono", monospace';
+  context.font = options.labelFont ?? canvasTextFont(20, 500);
   context.fillText(label, x, y);
   context.fillStyle = options.valueColor ?? '#FFFFFF';
-  context.font = options.valueFont ?? '700 52px "Space Grotesk", sans-serif';
+  context.font = options.valueFont ?? canvasDisplayFont(52, 700);
   context.fillText(value, x, y + 58);
   context.restore();
 }
@@ -728,6 +896,19 @@ function paceThresholds(route: ActivityRoute) {
   };
 }
 
+function routeMedianPace(route: ActivityRoute) {
+  const paces = route.samples
+    .map((sample) => sample.paceSecondsPerKm)
+    .filter((pace): pace is number => typeof pace === 'number' && Number.isFinite(pace) && pace > 0)
+    .sort((left, right) => left - right);
+
+  if (!paces.length) {
+    return null;
+  }
+
+  return paces[Math.floor(paces.length / 2)] ?? null;
+}
+
 function paceColor(paceSecondsPerKm: number | null, thresholds: ReturnType<typeof paceThresholds>) {
   if (paceSecondsPerKm === null || !thresholds?.fast || !thresholds.medium) {
     return '#7FC5FF';
@@ -744,32 +925,6 @@ function paceColor(paceSecondsPerKm: number | null, thresholds: ReturnType<typeo
   return '#5DAEFF';
 }
 
-function routeSegments(route: ActivityRoute) {
-  const thresholds = paceThresholds(route);
-
-  if (route.samples.length >= 2) {
-    return route.samples.slice(1).map((sample, index) => {
-      const previous = route.samples[index]!;
-      const segmentPace =
-        sample.paceSecondsPerKm !== null && previous.paceSecondsPerKm !== null
-          ? (sample.paceSecondsPerKm + previous.paceSecondsPerKm) / 2
-          : sample.paceSecondsPerKm ?? previous.paceSecondsPerKm ?? null;
-
-      return {
-        points: [previous.point, sample.point] as Array<[number, number]>,
-        color: paceColor(segmentPace, thresholds),
-      };
-    });
-  }
-
-  return [
-    {
-      points: route.points,
-      color: '#7FC5FF',
-    },
-  ];
-}
-
 function mercatorPixel(lat: number, lng: number, zoom: number) {
   const sinLat = Math.sin((lat * Math.PI) / 180);
   const scale = staticTileSize * 2 ** zoom;
@@ -778,8 +933,14 @@ function mercatorPixel(lat: number, lng: number, zoom: number) {
   return { x, y };
 }
 
-function chooseStaticMapZoom(points: Array<[number, number]>, width: number, height: number, padding: number) {
-  for (let zoom = 16; zoom >= 3; zoom -= 1) {
+function chooseStaticMapZoom(
+  points: Array<[number, number]>,
+  width: number,
+  height: number,
+  padding: number,
+  maxZoom = 16,
+) {
+  for (let zoom = maxZoom; zoom >= 3; zoom -= 1) {
     const projected = points.map(([lat, lng]) => mercatorPixel(lat, lng, zoom));
     const xs = projected.map((point) => point.x);
     const ys = projected.map((point) => point.y);
@@ -794,8 +955,14 @@ function chooseStaticMapZoom(points: Array<[number, number]>, width: number, hei
   return 3;
 }
 
-function staticMapViewport(route: ActivityRoute, width: number, height: number, padding: number) {
-  const zoom = chooseStaticMapZoom(route.points, width, height, padding);
+function staticMapViewport(
+  route: ActivityRoute,
+  width: number,
+  height: number,
+  padding: number,
+  maxZoom = 16,
+) {
+  const zoom = chooseStaticMapZoom(route.points, width, height, padding, maxZoom);
   const projected = route.points.map(([lat, lng]) => mercatorPixel(lat, lng, zoom));
   const xs = projected.map((point) => point.x);
   const ys = projected.map((point) => point.y);
@@ -838,23 +1005,73 @@ async function loadRemoteImageAsset(url: string) {
   return staticTileCache.get(url)!;
 }
 
-async function drawStaticRouteMapCard(
+function drawPreparedRouteMapBase(
   context: CanvasRenderingContext2D,
-  route: ActivityRoute,
+  prepared: Pick<PreparedStaticRouteMap, 'tiles'>,
   x: number,
   y: number,
   width: number,
   height: number,
-  radius = 28,
+  options: {
+    hillshadeOpacity?: number;
+    labelOpacity?: number;
+  } = {},
 ) {
-  const matteFill = '#0A1015';
-  const viewport = staticMapViewport(route, width, height, 28);
+  const hillshadeOpacity = options.hillshadeOpacity ?? 0.18;
+  const labelOpacity = options.labelOpacity ?? 0.06;
+
+  context.save();
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.globalCompositeOperation = 'source-over';
+  context.fillStyle = '#0A1015';
+  context.fillRect(x, y, width, height);
+
+  prepared.tiles.forEach((tile) => {
+    if (tile.image) {
+      context.drawImage(tile.image, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
+    }
+  });
+
+  context.save();
+  context.globalAlpha = hillshadeOpacity;
+  context.globalCompositeOperation = 'screen';
+  prepared.tiles.forEach((tile) => {
+    if (tile.hillshade) {
+      context.drawImage(tile.hillshade, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
+    }
+  });
+  context.restore();
+
+  context.fillStyle = 'rgba(6, 10, 15, 0.015)';
+  context.fillRect(x, y, width, height);
+
+  context.save();
+  context.globalAlpha = labelOpacity;
+  prepared.tiles.forEach((tile) => {
+    if (tile.labels) {
+      context.drawImage(tile.labels, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
+    }
+  });
+  context.restore();
+
+  context.restore();
+}
+
+async function prepareStaticRouteMap(
+  route: ActivityRoute,
+  width: number,
+  height: number,
+  padding: number,
+  options: PrepareStaticRouteMapOptions = {},
+) {
+  const viewport = staticMapViewport(route, width, height, padding, options.maxZoom ?? 16);
   const startTileX = Math.floor(viewport.originX / staticTileSize);
   const endTileX = Math.floor((viewport.originX + width) / staticTileSize);
   const startTileY = Math.floor(viewport.originY / staticTileSize);
   const endTileY = Math.floor((viewport.originY + height) / staticTileSize);
   const worldTileCount = 2 ** viewport.zoom;
-  const tileJobs: Array<Promise<{ image: HTMLImageElement | null; hillshade: HTMLImageElement | null; labels: HTMLImageElement | null; drawX: number; drawY: number }>> = [];
+  const tileJobs: Array<Promise<StaticRouteMapTile>> = [];
 
   for (let tileY = startTileY; tileY <= endTileY; tileY += 1) {
     if (tileY < 0 || tileY >= worldTileCount) {
@@ -863,8 +1080,8 @@ async function drawStaticRouteMapCard(
 
     for (let tileX = startTileX; tileX <= endTileX; tileX += 1) {
       const wrappedTileX = ((tileX % worldTileCount) + worldTileCount) % worldTileCount;
-      const drawX = x + tileX * staticTileSize - viewport.originX;
-      const drawY = y + tileY * staticTileSize - viewport.originY;
+      const drawX = tileX * staticTileSize - viewport.originX;
+      const drawY = tileY * staticTileSize - viewport.originY;
       const replace = (template: string) =>
         template
           .replace('{z}', String(viewport.zoom))
@@ -880,14 +1097,270 @@ async function drawStaticRouteMapCard(
           image,
           hillshade,
           labels,
-          drawX,
-          drawY,
+          offsetX: drawX,
+          offsetY: drawY,
         })),
       );
     }
   }
 
   const tiles = await Promise.all(tileJobs);
+  const mapSurface = document.createElement('canvas');
+  mapSurface.width = width;
+  mapSurface.height = height;
+  const mapSurfaceContext = mapSurface.getContext('2d');
+  if (mapSurfaceContext) {
+    drawPreparedRouteMapBase(mapSurfaceContext, { tiles }, 0, 0, width, height, {
+      hillshadeOpacity: options.hillshadeOpacity,
+      labelOpacity: options.labelOpacity,
+    });
+  }
+
+  const projectedPoints = route.points.map(([lat, lng]) => {
+    const pixel = mercatorPixel(lat, lng, viewport.zoom);
+    return [pixel.x - viewport.originX, pixel.y - viewport.originY] as const;
+  });
+  const thresholds = paceThresholds(route);
+  const medianPaceSecondsPerKm = routeMedianPace(route) ?? 360;
+  const animationSource =
+    route.samples.length >= 2
+      ? route.samples
+      : route.points.map((point) => ({
+        point,
+        paceSecondsPerKm: null,
+        timestampSeconds: null,
+      }));
+  let cumulativeDistanceKm = 0;
+  let cumulativeElapsedSeconds = 0;
+  const animatedPoints = animationSource.map((sample, index) => {
+    if (index > 0) {
+      const previousSample = animationSource[index - 1]!;
+      const segmentDistanceKm = distanceBetweenGeoPointsKm(previousSample.point, sample.point);
+      cumulativeDistanceKm += segmentDistanceKm;
+
+      const timestampDurationSeconds =
+        sample.timestampSeconds !== null &&
+        previousSample.timestampSeconds !== null &&
+        sample.timestampSeconds > previousSample.timestampSeconds
+          ? sample.timestampSeconds - previousSample.timestampSeconds
+          : null;
+      const paceCandidateSecondsPerKm =
+        sample.paceSecondsPerKm ?? previousSample.paceSecondsPerKm ?? medianPaceSecondsPerKm;
+      const paceDurationSeconds =
+        paceCandidateSecondsPerKm && segmentDistanceKm > 0
+          ? paceCandidateSecondsPerKm * segmentDistanceKm
+          : null;
+
+      let segmentElapsedSeconds = timestampDurationSeconds ?? paceDurationSeconds ?? segmentDistanceKm * medianPaceSecondsPerKm;
+
+      if (
+        timestampDurationSeconds !== null &&
+        paceDurationSeconds !== null &&
+        timestampDurationSeconds > paceDurationSeconds * 3
+      ) {
+        segmentElapsedSeconds = paceDurationSeconds;
+      }
+
+      cumulativeElapsedSeconds += Math.max(segmentElapsedSeconds, 0.35);
+    }
+
+    const pixel = mercatorPixel(sample.point[0], sample.point[1], viewport.zoom);
+    return {
+      x: pixel.x - viewport.originX,
+      y: pixel.y - viewport.originY,
+      progress: 0,
+      distanceKm: cumulativeDistanceKm,
+      elapsedSeconds: cumulativeElapsedSeconds,
+      paceSecondsPerKm: sample.paceSecondsPerKm,
+    };
+  });
+  const totalElapsedSeconds = animatedPoints.at(-1)?.elapsedSeconds ?? 0;
+  animatedPoints.forEach((point, index) => {
+    point.progress =
+      totalElapsedSeconds > 0
+        ? point.elapsedSeconds / totalElapsedSeconds
+        : animatedPoints.length <= 1
+          ? 1
+          : index / (animatedPoints.length - 1);
+  });
+  const animatedSegments = animatedPoints.slice(1).map((point, index) => {
+    const previousPoint = animatedPoints[index]!;
+    const previousSample = animationSource[index]!;
+    const sample = animationSource[index + 1]!;
+    const segmentPace =
+      sample.paceSecondsPerKm !== null && previousSample.paceSecondsPerKm !== null
+        ? (sample.paceSecondsPerKm + previousSample.paceSecondsPerKm) / 2
+        : sample.paceSecondsPerKm ?? previousSample.paceSecondsPerKm ?? null;
+
+    return {
+      start: previousPoint,
+      end: point,
+      color: paceColor(segmentPace, thresholds),
+    };
+  });
+
+  return {
+    tiles,
+    mapSurface,
+    projectedPoints,
+    animatedPoints,
+    animatedSegments,
+  } satisfies PreparedStaticRouteMap;
+}
+
+function interpolateAnimatedPoint(prepared: PreparedStaticRouteMap, progress: number): AnimatedRoutePoint | null {
+  const clampedProgress = clampNumber(progress, 0, 1);
+  const firstPoint = prepared.animatedPoints[0] ?? null;
+
+  if (!firstPoint) {
+    return null;
+  }
+
+  if (clampedProgress <= 0 || prepared.animatedSegments.length === 0) {
+    return {
+      ...firstPoint,
+      progress: clampedProgress,
+    };
+  }
+
+  for (const segment of prepared.animatedSegments) {
+    if (clampedProgress <= segment.start.progress) {
+      return {
+        ...segment.start,
+        progress: clampedProgress,
+      };
+    }
+
+    const span = Math.max(segment.end.progress - segment.start.progress, 0.0001);
+    const localProgress = clampNumber((clampedProgress - segment.start.progress) / span, 0, 1);
+
+    if (localProgress < 1) {
+      return {
+        x: lerpNumber(segment.start.x, segment.end.x, localProgress),
+        y: lerpNumber(segment.start.y, segment.end.y, localProgress),
+        progress: clampedProgress,
+        distanceKm: lerpNumber(segment.start.distanceKm, segment.end.distanceKm, localProgress),
+        elapsedSeconds: Math.round(lerpNumber(segment.start.elapsedSeconds, segment.end.elapsedSeconds, localProgress)),
+        paceSecondsPerKm: segment.end.paceSecondsPerKm ?? segment.start.paceSecondsPerKm,
+      };
+    }
+  }
+
+  const lastPoint = prepared.animatedPoints.at(-1) ?? firstPoint;
+  return {
+    ...lastPoint,
+    progress: clampedProgress,
+  };
+}
+
+function resolveSmoothedHeadingRadians(prepared: PreparedStaticRouteMap, progress: number) {
+  const lookBehind = interpolateAnimatedPoint(prepared, progress - 0.016);
+  const lookAhead = interpolateAnimatedPoint(prepared, progress + 0.028);
+
+  if (lookBehind && lookAhead) {
+    const dx = lookAhead.x - lookBehind.x;
+    const dy = lookAhead.y - lookBehind.y;
+    if (Math.hypot(dx, dy) > 0.1) {
+      return Math.atan2(dy, dx);
+    }
+  }
+
+  const segment =
+    prepared.animatedSegments.find((candidate) => progress <= candidate.end.progress)
+    ?? prepared.animatedSegments.at(-1)
+    ?? null;
+
+  if (segment) {
+    return Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
+  }
+
+  return -Math.PI / 2;
+}
+
+function drawAnimatedRouteProgress(
+  context: CanvasRenderingContext2D,
+  prepared: PreparedStaticRouteMap,
+  progress: number,
+  options: {
+    showActiveMarker?: boolean;
+  } = {},
+) {
+  const clampedProgress = clampNumber(progress, 0, 1);
+  let activePoint = prepared.animatedPoints[0] ?? null;
+
+  prepared.animatedSegments.forEach((segment) => {
+    if (clampedProgress <= segment.start.progress) {
+      return;
+    }
+
+    const span = Math.max(segment.end.progress - segment.start.progress, 0.0001);
+    const localProgress = clampNumber((clampedProgress - segment.start.progress) / span, 0, 1);
+    const endPoint =
+      localProgress >= 1
+        ? [segment.end.x, segment.end.y] as const
+        : [
+          lerpNumber(segment.start.x, segment.end.x, localProgress),
+          lerpNumber(segment.start.y, segment.end.y, localProgress),
+        ] as const;
+
+    drawPolyline(context, [[segment.start.x, segment.start.y], endPoint], `${segment.color}40`, 18);
+    drawPolyline(context, [[segment.start.x, segment.start.y], endPoint], segment.color, 7);
+
+    activePoint =
+      localProgress >= 1
+        ? segment.end
+        : {
+          x: endPoint[0],
+          y: endPoint[1],
+          progress: clampedProgress,
+          distanceKm: lerpNumber(segment.start.distanceKm, segment.end.distanceKm, localProgress),
+          elapsedSeconds: Math.round(lerpNumber(segment.start.elapsedSeconds, segment.end.elapsedSeconds, localProgress)),
+          paceSecondsPerKm: segment.end.paceSecondsPerKm ?? segment.start.paceSecondsPerKm,
+        };
+  });
+
+  if (!activePoint) {
+    return null;
+  }
+
+  if (options.showActiveMarker !== false) {
+    context.save();
+    context.fillStyle = 'rgba(255,255,255,0.92)';
+    context.beginPath();
+    context.arc(activePoint.x, activePoint.y, 4, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = '#DF3E3E';
+    context.beginPath();
+    context.arc(activePoint.x, activePoint.y, 8, 0, Math.PI * 2);
+    context.fill();
+    context.strokeStyle = 'rgba(255,255,255,0.48)';
+    context.lineWidth = 2.5;
+    context.beginPath();
+    context.arc(activePoint.x, activePoint.y, 18, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+  }
+
+  return activePoint;
+}
+
+function drawPreparedStaticRouteMapCard(
+  context: CanvasRenderingContext2D,
+  prepared: PreparedStaticRouteMap,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius = 28,
+  options: {
+    routeProgress?: number;
+    showGhostRoute?: boolean;
+    showGoalMarker?: boolean;
+    showActiveMarker?: boolean;
+  } = {},
+) {
+  const matteFill = '#0A1015';
+  const routeProgress = options.routeProgress ?? 1;
 
   context.save();
   context.shadowColor = 'rgba(0,0,0,0.28)';
@@ -906,87 +1379,46 @@ async function drawStaticRouteMapCard(
   context.fillStyle = matteFill;
   context.fillRect(x, y, width, height);
 
-  tiles.forEach((tile) => {
-    if (tile.image) {
-      context.drawImage(tile.image, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
-    }
-  });
+  if (prepared.mapSurface) {
+    context.drawImage(prepared.mapSurface, x, y);
+  } else {
+    drawPreparedRouteMapBase(context, prepared, x, y, width, height);
+  }
 
   context.save();
-  context.globalAlpha = 0.12;
-  context.globalCompositeOperation = 'screen';
-  tiles.forEach((tile) => {
-    if (tile.hillshade) {
-      context.drawImage(tile.hillshade, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
-    }
-  });
-  context.restore();
-
-  context.fillStyle = 'rgba(6, 10, 15, 0.015)';
-  context.fillRect(x, y, width, height);
-
-  context.save();
-  context.globalAlpha = 0.035;
-  tiles.forEach((tile) => {
-    if (tile.labels) {
-      context.drawImage(tile.labels, tile.drawX, tile.drawY, staticTileSize, staticTileSize);
-    }
-  });
-  context.restore();
-
-  const projectedPoints = route.points.map(([lat, lng]) => {
-    const pixel = mercatorPixel(lat, lng, viewport.zoom);
-    return [x + pixel.x - viewport.originX, y + pixel.y - viewport.originY] as const;
-  });
-  const segments = routeSegments(route);
-
-  segments.forEach((segment) => {
-    const projected = segment.points.map(([lat, lng]) => {
-      const pixel = mercatorPixel(lat, lng, viewport.zoom);
-      return [x + pixel.x - viewport.originX, y + pixel.y - viewport.originY] as const;
-    });
-
-    context.strokeStyle = `${segment.color}44`;
-    context.lineWidth = 16;
-    context.lineJoin = 'round';
-    context.lineCap = 'round';
-    context.beginPath();
-    projected.forEach(([pointX, pointY], index) => {
-      if (index === 0) {
-        context.moveTo(pointX, pointY);
-      } else {
-        context.lineTo(pointX, pointY);
-      }
-    });
-    context.stroke();
-
-    context.strokeStyle = segment.color;
-    context.lineWidth = 6;
-    context.beginPath();
-    projected.forEach(([pointX, pointY], index) => {
-      if (index === 0) {
-        context.moveTo(pointX, pointY);
-      } else {
-        context.lineTo(pointX, pointY);
-      }
-    });
-    context.stroke();
+  context.translate(x, y);
+  if (options.showGhostRoute) {
+    drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.12)', 10);
+    drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.22)', 3.5);
+  }
+  drawAnimatedRouteProgress(context, prepared, routeProgress, {
+    showActiveMarker: options.showActiveMarker,
   });
 
-  const [startX, startY] = projectedPoints[0]!;
-  const [endX, endY] = projectedPoints.at(-1)!;
+  const routeStart = prepared.projectedPoints[0]
+    ?? (prepared.animatedPoints[0] ? [prepared.animatedPoints[0].x, prepared.animatedPoints[0].y] as const : null);
   context.fillStyle = '#F9F6EB';
-  context.beginPath();
-  context.arc(startX, startY, 5, 0, Math.PI * 2);
-  context.fill();
-  context.fillStyle = '#DF3E3E';
-  context.beginPath();
-  context.arc(endX, endY, 6, 0, Math.PI * 2);
-  context.fill();
-  context.fillStyle = '#F9F6EB';
-  context.beginPath();
-  context.arc(endX, endY, 2.5, 0, Math.PI * 2);
-  context.fill();
+  if (routeStart) {
+    context.beginPath();
+    context.arc(routeStart[0], routeStart[1], 5, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  if (options.showGoalMarker !== false) {
+    const routeEnd = prepared.projectedPoints.at(-1)
+      ?? (prepared.animatedPoints.at(-1) ? [prepared.animatedPoints.at(-1)!.x, prepared.animatedPoints.at(-1)!.y] as const : null);
+    if (routeEnd) {
+      context.fillStyle = routeProgress >= 0.999 ? '#DF3E3E' : 'rgba(223,62,62,0.32)';
+      context.beginPath();
+      context.arc(routeEnd[0], routeEnd[1], routeProgress >= 0.999 ? 6 : 5, 0, Math.PI * 2);
+      context.fill();
+      context.fillStyle = '#F9F6EB';
+      context.beginPath();
+      context.arc(routeEnd[0], routeEnd[1], 2.5, 0, Math.PI * 2);
+      context.fill();
+    }
+  }
+  context.restore();
 
   const overlayGradient = context.createLinearGradient(x, y, x, y + height);
   overlayGradient.addColorStop(0, 'rgba(12, 17, 24, 0)');
@@ -999,6 +1431,120 @@ async function drawStaticRouteMapCard(
     radius,
     stroke: 'rgba(255,255,255,0.2)',
     lineWidth: 1.5,
+  });
+}
+
+function drawRouteVideoMapCard(
+  context: CanvasRenderingContext2D,
+  prepared: PreparedStaticRouteMap,
+  snapshot: {
+    x: number;
+    y: number;
+    progress: number;
+    headingRadians: number;
+  },
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius = 22,
+) {
+  const matteFill = '#101010';
+  const focusX = width / 2;
+  const focusY = height * 0.82;
+  const rotation = -Math.PI / 2 - snapshot.headingRadians;
+
+  context.save();
+  context.shadowColor = 'rgba(0,0,0,0.34)';
+  context.shadowBlur = 28;
+  context.shadowOffsetY = 14;
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    fill: matteFill,
+  });
+  context.restore();
+
+  context.save();
+  drawRoundedRect(context, x, y, width, height, radius);
+  context.clip();
+  context.fillStyle = matteFill;
+  context.fillRect(x, y, width, height);
+
+  context.translate(x, y);
+  context.translate(focusX, focusY);
+  context.rotate(rotation);
+  context.transform(1.06, 0.08, -0.3, 0.66, 0, 0);
+  context.translate(-snapshot.x, -snapshot.y);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+
+  const previousFilter = context.filter;
+  context.filter = 'contrast(1.16) saturate(1.06) brightness(0.88)';
+  context.drawImage(prepared.mapSurface, 0, 0);
+  context.filter = previousFilter;
+
+  const reliefGlow = context.createRadialGradient(
+    focusX * 0.46,
+    focusY * 0.22,
+    0,
+    focusX * 0.46,
+    focusY * 0.22,
+    width * 0.68,
+  );
+  reliefGlow.addColorStop(0, 'rgba(83, 157, 245, 0.05)');
+  reliefGlow.addColorStop(0.48, 'rgba(83, 157, 245, 0.018)');
+  reliefGlow.addColorStop(1, 'rgba(83, 157, 245, 0)');
+  context.globalCompositeOperation = 'screen';
+  context.fillStyle = reliefGlow;
+  context.fillRect(-width, -height, width * 3, height * 3);
+
+  context.globalCompositeOperation = 'source-over';
+  context.fillStyle = 'rgba(8, 12, 18, 0.09)';
+  context.fillRect(-width, -height, width * 3, height * 3);
+
+  const surfaceShade = context.createLinearGradient(0, -height * 0.16, 0, height * 1.04);
+  surfaceShade.addColorStop(0, 'rgba(255,255,255,0.03)');
+  surfaceShade.addColorStop(0.28, 'rgba(255,255,255,0.01)');
+  surfaceShade.addColorStop(0.72, 'rgba(0,0,0,0)');
+  surfaceShade.addColorStop(1, 'rgba(0,0,0,0.22)');
+  context.fillStyle = surfaceShade;
+  context.fillRect(-width, -height, width * 3, height * 3);
+
+  drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.08)', 11);
+  drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.16)', 3.5);
+  drawAnimatedRouteProgress(context, prepared, snapshot.progress, {
+    showActiveMarker: true,
+  });
+
+  context.restore();
+
+  const vignette = context.createLinearGradient(x, y, x, y + height);
+  vignette.addColorStop(0, 'rgba(0,0,0,0.02)');
+  vignette.addColorStop(0.7, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.16)');
+  context.fillStyle = vignette;
+  drawRoundedRect(context, x, y, width, height, radius);
+  context.fill();
+
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    stroke: 'rgba(255,255,255,0.06)',
+    lineWidth: 1.2,
+  });
+}
+
+async function drawStaticRouteMapCard(
+  context: CanvasRenderingContext2D,
+  route: ActivityRoute,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius = 28,
+) {
+  const prepared = await prepareStaticRouteMap(route, width, height, 28);
+  drawPreparedStaticRouteMapCard(context, prepared, x, y, width, height, radius, {
+    showActiveMarker: false,
   });
 }
 
@@ -1021,10 +1567,10 @@ function buildRunDescription(run: DashboardData['recentRuns'][number]) {
   }
 
   if (run.averageHeartRate !== null) {
-    return `Rodaje controlado · ${run.averageHeartRate} bpm medios · ${metricValue(run.elevationGain, ' m')} de desnivel`;
+    return `${run.activityLabel} · ${run.averageHeartRate} bpm medios · ${metricValue(run.elevationGain, ' m')} de desnivel`;
   }
 
-  return `Sesión de ${run.distanceKm.toFixed(1)} km en ${formatDuration(run.durationSeconds).toLowerCase()}.`;
+  return `${run.activityLabel} de ${formatActivityDistance(run.distanceKm).toLowerCase()} en ${formatDuration(run.durationSeconds).toLowerCase()}.`;
 }
 
 function drawGlassPanel(
@@ -1150,7 +1696,7 @@ function drawRouteOverlay(input: {
 
   if (input.labelLeft || input.labelRight) {
     context.fillStyle = 'rgba(255,255,255,0.62)';
-    context.font = '500 18px "Space Mono", monospace';
+    context.font = canvasTextFont(18, 500);
     if (input.labelLeft) {
       context.fillText(input.labelLeft, x + 24, y + height - 22);
     }
@@ -1444,24 +1990,24 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
     context.fillStyle = '#FFFFFF';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.font = '700 32px "Space Grotesk", sans-serif';
+    context.font = canvasDisplayFont(32, 700);
     context.fillText(athleteInitials(input.athleteName), avatarX, avatarY + 1);
   }
   context.restore();
 
   context.fillStyle = '#FFFFFF';
-  context.font = '600 38px "Space Grotesk", sans-serif';
+  context.font = canvasDisplayFont(38, 600);
   context.fillText(input.athleteName, leftX + 110, cardY + 78);
   context.fillStyle = 'rgba(255,255,255,0.76)';
-  context.font = '500 22px "Space Grotesk", sans-serif';
+  context.font = canvasDisplayFont(22, 500);
   context.fillText(subtitle || input.providerLabel, leftX + 110, cardY + 120);
 
   context.fillStyle = '#FFFFFF';
-  context.font = '700 54px "Space Grotesk", sans-serif';
+  context.font = canvasDisplayFont(54, 600);
   wrapCanvasText(context, input.run.name, leftX, cardY + 220, leftWidth, 64, 3);
 
   context.fillStyle = 'rgba(255,255,255,0.84)';
-  context.font = '500 24px "Space Grotesk", sans-serif';
+  context.font = canvasTextFont(24, 400);
   wrapCanvasText(context, description, leftX, cardY + 344, leftWidth, 32, 3);
 
   const statColumns = [
@@ -1484,10 +2030,10 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
   statColumns.forEach((column) => {
     column.rows.forEach((item) => {
       context.fillStyle = 'rgba(255,255,255,0.68)';
-      context.font = '500 18px "Space Grotesk", sans-serif';
+      context.font = canvasTextFont(18, 500);
       context.fillText(item.label, column.x, item.y);
       context.fillStyle = '#FFFFFF';
-      context.font = '700 28px "Space Grotesk", sans-serif';
+      context.font = canvasDisplayFont(28, 600);
       context.fillText(item.value, column.x, item.y + 40);
     });
   });
@@ -1817,14 +2363,285 @@ async function exportRunShareImage(input: {
     }, 'image/png');
   });
 
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `run-overlay-${input.templateId}-${input.run.date}-${input.run.id}.png`;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  downloadBlobAsset(blob, `run-overlay-${input.templateId}-${input.run.date}-${input.run.id}.png`);
+}
+
+function resolveRouteVideoSnapshot(
+  prepared: PreparedStaticRouteMap,
+  progress: number,
+) {
+  const clampedProgress = clampNumber(progress, 0, 1);
+  const fallbackPoint = interpolateAnimatedPoint(prepared, clampedProgress) ?? {
+    x: 0,
+    y: 0,
+    progress: 0,
+    distanceKm: 0,
+    elapsedSeconds: 0,
+    paceSecondsPerKm: null,
+  };
+  return {
+    x: fallbackPoint.x,
+    y: fallbackPoint.y,
+    progress: clampedProgress,
+    headingRadians: resolveSmoothedHeadingRadians(prepared, clampedProgress),
+    distanceKm: fallbackPoint.distanceKm,
+    paceSecondsPerKm: fallbackPoint.paceSecondsPerKm,
+    elapsedSeconds: fallbackPoint.elapsedSeconds,
+  };
+}
+
+function renderRouteVideoFrame(
+  context: CanvasRenderingContext2D,
+  prepared: PreparedStaticRouteMap,
+  input: {
+    run: DashboardData['recentRuns'][number];
+    athleteName: string;
+    providerLabel: string;
+  },
+  progress: number,
+) {
+  const width = context.canvas.width;
+  const height = context.canvas.height;
+  const snapshot = resolveRouteVideoSnapshot(prepared, progress);
+  const paceLabel =
+    snapshot.paceSecondsPerKm !== null
+      ? formatPace(snapshot.paceSecondsPerKm)
+      : formatPace(input.run.paceSecondsPerKm);
+  const completion = clampNumber(input.run.distanceKm > 0 ? snapshot.distanceKm / input.run.distanceKm : progress, 0, 1);
+
+  context.clearRect(0, 0, width, height);
+
+  const background = context.createLinearGradient(0, 0, 0, height);
+  background.addColorStop(0, '#171717');
+  background.addColorStop(0.36, '#121212');
+  background.addColorStop(1, '#0d0d0d');
+  context.fillStyle = background;
+  context.fillRect(0, 0, width, height);
+
+  const topGlow = context.createRadialGradient(width * 0.86, height * 0.14, 0, width * 0.86, height * 0.14, width * 0.72);
+  topGlow.addColorStop(0, 'rgba(83,157,245,0.18)');
+  topGlow.addColorStop(1, 'rgba(83,157,245,0)');
+  context.fillStyle = topGlow;
+  context.fillRect(0, 0, width, height);
+
+  const sideGlow = context.createRadialGradient(width * 0.18, height * 0.84, 0, width * 0.18, height * 0.84, width * 0.64);
+  sideGlow.addColorStop(0, 'rgba(242,87,116,0.12)');
+  sideGlow.addColorStop(1, 'rgba(242,87,116,0)');
+  context.fillStyle = sideGlow;
+  context.fillRect(0, 0, width, height);
+
+  fillRoundedPanel(context, 36, 30, width - 72, height - 60, {
+    radius: 30,
+    fill: 'rgba(24,24,24,0.92)',
+    stroke: 'rgba(255,255,255,0.04)',
+    lineWidth: 1.2,
+  });
+
+  context.save();
+  context.beginPath();
+  context.arc(78, 79, 22, 0, Math.PI * 2);
+  const badgeGradient = context.createLinearGradient(56, 57, 100, 101);
+  badgeGradient.addColorStop(0, '#539df5');
+  badgeGradient.addColorStop(0.58, '#2f7de8');
+  badgeGradient.addColorStop(1, '#f25774');
+  context.fillStyle = badgeGradient;
+  context.fill();
+  context.restore();
+
+  context.fillStyle = '#FFFFFF';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.font = canvasTextFont(17, 600);
+  context.fillText('RR', 78, 80);
+  context.textAlign = 'left';
+  context.textBaseline = 'alphabetic';
+
+  drawOverlayPill(context, 112, 54, 'SESSION SHORT', {
+    fill: 'rgba(255,255,255,0.035)',
+    stroke: 'rgba(255,255,255,0.08)',
+    textColor: 'rgba(255,255,255,0.72)',
+    font: canvasTextFont(14, 500),
+    height: 34,
+    paddingX: 16,
+  });
+  drawOverlayPill(context, width - 186, 54, input.providerLabel.toUpperCase(), {
+    fill: 'rgba(83,157,245,0.12)',
+    stroke: 'rgba(83,157,245,0.2)',
+    textColor: '#D9E9FF',
+    font: canvasTextFont(14, 500),
+    height: 34,
+    paddingX: 16,
+  });
+  drawOverlayPill(context, width - 332, 54, input.run.activityLabel.toUpperCase(), {
+    fill: 'rgba(242,87,116,0.1)',
+    stroke: 'rgba(242,87,116,0.18)',
+    textColor: '#FFE2E7',
+    font: canvasTextFont(14, 500),
+    height: 34,
+    paddingX: 16,
+  });
+
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(36, 600);
+  wrapCanvasText(context, input.run.name, 56, 132, width - 112, 42, 2);
+  context.fillStyle = 'rgba(255,255,255,0.62)';
+  context.font = canvasTextFont(15, 400);
+  context.fillText(
+    `${input.run.date}${input.run.timeLabel ? ` · ${input.run.timeLabel}` : ''} · ${input.athleteName.toUpperCase()}`,
+    56,
+    206,
+  );
+
+  drawRouteVideoMapCard(context, prepared, snapshot, 52, 234, width - 104, 726, 22);
+
+  fillRoundedPanel(context, 52, 980, width - 104, 214, {
+    radius: 22,
+    fill: 'rgba(32,32,32,0.96)',
+    stroke: 'rgba(255,255,255,0.05)',
+    lineWidth: 1.2,
+  });
+
+  context.fillStyle = 'rgba(255,255,255,0.52)';
+  context.font = canvasTextFont(13, 500);
+  context.fillText('KM', 78, 1018);
+  context.fillText('PACE', 420, 1018);
+  context.fillText('TIME', 420, 1108);
+
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(80, 600);
+  context.fillText(`${snapshot.distanceKm.toFixed(1)}`, 78, 1092);
+  context.font = canvasTextFont(20, 600);
+  context.fillStyle = 'rgba(255,255,255,0.72)';
+  context.fillText('KM', 82, 1123);
+
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(34, 600);
+  context.fillText(paceLabel, 420, 1078);
+  context.fillText(formatDuration(snapshot.elapsedSeconds), 420, 1170);
+
+  fillRoundedPanel(context, 78, 1172, width - 156, 14, {
+    radius: 999,
+    fill: 'rgba(255,255,255,0.06)',
+  });
+  const progressGradient = context.createLinearGradient(78, 1172, width - 78, 1172);
+  progressGradient.addColorStop(0, '#539df5');
+  progressGradient.addColorStop(0.65, '#2f7de8');
+  progressGradient.addColorStop(1, '#f25774');
+  fillRoundedPanel(context, 78, 1172, (width - 156) * completion, 14, {
+    radius: 999,
+    fill: progressGradient,
+  });
+
+  context.fillStyle = 'rgba(255,255,255,0.66)';
+  context.font = canvasTextFont(14, 500);
+  context.fillText(
+    `TOTAL ${formatActivityDistance(input.run.distanceKm).toUpperCase()}`,
+    78,
+    1205,
+  );
+  context.fillText(
+    `RITMO MEDIO ${formatPace(input.run.paceSecondsPerKm) ?? 'SIN DATO'} · DESNIVEL ${metricValue(input.run.elevationGain, ' m')}`,
+    250,
+    1205,
+  );
+}
+
+async function exportRunRouteVideo(input: {
+  run: DashboardData['recentRuns'][number];
+  route: ActivityRoute;
+  athleteName: string;
+  providerLabel: string;
+}) {
+  await document.fonts.ready.catch(() => undefined);
+
+  const format = pickRouteVideoExportFormat();
+  if (!format) {
+    throw new Error('Este navegador no soporta la exportacion de video desde canvas.');
+  }
+
+  const width = 720;
+  const height = 1280;
+  const mapWidth = width - 104;
+  const mapHeight = 718;
+  const mapOverscan = 280;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+
+  if (!context) {
+    throw new Error('El navegador no ha podido crear el canvas para el video.');
+  }
+
+  const prepared = await prepareStaticRouteMap(input.route, mapWidth + mapOverscan, mapHeight + mapOverscan, 44, {
+    maxZoom: 14,
+    hillshadeOpacity: 0.38,
+    labelOpacity: 0.02,
+  });
+  renderRouteVideoFrame(context, prepared, input, 0);
+
+  if (typeof canvas.captureStream !== 'function') {
+    throw new Error('Tu navegador no permite grabar el canvas como video.');
+  }
+
+  const stream = canvas.captureStream(routeVideoFps);
+  const chunks: Blob[] = [];
+  let recorder: MediaRecorder;
+
+  try {
+    recorder = new MediaRecorder(stream, {
+      mimeType: format.mimeType,
+      videoBitsPerSecond: 16_000_000,
+    });
+  } catch {
+    recorder = new MediaRecorder(stream);
+  }
+
+  const finished = new Promise<Blob>((resolve, reject) => {
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data);
+      }
+    };
+    recorder.onerror = () => reject(new Error('No se pudo grabar el video del entrenamiento.'));
+    recorder.onstop = () => {
+      resolve(new Blob(chunks, { type: recorder.mimeType || format.mimeType }));
+    };
+  });
+
+  recorder.start();
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const startedAt = performance.now();
+
+      const render = (now: number) => {
+        try {
+          const progress = clampNumber((now - startedAt) / routeVideoDurationMs, 0, 1);
+          renderRouteVideoFrame(context, prepared, input, progress);
+
+          if (progress >= 1) {
+            window.setTimeout(resolve, Math.ceil(1_000 / routeVideoFps) * 2);
+            return;
+          }
+
+          window.requestAnimationFrame(render);
+        } catch (error) {
+          reject(error);
+        }
+      };
+
+      window.requestAnimationFrame(render);
+    });
+  } finally {
+    if (recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+  }
+
+  const blob = await finished;
+  stream.getTracks().forEach((track) => track.stop());
+  downloadBlobAsset(blob, `run-route-video-${input.run.date}-${input.run.id}.${format.extension}`);
 }
 
 function apiUrl(pathname: string) {
@@ -1922,6 +2739,16 @@ function formatDuration(seconds: number) {
     return `${hours}h ${String(minutes).padStart(2, '0')}m`;
   }
   return `${minutes} min`;
+}
+
+function formatActivityDistance(distanceKm: number) {
+  return distanceKm > 0 ? `${distanceKm.toFixed(1)} km` : 'Sin distancia';
+}
+
+function activityRouteUnavailableMessage(activity: RecentActivity) {
+  return activity.distanceKm > 0
+    ? 'Esta actividad no tiene un recorrido GPS utilizable.'
+    : 'Esta actividad no tiene distancia ni recorrido GPS disponible.';
 }
 
 function formatCountdown(ms: number) {
@@ -2231,6 +3058,7 @@ function App() {
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [routeState, setRouteState] = useState<RouteState>(idleRouteState);
   const [isExportingRunImage, setIsExportingRunImage] = useState(false);
+  const [isExportingRunVideo, setIsExportingRunVideo] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [activeSection, setActiveSection] = useState<DashboardSectionId>(initialDashboardSection);
   const [pageTransition, setPageTransition] = useState<PageTransitionState>(null);
@@ -2249,6 +3077,7 @@ function App() {
   const previousSectionRef = useRef<DashboardSectionId>(initialDashboardSection());
   const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
   const stravaPublicLoginEnabled = publicAuthProviders.includes('strava');
+  const canExportRunVideo = supportsRouteVideoExport();
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -2617,13 +3446,23 @@ function App() {
       return;
     }
 
+    const recentActivities = state.data.recentActivities.length ? state.data.recentActivities : state.data.recentRuns;
     const selectedRun =
-      state.data.recentRuns.find((run) => run.id === selectedRunId) ??
-      state.data.recentRuns[0] ??
+      recentActivities.find((run) => run.id === selectedRunId) ??
+      recentActivities[0] ??
       null;
 
     if (!selectedRun) {
       setRouteState((current) => (current.status === 'idle' ? current : idleRouteState));
+      return;
+    }
+
+    if (selectedRun.distanceKm <= 0) {
+      setRouteState({
+        status: 'error',
+        data: null,
+        error: activityRouteUnavailableMessage(selectedRun),
+      });
       return;
     }
 
@@ -3384,11 +4223,12 @@ function App() {
   }
 
   const data = state.data;
+  const recentActivities = data.recentActivities.length ? data.recentActivities : data.recentRuns;
   const selectedMetricMeta = chartOptions.find((option) => option.key === selectedMetric) ?? chartOptions[0];
   const selectedWeek = data.plan.weeks[selectedWeekIndex] ?? data.plan.weeks[0];
   const selectedRun =
-    data.recentRuns.find((run) => run.id === selectedRunId) ??
-    data.recentRuns[0] ??
+    recentActivities.find((run) => run.id === selectedRunId) ??
+    recentActivities[0] ??
     null;
   const averageValue = metricAverage(data.wellnessTrend, selectedMetric);
   const peakValue = metricPeak(data.wellnessTrend, selectedMetric);
@@ -3487,12 +4327,12 @@ function App() {
     }
 
     if (routeState.status === 'loading') {
-      window.alert('Todavia estoy cargando la ruta de este rodaje. Espera un momento y vuelve a intentarlo.');
+      window.alert('Todavia estoy cargando la ruta de esta actividad. Espera un momento y vuelve a intentarlo.');
       return;
     }
 
     if (routeState.status !== 'ready') {
-      window.alert('Este rodaje no tiene una ruta utilizable para la exportacion.');
+      window.alert('Esta actividad no tiene una ruta utilizable para la exportacion.');
       return;
     }
 
@@ -3510,9 +4350,44 @@ function App() {
         templateId: runOverlayTemplate.id,
       });
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'No se pudo generar la imagen del rodaje.');
+      window.alert(error instanceof Error ? error.message : 'No se pudo generar la imagen de la actividad.');
     } finally {
       setIsExportingRunImage(false);
+    }
+  };
+  const exportSelectedRunVideo = async () => {
+    if (!selectedRun || isExportingRunVideo) {
+      return;
+    }
+
+    if (!canExportRunVideo) {
+      window.alert('Este navegador no soporta la exportacion de video. Prueba desde un navegador de escritorio compatible.');
+      return;
+    }
+
+    if (routeState.status === 'loading') {
+      window.alert('Todavia estoy cargando la ruta de esta actividad. Espera un momento y vuelve a intentarlo.');
+      return;
+    }
+
+    if (routeState.status !== 'ready') {
+      window.alert('Esta actividad no tiene una ruta utilizable para la exportacion.');
+      return;
+    }
+
+    setIsExportingRunVideo(true);
+
+    try {
+      await exportRunRouteVideo({
+        run: selectedRun,
+        route: routeState.data,
+        athleteName: data.athlete.name,
+        providerLabel: data.provider.label,
+      });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'No se pudo generar el video de la actividad.');
+    } finally {
+      setIsExportingRunVideo(false);
     }
   };
   const scheduleWorkout = async (weekIndex: number, dayIndex: number) => {
@@ -3743,7 +4618,7 @@ function App() {
           <div className="panel-head">
             <div>
               <p className="eyebrow">Sesiones recientes</p>
-              <h2>Detalle de rodaje</h2>
+              <h2>Detalle de actividad</h2>
             </div>
             <span className="mini-status">
               {isRefreshing
@@ -3755,11 +4630,15 @@ function App() {
           {selectedRun ? (
             <div className="recent-layout">
               <aside className="run-spotlight">
-                <p className="eyebrow">Sesión elegida</p>
+                <div className="spotlight-heading">
+                  <p className="eyebrow">Actividad elegida</p>
+                  <span className="session-type-chip large">{selectedRun.activityLabel}</span>
+                </div>
                 <h3>{selectedRun.name}</h3>
                 <p className="run-spotlight-meta">
                   {selectedRun.date}
                   {selectedRun.timeLabel ? ` · ${selectedRun.timeLabel}` : ''}
+                  {selectedRun.activityLabel ? ` · ${selectedRun.activityLabel}` : ''}
                   {data.athlete.location ? ` · ${data.athlete.location}` : ''}
                 </p>
                 {routeState.status === 'ready' ? (
@@ -3805,7 +4684,7 @@ function App() {
                 <div className="spotlight-grid">
                   <article className="stat-pill">
                     <span className="metric-label">Distancia</span>
-                    <strong>{metricValue(selectedRun.distanceKm, ' km', 1)}</strong>
+                    <strong>{formatActivityDistance(selectedRun.distanceKm)}</strong>
                   </article>
                   <article className="stat-pill">
                     <span className="metric-label">Ritmo</span>
@@ -3823,19 +4702,19 @@ function App() {
                 <p className="spotlight-note">
                   {selectedRun.trainingEffect
                     ? `Training Effect ${selectedRun.trainingEffect.toFixed(1)}${selectedRun.trainingLoad ? ` · carga ${selectedRun.trainingLoad.toFixed(0)}` : ''}. Buena referencia para calibrar si la calidad está dejando el estímulo justo o demasiada fatiga.`
-                    : 'Sin Training Effect disponible. Usa esta sesión como referencia de sensaciones, ritmo y deriva cardíaca.'}
+                    : `Sin Training Effect disponible. Usa esta ${selectedRun.activityLabel.toLowerCase()} como referencia de sensaciones, ritmo y carga interna.`}
                 </p>
                 <div className="overlay-export-panel">
                   <div className="overlay-export-copy">
-                    <span className="metric-label">PNG glass sin fondo</span>
+                    <span className="metric-label">Exportes visuales</span>
                     <p>
-                      Exporta una tarjeta glass limpia con avatar, resumen y mapa, lista para montarla sobre tu foto.
+                      Genera la tarjeta PNG glass o un vídeo vertical con la ruta trazándose sobre mapa en relieve, con km y ritmo en marcha.
                     </p>
                   </div>
                   <div className="overlay-single-card" aria-label="Overlay activo">
-                    <span className="overlay-template-tag">{runOverlayTemplate.label}</span>
-                    <strong>{runOverlayTemplate.headline}</strong>
-                    <small>{runOverlayTemplate.description}</small>
+                    <span className="overlay-template-tag">GLASS + ROUTE VIDEO</span>
+                    <strong>{runOverlayTemplate.headline} + short vertical</strong>
+                    <small>PNG limpio para compartir y vídeo tipo reel con trazado progresivo, distancia y pace.</small>
                   </div>
                   <div className="spotlight-actions">
                     <button
@@ -3850,21 +4729,39 @@ function App() {
                           ? 'Cargando ruta...'
                           : 'Descargar PNG glass'}
                     </button>
+                    <button
+                      className="secondary-button"
+                      disabled={!canExportRunVideo || isExportingRunVideo || routeState.status === 'loading'}
+                      onClick={() => void exportSelectedRunVideo()}
+                      type="button"
+                    >
+                      {!canExportRunVideo
+                        ? 'Vídeo no disponible aquí'
+                        : isExportingRunVideo
+                          ? 'Generando vídeo...'
+                          : routeState.status === 'loading'
+                            ? 'Cargando ruta...'
+                            : 'Descargar vídeo ruta'}
+                    </button>
                   </div>
+                  <small className="overlay-export-note">
+                    El vídeo se exporta en WebM o MP4 según lo que soporte tu navegador.
+                  </small>
                 </div>
               </aside>
 
               <div className="run-list-panel">
-                <p className="eyebrow">Más sesiones</p>
+                <p className="eyebrow">Más actividades</p>
                 <div className="run-list">
-                  {data.recentRuns.map((run) => (
+                  {recentActivities.map((run) => (
                     <button
                       className={`run-row run-select ${selectedRun.id === run.id ? 'selected' : ''}`}
                       key={run.id}
                       onClick={() => setSelectedRunId(run.id)}
                       type="button"
                     >
-                      <div>
+                      <div className="run-row-main">
+                        <span className="session-type-chip">{run.activityLabel}</span>
                         <strong>{run.name}</strong>
                         <span>
                           {run.date}
@@ -3872,7 +4769,7 @@ function App() {
                         </span>
                       </div>
                       <div>
-                        <strong>{metricValue(run.distanceKm, ' km', 1)}</strong>
+                        <strong>{formatActivityDistance(run.distanceKm)}</strong>
                         <span>{formatDuration(run.durationSeconds)}</span>
                       </div>
                       <div>
@@ -3887,7 +4784,7 @@ function App() {
           ) : (
             <p className="chart-description">
               {data.provider.label} todavía no ha devuelto actividades recientes. En cuanto sincronice, aquí podrás
-              entrar a cada rodaje.
+              entrar a cada sesión.
             </p>
           )}
         </article>

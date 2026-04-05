@@ -163,11 +163,11 @@ export function ActivityRouteMap({
           />
 
           <Pane name="relief" style={{ zIndex: 250 }}>
-            <TileLayer attribution='&copy; Esri' className="route-map-hillshade" opacity={0.38} url={HILLSHADE_URL} />
+            <TileLayer attribution='&copy; Esri' className="route-map-hillshade" opacity={0.46} url={HILLSHADE_URL} />
           </Pane>
 
           <Pane name="labels" style={{ zIndex: 320 }}>
-            <TileLayer attribution='&copy; Esri' className="route-map-labels" opacity={0.18} url={LABELS_URL} />
+            <TileLayer attribution='&copy; Esri' className="route-map-labels" opacity={0.22} url={LABELS_URL} />
           </Pane>
 
           <Pane name="route-glow" style={{ zIndex: 410 }}>

@@ -1,37 +1,38 @@
 @import 'leaflet/dist/leaflet.css';
-@import url('https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 
 :root {
-  --bg: #14181f;
-  --bg-deep: #101012;
-  --panel: #1d2129;
-  --panel-strong: #20242d;
-  --surface: #282d36;
-  --surface-strong: #323842;
+  --bg: #121212;
+  --bg-deep: #0d0d0d;
+  --panel: #181818;
+  --panel-strong: #1f1f1f;
+  --surface: #232323;
+  --surface-strong: #2a2a2a;
   --surface-ghost: transparent;
-  --heading: #f9f6eb;
-  --text: rgba(249, 246, 235, 0.92);
-  --muted: rgba(245, 245, 245, 0.62);
-  --line: rgba(255, 255, 255, 0.09);
-  --line-strong: rgba(255, 255, 255, 0.18);
-  --accent: #3e94fd;
-  --accent-deep: #3078ff;
-  --accent-soft: rgba(62, 148, 253, 0.18);
-  --accent-warm: #ff5b4d;
-  --accent-warm-deep: #dc4339;
-  --accent-warm-soft: rgba(255, 91, 77, 0.18);
-  --blue: #3e94fd;
-  --blue-soft: rgba(48, 120, 255, 0.18);
-  --amber: #f2c33c;
-  --warning: #f2c33c;
-  --amber-soft: rgba(242, 195, 60, 0.14);
-  --danger: #df3e3e;
-  --danger-soft: rgba(223, 62, 62, 0.16);
-  --success: #3e94fd;
-  --shadow-soft: 0 28px 70px rgba(0, 0, 0, 0.42);
-  --sans: 'Red Hat Display', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-  --display: 'Red Hat Display', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-  --mono: 'Space Mono', ui-monospace, monospace;
+  --heading: #ffffff;
+  --text: rgba(255, 255, 255, 0.92);
+  --muted: #b3b3b3;
+  --line: rgba(255, 255, 255, 0.06);
+  --line-strong: #4d4d4d;
+  --accent: #539df5;
+  --accent-deep: #2f7de8;
+  --accent-soft: rgba(83, 157, 245, 0.16);
+  --accent-warm: #f25774;
+  --accent-warm-deep: #dc4763;
+  --accent-warm-soft: rgba(242, 87, 116, 0.16);
+  --blue: #539df5;
+  --blue-soft: rgba(83, 157, 245, 0.16);
+  --amber: #ffa42b;
+  --warning: #ffa42b;
+  --amber-soft: rgba(255, 164, 43, 0.14);
+  --danger: #f25774;
+  --danger-soft: rgba(242, 87, 116, 0.16);
+  --success: #539df5;
+  --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 8px 8px rgba(0, 0, 0, 0.3);
+  --inset-border: rgb(18 18 18) 0 1px 0, rgb(90 90 90 / 90%) 0 0 0 1px inset;
+  --sans: "SF Pro Text", "SF Pro Display", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --display: "SF Pro Display", "SF Pro Text", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "SF Pro Text", "SF Pro Display", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
 * {
@@ -41,6 +42,7 @@
 html {
   font-size: 16px;
   font-synthesis: none;
+  font-kerning: normal;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -52,14 +54,14 @@ body {
   margin: 0;
   color: var(--text);
   font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.47;
+  letter-spacing: -0.022em;
   background:
-    radial-gradient(circle at 14% 14%, rgba(255, 91, 77, 0.16), transparent 20%),
-    radial-gradient(circle at 72% 12%, rgba(48, 120, 255, 0.32), transparent 24%),
-    radial-gradient(circle at 84% 72%, rgba(255, 91, 77, 0.12), transparent 26%),
-    radial-gradient(circle at 68% 54%, rgba(62, 148, 253, 0.14), transparent 28%),
-    radial-gradient(circle at 42% 82%, rgba(242, 195, 60, 0.08), transparent 24%),
-    radial-gradient(circle at 18% 28%, rgba(8, 11, 20, 0.68), transparent 26%),
-    linear-gradient(180deg, #1a1e26 0%, #14181f 30%, #101012 100%);
+    radial-gradient(circle at 16% 12%, rgba(83, 157, 245, 0.12), transparent 18%),
+    radial-gradient(circle at 82% 14%, rgba(242, 87, 116, 0.1), transparent 20%),
+    radial-gradient(circle at 72% 76%, rgba(83, 157, 245, 0.08), transparent 22%),
+    linear-gradient(180deg, #161616 0%, #121212 26%, #0d0d0d 100%);
   min-height: 100vh;
   background-attachment: fixed;
   overflow-x: hidden;
@@ -76,31 +78,31 @@ body::after {
 
 body::before {
   inset: 0;
-  opacity: 0.28;
+  opacity: 0.18;
   background-image:
-    radial-gradient(rgba(255, 255, 255, 0.035) 0.6px, transparent 0.6px),
+    radial-gradient(rgba(255, 255, 255, 0.03) 0.55px, transparent 0.55px),
     radial-gradient(rgba(255, 255, 255, 0.02) 0.5px, transparent 0.5px);
-  background-size: 6px 6px, 14px 14px;
-  background-position: 0 0, 2px 3px;
+  background-size: 7px 7px, 18px 18px;
+  background-position: 0 0, 2px 4px;
 }
 
 body::after {
-  top: 8rem;
-  right: -6rem;
-  width: 24rem;
-  height: 24rem;
+  top: 6rem;
+  right: -8rem;
+  width: 26rem;
+  height: 26rem;
   border-radius: 999px;
-  filter: blur(90px);
-  opacity: 0.38;
+  filter: blur(110px);
+  opacity: 0.32;
   background:
-    radial-gradient(circle at 30% 35%, rgba(48, 120, 255, 0.24), transparent 42%),
-    radial-gradient(circle at 72% 62%, rgba(255, 91, 77, 0.18), transparent 44%);
+    radial-gradient(circle at 30% 35%, rgba(83, 157, 245, 0.22), transparent 42%),
+    radial-gradient(circle at 72% 62%, rgba(242, 87, 116, 0.16), transparent 44%);
 }
 
 #root {
   width: min(1880px, calc(100% - clamp(1rem, 1.9vw, 2.35rem)));
   margin: 0 auto;
-  padding: 1.2rem 0 3rem;
+  padding: 1rem 0 3rem;
 }
 
 h1,
@@ -118,38 +120,45 @@ h3 {
 
 h1 {
   font-family: var(--display);
-  font-size: clamp(3.1rem, 6vw, 5.2rem);
-  line-height: 0.92;
-  letter-spacing: -0.055em;
+  font-size: clamp(3rem, 5vw, 4.6rem);
+  line-height: 1.07;
+  letter-spacing: -0.28px;
   font-weight: 600;
 }
 
 h2 {
   font-family: var(--display);
-  font-size: clamp(1.45rem, 2.4vw, 2rem);
+  font-size: clamp(1.35rem, 2.2vw, 1.9rem);
   line-height: 1.1;
+  letter-spacing: -0.01em;
   font-weight: 600;
 }
 
 h3 {
-  font-size: 1rem;
-  line-height: 1.2;
+  font-family: var(--display);
+  font-size: 1.3125rem;
+  line-height: 1.19;
+  letter-spacing: 0.231px;
+  font-weight: 700;
 }
 
 .eyebrow {
-  font-size: 0.72rem;
-  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-family: var(--sans);
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: rgba(245, 245, 245, 0.45);
-  margin-bottom: 0.75rem;
+  letter-spacing: -0.12px;
+  line-height: 1.33;
+  color: rgba(255, 255, 255, 0.46);
+  margin-bottom: 0.65rem;
 }
 
 .lead {
   max-width: 68ch;
-  font-size: 0.98rem;
-  line-height: 1.55;
-  margin: 1rem 0 1.25rem;
+  font-size: 1.0625rem;
+  line-height: 1.47;
+  letter-spacing: -0.374px;
+  margin: 0.9rem 0 1.2rem;
 }
 
 button,
@@ -157,4 +166,5 @@ input,
 textarea,
 select {
   font: inherit;
+  letter-spacing: inherit;
 }

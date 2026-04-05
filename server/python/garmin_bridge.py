@@ -213,6 +213,12 @@ def call_tool(client: Garmin, name: str, args: dict[str, Any]) -> Any:
         return client.get_body_composition(args["startDate"], args["endDate"])
     if name == "get_activity_details":
         return client.get_activity_details(args["activityId"])
+    if name == "get_activity_splits":
+        return client.get_activity_splits(args["activityId"])
+    if name == "get_activity_split_summaries":
+        return client.get_activity_split_summaries(args["activityId"])
+    if name == "get_activity_typed_splits":
+        return client.get_activity_typed_splits(args["activityId"])
     if name == "upload_workout":
         return client.upload_workout(args["workout"])
     if name == "schedule_workout":

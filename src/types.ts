@@ -1,3 +1,22 @@
+export type DashboardActivitySummary = {
+  id: number;
+  name: string;
+  date: string;
+  timeLabel: string | null;
+  sortKey: string;
+  distanceKm: number;
+  durationSeconds: number;
+  paceSecondsPerKm: number | null;
+  averageHeartRate: number | null;
+  elevationGain: number | null;
+  trainingEffect: number | null;
+  trainingLoad: number | null;
+  workoutId: number | null;
+  activityKey: string;
+  activityLabel: string;
+  isRunLike: boolean;
+};
+
 export type DashboardData = {
   provider: {
     key: 'garmin' | 'strava';
@@ -56,20 +75,8 @@ export type DashboardData = {
     label: string;
     value: number | null;
   }>;
-  recentRuns: Array<{
-    id: number;
-    name: string;
-    date: string;
-    timeLabel: string | null;
-    distanceKm: number;
-    durationSeconds: number;
-    paceSecondsPerKm: number | null;
-    averageHeartRate: number | null;
-    elevationGain: number | null;
-    trainingEffect: number | null;
-    trainingLoad: number | null;
-    workoutId: number | null;
-  }>;
+  recentActivities: DashboardActivitySummary[];
+  recentRuns: DashboardActivitySummary[];
   fitnessSummary: {
     title: string;
     body: string;
