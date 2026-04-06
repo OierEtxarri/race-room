@@ -2,13 +2,15 @@ import { useEffect } from 'react';
 import { CircleMarker, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet';
 import { latLngBounds, type LatLngTuple } from 'leaflet';
 import type { ActivityRoute } from '../types';
-
-const SATELLITE_URL =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-const HILLSHADE_URL =
-  'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}';
-const LABELS_URL =
-  'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+import {
+  SATELLITE_TILE_URL,
+  HILLSHADE_TILE_URL,
+  LABELS_TILE_URL,
+  PACE_COLORS,
+  ROUTE_LINE_STYLES,
+  ROUTE_MARKERS,
+  MAP_LAYER_OPACITIES,
+} from '../mapStyle';
 
 function FitRouteBounds({ points, isActive }: { points: LatLngTuple[]; isActive?: boolean }) {
   const map = useMap();
@@ -121,18 +123,18 @@ function paceThresholds(route: ActivityRoute) {
 
 function paceColor(paceSecondsPerKm: number | null, thresholds: ReturnType<typeof paceThresholds>) {
   if (paceSecondsPerKm === null || !thresholds?.fast || !thresholds.medium) {
-    return '#7fc5ff';
+    return PACE_COLORS.default;
   }
 
   if (paceSecondsPerKm <= thresholds.fast) {
-    return '#df3e3e';
+    return PACE_COLORS.fast;
   }
 
   if (paceSecondsPerKm <= thresholds.medium) {
-    return '#f2a43c';
+    return PACE_COLORS.medium;
   }
 
-  return '#5daeff';
+  return PACE_COLORS.slow;
 }
 
 function buildRouteSegments(route: ActivityRoute) {
@@ -206,16 +208,16 @@ export function ActivityRouteMap({
           <TileLayer
             attribution='&copy; Esri'
             className="route-map-satellite"
-            url={SATELLITE_URL}
+            url={SATELLITE_TILE_URL}
             crossOrigin="anonymous"
           />
 
           <Pane name="relief" style={{ zIndex: 250 }}>
-            <TileLayer pane="relief" attribution='&copy; Esri' className="route-map-hillshade" opacity={0.46} url={HILLSHADE_URL} crossOrigin="anonymous" />
+            <TileLayer pane="relief" attribution='&copy; Esri' className="route-map-hillshade" opacity={MAP_LAYER_OPACITIES.hillshade} url={HILLSHADE_TILE_URL} crossOrigin="anonymous" />
           </Pane>
 
           <Pane name="labels" style={{ zIndex: 320 }}>
-            <TileLayer pane="labels" attribution='&copy; Esri' className="route-map-labels" opacity={0.22} url={LABELS_URL} crossOrigin="anonymous" />
+            <TileLayer pane="labels" attribution='&copy; Esri' className="route-map-labels" opacity={MAP_LAYER_OPACITIES.labels} url={LABELS_TILE_URL} crossOrigin="anonymous" />
           </Pane>
 
           <Pane name="route-glow" style={{ zIndex: 410 }}>
@@ -227,8 +229,8 @@ export function ActivityRouteMap({
                   color: segment.color,
                   lineCap: 'round',
                   lineJoin: 'round',
-                  opacity: 0.28,
-                  weight: 14,
+                  opacity: ROUTE_LINE_STYLES.glow.opacity,
+                  weight: ROUTE_LINE_STYLES.glow.width,
                 }}
                 positions={segment.positions}
               />
@@ -239,11 +241,11 @@ export function ActivityRouteMap({
             <Polyline
               pathOptions={{
                 className: 'route-line route-line-shadow',
-                color: 'rgba(10, 16, 24, 0.74)',
+                color: ROUTE_LINE_STYLES.shadow.color,
                 lineCap: 'round',
                 lineJoin: 'round',
-                opacity: 0.75,
-                weight: 12,
+                opacity: ROUTE_LINE_STYLES.shadow.opacity,
+                weight: ROUTE_LINE_STYLES.shadow.width,
               }}
               positions={points}
             />
@@ -258,8 +260,8 @@ export function ActivityRouteMap({
                   color: segment.color,
                   lineCap: 'round',
                   lineJoin: 'round',
-                  opacity: 0.96,
-                  weight: 6,
+                  opacity: ROUTE_LINE_STYLES.main.opacity,
+                  weight: ROUTE_LINE_STYLES.main.width,
                 }}
                 positions={segment.positions}
               />
@@ -269,8 +271,8 @@ export function ActivityRouteMap({
           {marks.start ? (
             <CircleMarker
               center={marks.start}
-              pathOptions={{ className: 'route-marker route-marker-start', color: '#ffffff', fillColor: '#ffffff', fillOpacity: 1, weight: 3, opacity: 1 }}
-              radius={7}
+              pathOptions={{ className: 'route-marker route-marker-start', color: ROUTE_MARKERS.start.color, fillColor: ROUTE_MARKERS.start.color, fillOpacity: 1, weight: 3, opacity: 1 }}
+              radius={ROUTE_MARKERS.start.radius}
             >
               <Tooltip direction="top" offset={[0, -8]} opacity={0.96} permanent={false} sticky>
                 Inicio
@@ -281,8 +283,8 @@ export function ActivityRouteMap({
           {marks.finish ? (
             <CircleMarker
               center={marks.finish}
-              pathOptions={{ className: 'route-marker route-marker-finish', color: '#ff6d6d', fillColor: '#ff6d6d', fillOpacity: 1, weight: 3, opacity: 1 }}
-              radius={7}
+              pathOptions={{ className: 'route-marker route-marker-finish', color: ROUTE_MARKERS.finish.color, fillColor: ROUTE_MARKERS.finish.color, fillOpacity: 1, weight: 3, opacity: 1 }}
+              radius={ROUTE_MARKERS.finish.radius}
             >
               <Tooltip direction="top" offset={[0, -8]} opacity={0.96} permanent={false} sticky>
                 Fin

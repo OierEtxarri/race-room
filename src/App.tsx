@@ -29,6 +29,19 @@ import type {
   UserGoal,
   WhatIfScenario,
 } from './types';
+import {
+  SATELLITE_TILE_URL,
+  HILLSHADE_TILE_URL,
+  LABELS_TILE_URL,
+  PACE_COLORS,
+  ROUTE_LINE_STYLES,
+  ROUTE_MARKERS,
+  MAP_LAYER_OPACITIES,
+  TILE_SIZE,
+  VIDEO_TILE_ZOOM,
+  VIDEO_LAYOUT,
+  VIDEO_PHASES,
+} from './mapStyle';
 import './App.css';
 
 type AsyncState =
@@ -249,33 +262,11 @@ const routeVideoFormatCandidates: VideoExportFormat[] = [
   },
 ];
 
-type MapStyleConfig = {
-  satelliteUrl: string;
-  hillshadeUrl: string;
-  labelsUrl: string;
-  hillshadeOpacity: number;
-  labelOpacity: number;
-  backgroundColor: string;
-};
+// MapStyleConfig moved to src/mapStyle.ts (shared source of truth)
+// See: SATELLITE_TILE_URL, HILLSHADE_TILE_URL, LABELS_TILE_URL, MAP_LAYER_OPACITIES
 
-const sharedMapStyleConfig: MapStyleConfig = {
-  satelliteUrl: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  hillshadeUrl: 'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
-  labelsUrl: 'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-  hillshadeOpacity: 0.46,
-  labelOpacity: 0.22,
-  backgroundColor: '#0A1015',
-};
-
-type VideoCameraPhase = 'overview' | 'transition' | 'runnerCam' | 'end';
-
-type VideoCamera = {
-  centerX: number;
-  centerY: number;
-  zoom: number;
-  headingRadians: number;
-  phase: VideoCameraPhase;
-};
+// Removed: VideoCameraPhase, VideoCamera types (old phase-based camera model)
+// Replaced by inline camera resolution in exportRunRouteVideo
 
 function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') {
@@ -899,13 +890,9 @@ async function resolveAthleteAvatarAsset(avatarPath: string | null, sessionId: s
   }
 }
 
-const staticTileSize = 256;
-const staticSatelliteTileUrl =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-const staticHillshadeTileUrl =
-  'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}';
-const staticLabelsTileUrl =
-  'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+const staticTileSize = TILE_SIZE;
+// Tile URLs are now imported from mapStyle.ts (shared with ActivityRouteMap.tsx)
+// See: SATELLITE_TILE_URL, HILLSHADE_TILE_URL, LABELS_TILE_URL
 const staticTileCache = new Map<string, Promise<HTMLImageElement | null>>();
 
 function paceThresholds(route: ActivityRoute) {
@@ -940,18 +927,18 @@ function routeMedianPace(route: ActivityRoute) {
 
 function paceColor(paceSecondsPerKm: number | null, thresholds: ReturnType<typeof paceThresholds>) {
   if (paceSecondsPerKm === null || !thresholds?.fast || !thresholds.medium) {
-    return '#7FC5FF';
+    return PACE_COLORS.default;
   }
 
   if (paceSecondsPerKm <= thresholds.fast) {
-    return '#DF3E3E';
+    return PACE_COLORS.fast;
   }
 
   if (paceSecondsPerKm <= thresholds.medium) {
-    return '#F2A43C';
+    return PACE_COLORS.medium;
   }
 
-  return '#5DAEFF';
+  return PACE_COLORS.slow;
 }
 
 function mercatorPixel(lat: number, lng: number, zoom: number) {
@@ -1137,9 +1124,9 @@ async function prepareStaticRouteMap(
 
       tileJobs.push(
         Promise.all([
-          loadRemoteImageAsset(replace(staticSatelliteTileUrl)),
-          loadRemoteImageAsset(replace(staticHillshadeTileUrl)),
-          loadRemoteImageAsset(replace(staticLabelsTileUrl)),
+          loadRemoteImageAsset(replace(SATELLITE_TILE_URL)),
+          loadRemoteImageAsset(replace(HILLSHADE_TILE_URL)),
+          loadRemoteImageAsset(replace(LABELS_TILE_URL)),
         ]).then(([image, hillshade, labels]) => ({
           image,
           hillshade,
@@ -1255,74 +1242,8 @@ async function prepareStaticRouteMap(
   } satisfies PreparedStaticRouteMap;
 }
 
-function interpolateAnimatedPoint(prepared: PreparedStaticRouteMap, progress: number): AnimatedRoutePoint | null {
-  const clampedProgress = clampNumber(progress, 0, 1);
-  const firstPoint = prepared.animatedPoints[0] ?? null;
-
-  if (!firstPoint) {
-    return null;
-  }
-
-  if (clampedProgress <= 0 || prepared.animatedSegments.length === 0) {
-    return {
-      ...firstPoint,
-      progress: clampedProgress,
-    };
-  }
-
-  for (const segment of prepared.animatedSegments) {
-    if (clampedProgress <= segment.start.progress) {
-      return {
-        ...segment.start,
-        progress: clampedProgress,
-      };
-    }
-
-    const span = Math.max(segment.end.progress - segment.start.progress, 0.0001);
-    const localProgress = clampNumber((clampedProgress - segment.start.progress) / span, 0, 1);
-
-    if (localProgress < 1) {
-      return {
-        x: lerpNumber(segment.start.x, segment.end.x, localProgress),
-        y: lerpNumber(segment.start.y, segment.end.y, localProgress),
-        progress: clampedProgress,
-        distanceKm: lerpNumber(segment.start.distanceKm, segment.end.distanceKm, localProgress),
-        elapsedSeconds: Math.round(lerpNumber(segment.start.elapsedSeconds, segment.end.elapsedSeconds, localProgress)),
-        paceSecondsPerKm: segment.end.paceSecondsPerKm ?? segment.start.paceSecondsPerKm,
-      };
-    }
-  }
-
-  const lastPoint = prepared.animatedPoints.at(-1) ?? firstPoint;
-  return {
-    ...lastPoint,
-    progress: clampedProgress,
-  };
-}
-
-// function resolveSmoothedHeadingRadians(prepared: PreparedStaticRouteMap, progress: number) {
-//   const lookBehind = interpolateAnimatedPoint(prepared, progress - 0.016);
-//   const lookAhead = interpolateAnimatedPoint(prepared, progress + 0.028);
-
-//   if (lookBehind && lookAhead) {
-//     const dx = lookAhead.x - lookBehind.x;
-//     const dy = lookAhead.y - lookBehind.y;
-//     if (Math.hypot(dx, dy) > 0.1) {
-//       return Math.atan2(dy, dx);
-//     }
-//   }
-
-//   const segment =
-//     prepared.animatedSegments.find((candidate) => progress <= candidate.end.progress)
-//     ?? prepared.animatedSegments.at(-1)
-//     ?? null;
-
-//   if (segment) {
-//     return Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
-//   }
-
-//   return -Math.PI / 2;
-// }
+// Removed: interpolateAnimatedPoint (old snapshot-based animation)
+// Replaced by per-frame interpolation in new world pixel space renderer
 
 function drawAnimatedRouteProgress(
   context: CanvasRenderingContext2D,
@@ -1487,6 +1408,10 @@ function drawPreparedStaticRouteMapCard(
   });
 }
 
+// Removed: drawVideoMapLayer (old snapshot-based rendering)
+// Replaced by new frame-by-frame rendering using drawBaseMapForCamera + drawFullRouteOverview/drawRouteProgressFrame
+
+/*
 function drawVideoMapLayer(
   context: CanvasRenderingContext2D,
   prepared: PreparedStaticRouteMap,
@@ -1557,6 +1482,655 @@ function drawVideoMapLayer(
     stroke: 'rgba(255,255,255,0.08)',
     lineWidth: 1.5,
   });
+}
+*/
+
+// ==============================================================================
+// NEW VIDEO PIPELINE: World Pixel Space Rendering
+// Designed to render frame-by-frame without pre-cooking a giant mapSurface
+// ==============================================================================
+
+/**
+ * Playback state for a given progress through the video
+ * Includes position, pace, elapsed time, and completion percentage
+ */
+type PlaybackState = {
+  progress: number;
+  x: number;
+  y: number;
+  distanceKm: number;
+  elapsedSeconds: number;
+  paceSecondsPerKm: number | null;
+  segmentHeading: number;
+};
+
+// VisibleTile type removed (not used in final implementation)
+
+/**
+ * World rectangle for determining visible tiles
+ */
+type WorldRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+/**
+ * Build playback samples from route points
+ * Creates a time-indexed map of route progress for smooth interpolation
+ */
+function buildPlaybackSamples(route: ActivityRoute): PlaybackState[] {
+  const animationSource =
+    route.samples.length >= 2
+      ? route.samples
+      : route.points.map((point) => ({
+        point,
+        paceSecondsPerKm: null,
+        timestampSeconds: null,
+      }));
+
+  const medianPaceSecondsPerKm = routeMedianPace(route) ?? 360;
+  const samples: PlaybackState[] = [];
+
+  let cumulativeDistanceKm = 0;
+  let cumulativeElapsedSeconds = 0;
+
+  for (let index = 0; index < animationSource.length; index += 1) {
+    const sample = animationSource[index]!;
+
+    if (index > 0) {
+      const previousSample = animationSource[index - 1]!;
+      const segmentDistanceKm = distanceBetweenGeoPointsKm(previousSample.point, sample.point);
+      cumulativeDistanceKm += segmentDistanceKm;
+
+      const timestampDurationSeconds =
+        sample.timestampSeconds !== null &&
+        previousSample.timestampSeconds !== null &&
+        sample.timestampSeconds > previousSample.timestampSeconds
+          ? sample.timestampSeconds - previousSample.timestampSeconds
+          : null;
+
+      const paceCandidateSecondsPerKm =
+        sample.paceSecondsPerKm ?? previousSample.paceSecondsPerKm ?? medianPaceSecondsPerKm;
+      const paceDurationSeconds =
+        paceCandidateSecondsPerKm && segmentDistanceKm > 0
+          ? paceCandidateSecondsPerKm * segmentDistanceKm
+          : null;
+
+      let segmentElapsedSeconds = timestampDurationSeconds ?? paceDurationSeconds ?? segmentDistanceKm * medianPaceSecondsPerKm;
+
+      if (
+        timestampDurationSeconds !== null &&
+        paceDurationSeconds !== null &&
+        timestampDurationSeconds > paceDurationSeconds * 3
+      ) {
+        segmentElapsedSeconds = paceDurationSeconds;
+      }
+
+      cumulativeElapsedSeconds += Math.max(segmentElapsedSeconds, 0.35);
+    }
+
+    // Compute heading from segment
+    let segmentHeading = 0;
+    if (index > 0) {
+      const prev = animationSource[index - 1]!;
+      const curr = sample;
+      const [lat1, lng1] = prev.point;
+      const [lat2, lng2] = curr.point;
+      const latDiff = lat2 - lat1;
+      const lngDiff = lng2 - lng1;
+      segmentHeading = Math.atan2(lngDiff, latDiff);
+    }
+
+    samples.push({
+      progress: 0, // Will be filled in second pass
+      x: 0,        // Will be filled with world pixel, depends on zoom
+      y: 0,        // Will be filled with world pixel, depends on zoom
+      distanceKm: cumulativeDistanceKm,
+      elapsedSeconds: cumulativeElapsedSeconds,
+      paceSecondsPerKm: sample.paceSecondsPerKm,
+      segmentHeading,
+    });
+  }
+
+  // Second pass: normalize progress
+  const totalElapsedSeconds = samples.at(-1)?.elapsedSeconds ?? 0;
+  samples.forEach((sample, index) => {
+    sample.progress =
+      totalElapsedSeconds > 0
+        ? sample.elapsedSeconds / totalElapsedSeconds
+        : samples.length <= 1
+          ? 1
+          : index / (samples.length - 1);
+  });
+
+  return samples;
+}
+
+/**
+ * Interpolate playback state for a given progress (0-1)
+ * Uses linear interpolation between nearest samples
+ */
+function interpolatePlaybackState(samples: PlaybackState[], progress: number): PlaybackState {
+  const clampedProgress = clampNumber(progress, 0, 1);
+  const firstSample = samples[0];
+  const lastSample = samples.at(-1);
+
+  if (!firstSample || !lastSample) {
+    // Fallback for empty route
+    return {
+      progress: clampedProgress,
+      x: 0,
+      y: 0,
+      distanceKm: 0,
+      elapsedSeconds: 0,
+      paceSecondsPerKm: null,
+      segmentHeading: 0,
+    };
+  }
+
+  if (clampedProgress <= firstSample.progress) {
+    return { ...firstSample, progress: clampedProgress };
+  }
+
+  if (clampedProgress >= lastSample.progress) {
+    return { ...lastSample, progress: clampedProgress };
+  }
+
+  // Binary search for surrounding samples
+  let left = 0;
+  let right = samples.length - 1;
+
+  while (left < right - 1) {
+    const mid = Math.floor((left + right) / 2);
+    if (samples[mid]!.progress <= clampedProgress) {
+      left = mid;
+    } else {
+      right = mid;
+    }
+  }
+
+  const sample1 = samples[left]!;
+  const sample2 = samples[right]!;
+  const span = Math.max(sample2.progress - sample1.progress, 0.0001);
+  const t = (clampedProgress - sample1.progress) / span;
+
+  return {
+    progress: clampedProgress,
+    x: lerpNumber(sample1.x, sample2.x, t),
+    y: lerpNumber(sample1.y, sample2.y, t),
+    distanceKm: lerpNumber(sample1.distanceKm, sample2.distanceKm, t),
+    elapsedSeconds: Math.round(lerpNumber(sample1.elapsedSeconds, sample2.elapsedSeconds, t)),
+    paceSecondsPerKm: sample2.paceSecondsPerKm ?? sample1.paceSecondsPerKm,
+    segmentHeading: sample1.segmentHeading,
+  };
+}
+
+/**
+ * Calculate smoothed heading using look-ahead and look-behind
+ * Provides smooth directional changes in follow cam
+ */
+function resolveSmoothedHeadingRadians(samples: PlaybackState[], progress: number): number {
+  const behindProgress = Math.max(0, progress - 0.012);
+  const aheadProgress = Math.min(1, progress + 0.024);
+
+  const behindPoint = interpolatePlaybackState(samples, behindProgress);
+  const aheadPoint = interpolatePlaybackState(samples, aheadProgress);
+
+  const dx = aheadPoint.x - behindPoint.x;
+  const dy = aheadPoint.y - behindPoint.y;
+  const distSquared = dx * dx + dy * dy;
+
+  if (distSquared < 1) {
+    // Vector too short, use segment heading as fallback
+    return aheadPoint.segmentHeading;
+  }
+
+  return Math.atan2(dy, dx);
+}
+
+// Overview camera and follow camera logic moved inline to exportRunRouteVideo
+
+/**
+ * Interpolate between two camera states with easing (Hermite)
+ */
+function interpolateCamera(
+  cameraA: { centerX: number; centerY: number; zoom: number; heading: number; tilt: number },
+  cameraB: { centerX: number; centerY: number; zoom: number; heading: number; tilt: number },
+  t: number,
+) {
+  const eased = t * t * (3 - 2 * t); // Hermite easing
+
+  return {
+    centerX: lerpNumber(cameraA.centerX, cameraB.centerX, eased),
+    centerY: lerpNumber(cameraA.centerY, cameraB.centerY, eased),
+    zoom: lerpNumber(cameraA.zoom, cameraB.zoom, eased),
+    heading: lerpNumber(cameraA.heading, cameraB.heading, eased),
+    tilt: lerpNumber(cameraA.tilt, cameraB.tilt, eased),
+  };
+}
+
+/**
+ * Compute visible world rectangle given camera and card dimensions
+ */
+function computeVisibleWorldRect(
+  camera: { centerX: number; centerY: number; zoom: number },
+  cardWidth: number,
+  cardHeight: number,
+): WorldRect {
+  const zoomScale = Math.pow(2, camera.zoom);
+
+  return {
+    x: camera.centerX - cardWidth / (2 * zoomScale),
+    y: camera.centerY - cardHeight / (2 * zoomScale),
+    width: cardWidth / zoomScale,
+    height: cardHeight / zoomScale,
+  };
+}
+
+/**
+ * Resolve which tiles are visible in the world rect
+ * Returns array of tile coordinates that need to be fetched/rendered
+ */
+function resolveVisibleTiles(worldRect: WorldRect, tileZoom: number): Array<{ z: number; x: number; y: number }> {
+  const tileSize = TILE_SIZE;
+  const startTileX = Math.floor(worldRect.x / tileSize);
+  const endTileX = Math.floor((worldRect.x + worldRect.width) / tileSize);
+  const startTileY = Math.floor(worldRect.y / tileSize);
+  const endTileY = Math.floor((worldRect.y + worldRect.height) / tileSize);
+  const worldTileCount = 2 ** tileZoom;
+
+  const tiles: Array<{ z: number; x: number; y: number }> = [];
+
+  for (let tileY = startTileY; tileY <= endTileY; tileY += 1) {
+    if (tileY < 0 || tileY >= worldTileCount) {
+      continue;
+    }
+
+    for (let tileX = startTileX; tileX <= endTileX; tileX += 1) {
+      const wrappedX = ((tileX % worldTileCount) + worldTileCount) % worldTileCount;
+      tiles.push({ z: tileZoom, x: wrappedX, y: tileY });
+    }
+  }
+
+  return tiles;
+}
+
+/**
+ * Render base map layer (satellite with hillshade and labels)
+ * Maps world pixels to canvas coordinates using camera transform
+ */
+async function drawBaseMapForCamera(
+  context: CanvasRenderingContext2D,
+  tileCoords: Array<{ z: number; x: number; y: number }>,
+  camera: { centerX: number; centerY: number; zoom: number; heading: number },
+  cardX: number,
+  cardY: number,
+  cardWidth: number,
+  cardHeight: number,
+) {
+  const tileSize = TILE_SIZE;
+  const zoomScale = Math.pow(2, camera.zoom);
+  const anchorX = cardX + cardWidth / 2;
+  const anchorY = cardY + cardHeight / 2;
+
+  context.save();
+  context.translate(anchorX, anchorY);
+  context.rotate(camera.heading);
+  context.scale(zoomScale, zoomScale);
+  context.translate(-camera.centerX, -camera.centerY);
+
+  // Fetch and render tiles
+  for (const tileCoord of tileCoords) {
+    const tileX = tileCoord.x * tileSize;
+    const tileY = tileCoord.y * tileSize;
+
+    // Fetch and render satellite
+    const satUrl = SATELLITE_TILE_URL.replace('{z}', String(tileCoord.z))
+      .replace('{x}', String(tileCoord.x))
+      .replace('{y}', String(tileCoord.y));
+    const satellite = await loadRemoteImageAsset(satUrl);
+
+    if (satellite) {
+      context.drawImage(satellite, tileX, tileY, tileSize, tileSize);
+    }
+
+    // Fetch and render hillshade
+    const hillUrl = HILLSHADE_TILE_URL.replace('{z}', String(tileCoord.z))
+      .replace('{x}', String(tileCoord.x))
+      .replace('{y}', String(tileCoord.y));
+    const hillshade = await loadRemoteImageAsset(hillUrl);
+
+    if (hillshade) {
+      context.globalAlpha = MAP_LAYER_OPACITIES.hillshade;
+      context.drawImage(hillshade, tileX, tileY, tileSize, tileSize);
+      context.globalAlpha = 1;
+    }
+
+    // Fetch and render labels
+    const labelsUrl = LABELS_TILE_URL.replace('{z}', String(tileCoord.z))
+      .replace('{x}', String(tileCoord.x))
+      .replace('{y}', String(tileCoord.y));
+    const labels = await loadRemoteImageAsset(labelsUrl);
+
+    if (labels) {
+      context.globalAlpha = MAP_LAYER_OPACITIES.labels;
+      context.drawImage(labels, tileX, tileY, tileSize, tileSize);
+      context.globalAlpha = 1;
+    }
+  }
+
+  context.restore();
+}
+
+/**
+ * Draw full route overview (all segments visible, colored by pace)
+ */
+function drawFullRouteOverview(
+  context: CanvasRenderingContext2D,
+  projectedPoints: Array<[number, number]>,
+  animatedSegments: Array<{ start: [number, number]; end: [number, number]; color: string }>,
+  cardX: number,
+  cardY: number,
+  cardWidth: number,
+  cardHeight: number,
+) {
+  context.save();
+  context.translate(cardX + cardWidth / 2, cardY + cardHeight / 2);
+
+  // Draw shadow
+  context.strokeStyle = ROUTE_LINE_STYLES.shadow.color;
+  context.lineWidth = ROUTE_LINE_STYLES.shadow.width;
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.globalAlpha = ROUTE_LINE_STYLES.shadow.opacity;
+  context.beginPath();
+  projectedPoints.forEach(([x, y], idx) => {
+    if (idx === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.stroke();
+
+  // Draw glow
+  context.globalAlpha = ROUTE_LINE_STYLES.glow.opacity;
+  animatedSegments.forEach((segment) => {
+    context.strokeStyle = segment.color;
+    context.lineWidth = ROUTE_LINE_STYLES.glow.width;
+    context.beginPath();
+    context.moveTo(segment.start[0], segment.start[1]);
+    context.lineTo(segment.end[0], segment.end[1]);
+    context.stroke();
+  });
+
+  // Draw main line
+  context.globalAlpha = ROUTE_LINE_STYLES.main.opacity;
+  animatedSegments.forEach((segment) => {
+    context.strokeStyle = segment.color;
+    context.lineWidth = ROUTE_LINE_STYLES.main.width;
+    context.beginPath();
+    context.moveTo(segment.start[0], segment.start[1]);
+    context.lineTo(segment.end[0], segment.end[1]);
+    context.stroke();
+  });
+
+  // Draw start marker
+  context.globalAlpha = 1;
+  context.fillStyle = ROUTE_MARKERS.start.color;
+  context.beginPath();
+  context.arc(projectedPoints[0]![0], projectedPoints[0]![1], ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
+  context.fill();
+
+  // Draw finish marker
+  context.fillStyle = ROUTE_MARKERS.finish.color;
+  context.beginPath();
+  context.arc(projectedPoints.at(-1)![0], projectedPoints.at(-1)![1], ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
+  context.fill();
+
+  context.restore();
+}
+
+/**
+ * Draw route progress (completed segment + current position)
+ */
+function drawRouteProgressFrame(
+  context: CanvasRenderingContext2D,
+  playbackState: PlaybackState,
+  projectedPoints: Array<[number, number]>,
+  animatedSegments: Array<{ start: [number, number]; end: [number, number]; color: string }>,
+  progression: number,
+  cardX: number,
+  cardY: number,
+  cardWidth: number,
+  cardHeight: number,
+) {
+  context.save();
+  context.translate(cardX + cardWidth / 2, cardY + cardHeight / 2);
+
+  // Draw completed route
+  context.strokeStyle = ROUTE_LINE_STYLES.shadow.color;
+  context.lineWidth = ROUTE_LINE_STYLES.shadow.width;
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.globalAlpha = ROUTE_LINE_STYLES.shadow.opacity;
+  context.beginPath();
+  projectedPoints.slice(0, Math.ceil(projectedPoints.length * progression) + 1).forEach(([x, y], idx) => {
+    if (idx === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.stroke();
+
+  // Draw glow for completed segments
+  context.globalAlpha = ROUTE_LINE_STYLES.glow.opacity;
+  animatedSegments.forEach((segment) => {
+    context.strokeStyle = segment.color;
+    context.lineWidth = ROUTE_LINE_STYLES.glow.width;
+    context.beginPath();
+    context.moveTo(segment.start[0], segment.start[1]);
+    context.lineTo(segment.end[0], segment.end[1]);
+    context.stroke();
+  });
+
+  // Draw main line for completed
+  context.globalAlpha = ROUTE_LINE_STYLES.main.opacity;
+  animatedSegments.forEach((segment) => {
+    context.strokeStyle = segment.color;
+    context.lineWidth = ROUTE_LINE_STYLES.main.width;
+    context.beginPath();
+    context.moveTo(segment.start[0], segment.start[1]);
+    context.lineTo(segment.end[0], segment.end[1]);
+    context.stroke();
+  });
+
+  // Draw start marker
+  context.globalAlpha = 1;
+  context.fillStyle = ROUTE_MARKERS.start.color;
+  context.beginPath();
+  context.arc(projectedPoints[0]![0], projectedPoints[0]![1], ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
+  context.fill();
+
+  // Draw finish marker
+  context.fillStyle = ROUTE_MARKERS.finish.color;
+  context.beginPath();
+  context.arc(projectedPoints.at(-1)![0], projectedPoints.at(-1)![1], ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
+  context.fill();
+
+  // Draw active position marker
+  context.fillStyle = '#00F0FF';
+  context.globalAlpha = 0.8;
+  context.beginPath();
+  context.arc(playbackState.x, playbackState.y, 6, 0, Math.PI * 2);
+  context.fill();
+
+  context.restore();
+}
+
+/**
+ * Draw video overlay (header, metrics, progress bar)
+ */
+function drawVideoOverlay(
+  context: CanvasRenderingContext2D,
+  layout: typeof VIDEO_LAYOUT,
+  playbackState: PlaybackState,
+  run: DashboardData['recentRuns'][number],
+  athleteName: string,
+  providerLabel: string,
+) {
+  const width = context.canvas.width;
+  const height = context.canvas.height;
+  const paceLabel = playbackState.paceSecondsPerKm !== null
+    ? formatPace(playbackState.paceSecondsPerKm)
+    : formatPace(run.paceSecondsPerKm);
+  const completion = clampNumber(run.distanceKm > 0 ? playbackState.distanceKm / run.distanceKm : playbackState.progress, 0, 1);
+
+  // Background gradient
+  const background = context.createLinearGradient(0, 0, 0, height);
+  background.addColorStop(0, '#171717');
+  background.addColorStop(0.36, '#122');
+  background.addColorStop(1, '#0d0d0d');
+  context.fillStyle = background;
+  context.fillRect(0, 0, width, height);
+
+  // Top glow
+  const topGlow = context.createRadialGradient(width * 0.86, height * 0.14, 0, width * 0.86, height * 0.14, width * 0.72);
+  topGlow.addColorStop(0, 'rgba(83,157,245,0.18)');
+  topGlow.addColorStop(1, 'rgba(83,157,245,0)');
+  context.fillStyle = topGlow;
+  context.fillRect(0, 0, width, height);
+
+  // Side glow
+  const sideGlow = context.createRadialGradient(width * 0.18, height * 0.84, 0, width * 0.18, height * 0.84, width * 0.64);
+  sideGlow.addColorStop(0, 'rgba(242,87,116,0.12)');
+  sideGlow.addColorStop(1, 'rgba(242,87,116,0)');
+  context.fillStyle = sideGlow;
+  context.fillRect(0, 0, width, height);
+
+  // Header panel
+  fillRoundedPanel(context, layout.header.x, layout.header.y, layout.header.w, layout.header.h, {
+    radius: 30,
+    fill: 'rgba(24,24,24,0.92)',
+    stroke: 'rgba(255,255,255,0.04)',
+    lineWidth: 1.2,
+  });
+
+  // Badge
+  context.save();
+  context.beginPath();
+  context.arc(layout.header.x + 42, layout.header.y + 48, 22, 0, Math.PI * 2);
+  const badgeGradient = context.createLinearGradient(
+    layout.header.x + 20, layout.header.y + 26,
+    layout.header.x + 64, layout.header.y + 70
+  );
+  badgeGradient.addColorStop(0, '#539df5');
+  badgeGradient.addColorStop(0.58, '#2f7de8');
+  badgeGradient.addColorStop(1, '#f25774');
+  context.fillStyle = badgeGradient;
+  context.fill();
+  context.restore();
+
+  context.fillStyle = '#FFFFFF';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.font = canvasTextFont(17, 600);
+  context.fillText('RR', layout.header.x + 42, layout.header.y + 50);
+  context.textAlign = 'left';
+  context.textBaseline = 'alphabetic';
+
+  // Pills
+  drawOverlayPill(context, layout.header.x + 76, layout.header.y + 24, 'SESSION SHORT', {
+    fill: 'rgba(255,255,255,0.035)',
+    stroke: 'rgba(255,255,255,0.08)',
+    textColor: 'rgba(255,255,255,0.72)',
+    font: canvasTextFont(14, 500),
+    height: 34,
+    paddingX: 16,
+  });
+  drawOverlayPill(context, width - layout.outerPadding - 150, layout.header.y + 24, providerLabel.toUpperCase(), {
+    fill: 'rgba(83,157,245,0.12)',
+    stroke: 'rgba(83,157,245,0.2)',
+    textColor: '#D9E9FF',
+    font: canvasTextFont(14, 500),
+    height: 34,
+    paddingX: 16,
+  });
+  drawOverlayPill(context, width - layout.outerPadding - 296, layout.header.y + 24, run.activityLabel.toUpperCase(), {
+    fill: 'rgba(242,87,116,0.1)',
+    stroke: 'rgba(242,87,116,0.18)',
+    textColor: '#FFE2E7',
+    font: canvasTextFont(14, 500),
+    height: 34,
+    paddingX: 16,
+  });
+
+  // Title
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(36, 600);
+  wrapCanvasText(context, run.name, layout.header.x + 20, layout.header.y + 86, layout.header.w - 40, 42, 2);
+  context.fillStyle = 'rgba(255,255,255,0.62)';
+  context.font = canvasTextFont(15, 400);
+  context.fillText(
+    `${run.date}${run.timeLabel ? ` · ${run.timeLabel}` : ''} · ${athleteName.toUpperCase()}`,
+    layout.header.x + 20,
+    layout.header.y + 172
+  );
+
+  // Metrics panel
+  fillRoundedPanel(context, layout.metricsCard.x, layout.metricsCard.y, layout.metricsCard.w, layout.metricsCard.h, {
+    radius: layout.metricsCard.r,
+    fill: 'rgba(32,32,32,0.96)',
+    stroke: 'rgba(255,255,255,0.05)',
+    lineWidth: 1.2,
+  });
+
+  // Metrics text
+  context.fillStyle = 'rgba(255,255,255,0.52)';
+  context.font = canvasTextFont(13, 500);
+  context.fillText('KM', layout.metricsCard.x + 26, layout.metricsCard.y + 54);
+  context.fillText('PACE', layout.metricsCard.x + 368, layout.metricsCard.y + 54);
+  context.fillText('TIME', layout.metricsCard.x + 368, layout.metricsCard.y + 166);
+
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(80, 600);
+  context.fillText(`${playbackState.distanceKm.toFixed(1)}`, layout.metricsCard.x + 26, layout.metricsCard.y + 122);
+  context.font = canvasTextFont(20, 600);
+  context.fillStyle = 'rgba(255,255,255,0.72)';
+  context.fillText('KM', layout.metricsCard.x + 30, layout.metricsCard.y + 166);
+
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(34, 600);
+  context.fillText(paceLabel ?? '--:--', layout.metricsCard.x + 368, layout.metricsCard.y + 124);
+  context.fillText(formatDuration(playbackState.elapsedSeconds), layout.metricsCard.x + 368, layout.metricsCard.y + 218);
+
+  // Progress bar
+  fillRoundedPanel(context, layout.metricsCard.x + 26, layout.metricsCard.y + 232, layout.metricsCard.w - 52, 14, {
+    radius: 999,
+    fill: 'rgba(255,255,255,0.06)',
+  });
+  const progressGradient = context.createLinearGradient(
+    layout.metricsCard.x + 26, layout.metricsCard.y + 232,
+    layout.metricsCard.x + layout.metricsCard.w - 26, layout.metricsCard.y + 232
+  );
+  progressGradient.addColorStop(0, '#539df5');
+  progressGradient.addColorStop(0.65, '#2f7de8');
+  progressGradient.addColorStop(1, '#f25774');
+  fillRoundedPanel(context, layout.metricsCard.x + 26, layout.metricsCard.y + 232, (layout.metricsCard.w - 52) * completion, 14, {
+    radius: 999,
+    fill: progressGradient,
+  });
+
+  // Footer stats
+  context.fillStyle = 'rgba(255,255,255,0.66)';
+  context.font = canvasTextFont(14, 500);
+  context.fillText(
+    `TOTAL ${formatActivityDistance(run.distanceKm).toUpperCase()}`,
+    layout.metricsCard.x + 26,
+    layout.metricsCard.y + 280
+  );
+  context.fillText(
+    `RITMO MEDIO ${formatPace(run.paceSecondsPerKm) ?? 'SIN DATO'} · DESNIVEL ${metricValue(run.elevationGain, ' m')}`,
+    layout.metricsCard.x + 198,
+    layout.metricsCard.y + 280
+  );
 }
 
 async function drawStaticRouteMapCard(
@@ -2392,6 +2966,10 @@ async function exportRunShareImage(input: {
   downloadBlobAsset(blob, `run-overlay-${input.templateId}-${input.run.date}-${input.run.id}.png`);
 }
 
+// Removed: resolveVideoCameraForProgress (old phase-based camera model)
+// Replaced by new inline camera resolution in exportRunRouteVideo with Hermite easing
+
+/*
 function resolveVideoCameraForProgress(
   prepared: PreparedStaticRouteMap,
   progress: number,
@@ -2478,167 +3056,10 @@ function resolveVideoCameraForProgress(
 
   return { camera, activePoint };
 }
+*/
 
-
-function renderRouteVideoFrame(
-  context: CanvasRenderingContext2D,
-  prepared: PreparedStaticRouteMap,
-  input: {
-    run: DashboardData['recentRuns'][number];
-    athleteName: string;
-    providerLabel: string;
-  },
-  progress: number,
-) {
-  const width = context.canvas.width;
-  const height = context.canvas.height;
-  const mapCardX = 52;
-  const mapCardY = 234;
-  const mapCardWidth = width - 104;
-  const mapCardHeight = 726;
-
-  const { camera, activePoint } = resolveVideoCameraForProgress(prepared, progress, mapCardWidth, mapCardHeight);
-  const paceLabel = activePoint.paceSecondsPerKm !== null ? formatPace(activePoint.paceSecondsPerKm) : formatPace(input.run.paceSecondsPerKm);
-  const completion = clampNumber(input.run.distanceKm > 0 ? activePoint.distanceKm / input.run.distanceKm : progress, 0, 1);
-
-  context.clearRect(0, 0, width, height);
-
-  const background = context.createLinearGradient(0, 0, 0, height);
-  background.addColorStop(0, '#171717');
-  background.addColorStop(0.36, '#121212');
-  background.addColorStop(1, '#0d0d0d');
-  context.fillStyle = background;
-  context.fillRect(0, 0, width, height);
-
-  const topGlow = context.createRadialGradient(width * 0.86, height * 0.14, 0, width * 0.86, height * 0.14, width * 0.72);
-  topGlow.addColorStop(0, 'rgba(83,157,245,0.18)');
-  topGlow.addColorStop(1, 'rgba(83,157,245,0)');
-  context.fillStyle = topGlow;
-  context.fillRect(0, 0, width, height);
-
-  const sideGlow = context.createRadialGradient(width * 0.18, height * 0.84, 0, width * 0.18, height * 0.84, width * 0.64);
-  sideGlow.addColorStop(0, 'rgba(242,87,116,0.12)');
-  sideGlow.addColorStop(1, 'rgba(242,87,116,0)');
-  context.fillStyle = sideGlow;
-  context.fillRect(0, 0, width, height);
-
-  fillRoundedPanel(context, 36, 30, width - 72, height - 60, {
-    radius: 30,
-    fill: 'rgba(24,24,24,0.92)',
-    stroke: 'rgba(255,255,255,0.04)',
-    lineWidth: 1.2,
-  });
-
-  context.save();
-  context.beginPath();
-  context.arc(78, 79, 22, 0, Math.PI * 2);
-  const badgeGradient = context.createLinearGradient(56, 57, 100, 101);
-  badgeGradient.addColorStop(0, '#539df5');
-  badgeGradient.addColorStop(0.58, '#2f7de8');
-  badgeGradient.addColorStop(1, '#f25774');
-  context.fillStyle = badgeGradient;
-  context.fill();
-  context.restore();
-
-  context.fillStyle = '#FFFFFF';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.font = canvasTextFont(17, 600);
-  context.fillText('RR', 78, 80);
-  context.textAlign = 'left';
-  context.textBaseline = 'alphabetic';
-
-  drawOverlayPill(context, 112, 54, 'SESSION SHORT', {
-    fill: 'rgba(255,255,255,0.035)',
-    stroke: 'rgba(255,255,255,0.08)',
-    textColor: 'rgba(255,255,255,0.72)',
-    font: canvasTextFont(14, 500),
-    height: 34,
-    paddingX: 16,
-  });
-  drawOverlayPill(context, width - 186, 54, input.providerLabel.toUpperCase(), {
-    fill: 'rgba(83,157,245,0.12)',
-    stroke: 'rgba(83,157,245,0.2)',
-    textColor: '#D9E9FF',
-    font: canvasTextFont(14, 500),
-    height: 34,
-    paddingX: 16,
-  });
-  drawOverlayPill(context, width - 332, 54, input.run.activityLabel.toUpperCase(), {
-    fill: 'rgba(242,87,116,0.1)',
-    stroke: 'rgba(242,87,116,0.18)',
-    textColor: '#FFE2E7',
-    font: canvasTextFont(14, 500),
-    height: 34,
-    paddingX: 16,
-  });
-
-  context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(36, 600);
-  wrapCanvasText(context, input.run.name, 56, 132, width - 112, 42, 2);
-  context.fillStyle = 'rgba(255,255,255,0.62)';
-  context.font = canvasTextFont(15, 400);
-  context.fillText(
-    `${input.run.date}${input.run.timeLabel ? ` · ${input.run.timeLabel}` : ''} · ${input.athleteName.toUpperCase()}`,
-    56,
-    206,
-  );
-
-  drawVideoMapLayer(context, prepared, camera, mapCardX, mapCardY, mapCardWidth, mapCardHeight, 22);
-
-  // Increase panel height to avoid clipping the progress bar and footer texts.
-  // Add more vertical room for labels, values and the progress bar.
-  fillRoundedPanel(context, 52, 980, width - 104, 284, {
-    radius: 22,
-    fill: 'rgba(32,32,32,0.96)',
-    stroke: 'rgba(255,255,255,0.05)',
-    lineWidth: 1.2,
-  });
-
-  context.fillStyle = 'rgba(255,255,255,0.52)';
-  context.font = canvasTextFont(13, 500);
-  context.fillText('KM', 78, 1034);
-  context.fillText('PACE', 420, 1034);
-  context.fillText('TIME', 420, 1146);
-
-  context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(80, 600);
-  context.fillText(`${activePoint.distanceKm.toFixed(1)}`, 78, 1102);
-  context.font = canvasTextFont(20, 600);
-  context.fillStyle = 'rgba(255,255,255,0.72)';
-  context.fillText('KM', 82, 1140);
-
-  context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(34, 600);
-  context.fillText(paceLabel, 420, 1104);
-  context.fillText(formatDuration(activePoint.elapsedSeconds), 420, 1198);
-
-  fillRoundedPanel(context, 78, 1212, width - 156, 14, {
-    radius: 999,
-    fill: 'rgba(255,255,255,0.06)',
-  });
-  const progressGradient = context.createLinearGradient(78, 1212, width - 78, 1212);
-  progressGradient.addColorStop(0, '#539df5');
-  progressGradient.addColorStop(0.65, '#2f7de8');
-  progressGradient.addColorStop(1, '#f25774');
-  fillRoundedPanel(context, 78, 1212, (width - 156) * completion, 14, {
-    radius: 999,
-    fill: progressGradient,
-  });
-
-  context.fillStyle = 'rgba(255,255,255,0.66)';
-  context.font = canvasTextFont(14, 500);
-  context.fillText(
-    `TOTAL ${formatActivityDistance(input.run.distanceKm).toUpperCase()}`,
-    78,
-    1240,
-  );
-  context.fillText(
-    `RITMO MEDIO ${formatPace(input.run.paceSecondsPerKm) ?? 'SIN DATO'} · DESNIVEL ${metricValue(input.run.elevationGain, ' m')}`,
-    250,
-    1240,
-  );
-}
+// Removed: renderRouteVideoFrame (old snapshot-based pipeline)
+// Now using new world pixel space rendering in exportRunRouteVideo
 
 async function exportRunRouteVideo(input: {
   run: DashboardData['recentRuns'][number];
@@ -2653,42 +3074,61 @@ async function exportRunRouteVideo(input: {
     throw new Error('Este navegador no soporta la exportacion de video desde canvas.');
   }
 
-  const width = 720;
-  const height = 1280;
-  const mapWidth = width - 104;
-  const mapHeight = 718;
-  const mapOverscan = Math.round(Math.max(mapWidth, mapHeight) * 1.5);
+  const layout = VIDEO_LAYOUT;
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = layout.canvasWidth;
+  canvas.height = layout.canvasHeight;
   const context = canvas.getContext('2d');
 
   if (!context) {
     throw new Error('El navegador no ha podido crear el canvas para el video.');
   }
 
-  // Prepare map tiles at a higher max zoom and request a stronger zoom boost so the
-  // video starts more focused and avoids showing the entire route at once.
-  // Reduce padding to allow a tighter framing.
-  const prepared = await prepareStaticRouteMap(
-    input.route,
-    mapWidth + mapOverscan,
-    mapHeight + mapOverscan,
-    32,
-    {
-      maxZoom: 16,
-      hillshadeOpacity: sharedMapStyleConfig.hillshadeOpacity,
-      labelOpacity: sharedMapStyleConfig.labelOpacity,
-      zoomBoost: 0,
-    },
-  );
+  // Build playback samples  from route (frame data indexed by progress)
+  const playbackSamples = buildPlaybackSamples(input.route);
 
-  // Use the user-requested target: 2 seconds per km for the final video length.
-  const routeDistanceKm = input.run.distanceKm ?? prepared.animatedPoints.at(-1)?.distanceKm ?? 1;
+  // Get static viewport for overview camera position
+  const viewport = staticMapViewport(input.route, layout.mapCard.w, layout.mapCard.h, 64, 14);
+
+  // Project route points to world pixel space at selected zoom
+  const projectedPoints = input.route.points.map(([lat, lng]) => {
+    const pixel = mercatorPixel(lat, lng, viewport.zoom);
+    return [pixel.x - viewport.originX, pixel.y - viewport.originY] as [number, number];
+  });
+
+  // Build animated segments with colors
+  const animatedSegments: Array<{ start: [number, number]; end: [number, number]; color: string }> = [];
+  const thresholds = paceThresholds(input.route);
+  for (let i = 1; i < projectedPoints.length; i += 1) {
+    const sample1 = input.route.samples[i - 1];
+    const sample2 = input.route.samples[i];
+    const frameSegmentPace =
+      sample2?.paceSecondsPerKm !== null && sample1?.paceSecondsPerKm !== null
+        ? (sample2.paceSecondsPerKm + sample1.paceSecondsPerKm) / 2
+        : sample2?.paceSecondsPerKm ?? sample1?.paceSecondsPerKm ?? null;
+
+    animatedSegments.push({
+      start: projectedPoints[i - 1] ?? [0, 0],
+      end: projectedPoints[i] ?? [0, 0],
+      color: paceColor(frameSegmentPace, thresholds),
+    });
+  }
+
+  // Video duration: 2 seconds per km
+  const routeDistanceKm = input.run.distanceKm ?? 1;
   const targetMs = Math.round(routeDistanceKm * 2000);
   const videoDurationMs = clampNumber(Math.max(2000, targetMs), 2000, 120_000) || routeVideoDurationMs;
 
-  renderRouteVideoFrame(context, prepared, input, 0);
+  // Render first frame to test
+  drawVideoOverlay(context, layout, playbackSamples[0] ?? {
+    progress: 0,
+    x: 0,
+    y: 0,
+    distanceKm: 0,
+    elapsedSeconds: 0,
+    paceSecondsPerKm: null,
+    segmentHeading: 0,
+  }, input.run, input.athleteName, input.providerLabel);
 
   if (typeof canvas.captureStream !== 'function') {
     throw new Error('Tu navegador no permite grabar el canvas como video.');
@@ -2727,10 +3167,89 @@ async function exportRunRouteVideo(input: {
       const totalFrames = Math.max(1, Math.ceil(videoDurationMs / frameDurationMs));
       let currentFrame = 1;
 
-      const renderFrame = () => {
+      const renderFrame = async () => {
         try {
           const progress = clampNumber(currentFrame / totalFrames, 0, 1);
-          renderRouteVideoFrame(context, prepared, input, progress);
+
+          // Update playback samples with world pixel coordinates
+          playbackSamples.forEach((sample) => {
+            if (input.route.samples.length >= 2) {
+              // Find corresponding route index
+              const routeSample = input.route.samples.find(
+                (s) => s.paceSecondsPerKm === sample.paceSecondsPerKm
+              ) ?? input.route.samples[Math.floor(Math.random() * input.route.samples.length)];
+              const pixel = mercatorPixel(routeSample.point[0], routeSample.point[1], viewport.zoom);
+              sample.x = pixel.x - viewport.originX;
+              sample.y = pixel.y - viewport.originY;
+            }
+          });
+
+          const playbackState = interpolatePlaybackState(playbackSamples, progress);
+
+          // Resolve camera based on video phase
+          let camera: { centerX: number; centerY: number; zoom: number; heading: number; tilt: number };
+          if (progress <= VIDEO_PHASES.overview.end) {
+            // Overview phase: show full route
+            camera = {
+              centerX: layout.mapCard.w / 2 + viewport.originX,
+              centerY: layout.mapCard.h / 2 + viewport.originY,
+              zoom: 0,
+              heading: 0,
+              tilt: 0,
+            };
+          } else if (progress <= VIDEO_PHASES.transition.end) {
+            // Transition phase: interpolate to follow cam
+            const overviewEndProgress = VIDEO_PHASES.overview.end;
+            const transitionLocalProgress = (progress - overviewEndProgress) / (VIDEO_PHASES.transition.end - overviewEndProgress);
+
+            const overviewCamera = {
+              centerX: layout.mapCard.w / 2 + viewport.originX,
+              centerY: layout.mapCard.h / 2 + viewport.originY,
+              zoom: 0,
+              heading: 0,
+              tilt: 0,
+            };
+
+            const followCamera = {
+              centerX: playbackState.x,
+              centerY: playbackState.y,
+              zoom: 1.2,
+              heading: resolveSmoothedHeadingRadians(playbackSamples, progress),
+              tilt: 0.06,
+            };
+
+            camera = interpolateCamera(overviewCamera, followCamera, transitionLocalProgress);
+          } else {
+            // Follow cam phase: runner cam with heading
+            camera = {
+              centerX: playbackState.x,
+              centerY: playbackState.y,
+              zoom: 1.2,
+              heading: resolveSmoothedHeadingRadians(playbackSamples, progress),
+              tilt: 0.06,
+            };
+          }
+
+          // Compute visible tiles
+          const worldRect = computeVisibleWorldRect(camera, layout.mapCard.w, layout.mapCard.h);
+          const visibleTiles = resolveVisibleTiles(worldRect, VIDEO_TILE_ZOOM);
+
+          // Clear canvas
+          context.clearRect(0, 0, layout.canvasWidth, layout.canvasHeight);
+
+          // Draw base map (tiles)
+          if (progress <= VIDEO_PHASES.overview.end) {
+            // In overview, draw full route overview
+            await drawBaseMapForCamera(context, visibleTiles, camera, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+            drawFullRouteOverview(context, projectedPoints, animatedSegments, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+          } else {
+            // In transition/follow, draw route progress
+            await drawBaseMapForCamera(context, visibleTiles, camera, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+            drawRouteProgressFrame(context, playbackState, projectedPoints, animatedSegments, progress, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+          }
+
+          // Draw overlay (header, metrics, progress bar)
+          drawVideoOverlay(context, layout, playbackState, input.run, input.athleteName, input.providerLabel);
 
           if (currentFrame >= totalFrames) {
             window.setTimeout(resolve, frameDurationMs * 2);
