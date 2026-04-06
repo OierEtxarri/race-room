@@ -249,6 +249,34 @@ const routeVideoFormatCandidates: VideoExportFormat[] = [
   },
 ];
 
+type MapStyleConfig = {
+  satelliteUrl: string;
+  hillshadeUrl: string;
+  labelsUrl: string;
+  hillshadeOpacity: number;
+  labelOpacity: number;
+  backgroundColor: string;
+};
+
+const sharedMapStyleConfig: MapStyleConfig = {
+  satelliteUrl: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  hillshadeUrl: 'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
+  labelsUrl: 'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+  hillshadeOpacity: 0.46,
+  labelOpacity: 0.22,
+  backgroundColor: '#0A1015',
+};
+
+type VideoCameraPhase = 'overview' | 'transition' | 'runnerCam' | 'end';
+
+type VideoCamera = {
+  centerX: number;
+  centerY: number;
+  zoom: number;
+  headingRadians: number;
+  phase: VideoCameraPhase;
+};
+
 function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') {
     return null;
@@ -1459,26 +1487,19 @@ function drawPreparedStaticRouteMapCard(
   });
 }
 
-function drawRouteVideoMapCard(
+function drawVideoMapLayer(
   context: CanvasRenderingContext2D,
   prepared: PreparedStaticRouteMap,
-  snapshot: {
-    x: number;
-    y: number;
-    progress: number;
-    headingRadians: number;
-  },
+  camera: VideoCamera,
   x: number,
   y: number,
   width: number,
   height: number,
-  radius = 22,
-  options: { isRunnerCam?: boolean } = {},
+  radius: number,
 ) {
   const matteFill = '#101010';
   const focusX = width / 2;
-  const focusY = height * 0.64;
-  const isRunnerCam = options.isRunnerCam !== false;
+  const focusY = height * 0.62;
 
   context.save();
   context.shadowColor = 'rgba(0,0,0,0.34)';
@@ -1497,26 +1518,29 @@ function drawRouteVideoMapCard(
   context.fillRect(x, y, width, height);
 
   context.translate(x, y);
+  context.translate(focusX, focusY);
 
-  if (isRunnerCam) {
-    const smoothHeading = Math.atan2(
-      snapshot.y - (prepared.animatedPoints[Math.max(0, prepared.animatedPoints.length - 2)]?.y ?? snapshot.y),
-      snapshot.x - (prepared.animatedPoints[Math.max(0, prepared.animatedPoints.length - 2)]?.x ?? snapshot.x),
-    );
-    context.translate(focusX, focusY);
-    context.rotate(smoothHeading + Math.PI / 2);
-    context.translate(-snapshot.x, -snapshot.y);
-  } else {
-    context.translate(-snapshot.x + focusX, -snapshot.y + focusY);
+  if (camera.phase === 'runnerCam' || camera.phase === 'transition') {
+    context.rotate(camera.headingRadians);
   }
 
+  const zoomScale = Math.pow(2, camera.zoom);
+  context.scale(zoomScale, zoomScale);
+  context.translate(-camera.centerX, -camera.centerY);
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
   context.drawImage(prepared.mapSurface, 0, 0);
 
-  drawAnimatedRouteProgress(context, prepared, snapshot.progress, {
-    showActiveMarker: true,
-  });
+  const isShowingProgress = camera.phase !== 'overview';
+  const progressAlpha = camera.phase === 'overview' ? 0 : camera.phase === 'transition' ? (camera.zoom - 0) / 1.2 : 1;
+
+  context.globalAlpha = progressAlpha;
+  if (isShowingProgress) {
+    drawAnimatedRouteProgress(context, prepared, Math.max(0.01, progressAlpha), {
+      showActiveMarker: true,
+    });
+  }
+  context.globalAlpha = 1;
 
   context.restore();
 
@@ -2368,13 +2392,12 @@ async function exportRunShareImage(input: {
   downloadBlobAsset(blob, `run-overlay-${input.templateId}-${input.run.date}-${input.run.id}.png`);
 }
 
-function resolveRouteVideoSnapshot(
+function resolveVideoCameraForProgress(
   prepared: PreparedStaticRouteMap,
   progress: number,
   cardWidth: number,
   cardHeight: number,
-  isRunnerCam: boolean = false,
-) {
+): { camera: VideoCamera; activePoint: AnimatedRoutePoint } {
   const clampedProgress = clampNumber(progress, 0, 1);
   const activePoint = interpolateAnimatedPoint(prepared, clampedProgress) ?? {
     x: prepared.projectedPoints[0]?.[0] ?? 0,
@@ -2385,48 +2408,75 @@ function resolveRouteVideoSnapshot(
     paceSecondsPerKm: null,
   };
 
-  if (!isRunnerCam) {
-    return {
-      x: prepared.mapSurface.width / 2,
-      y: prepared.mapSurface.height / 2,
-      progress: clampedProgress,
+  const overviewPhaseEnd = 0.15;
+  const transitionPhaseEnd = 0.35;
+
+  const mapW = prepared.mapSurface.width;
+  const mapH = prepared.mapSurface.height;
+  const overviewCenterX = mapW / 2;
+  const overviewCenterY = mapH / 2;
+  const overviewZoom = 0;
+
+  let camera: VideoCamera;
+
+  if (clampedProgress <= overviewPhaseEnd) {
+    camera = {
+      centerX: overviewCenterX,
+      centerY: overviewCenterY,
+      zoom: overviewZoom,
       headingRadians: 0,
-      distanceKm: activePoint.distanceKm,
-      paceSecondsPerKm: activePoint.paceSecondsPerKm,
-      elapsedSeconds: activePoint.elapsedSeconds,
+      phase: 'overview',
+    };
+  } else if (clampedProgress <= transitionPhaseEnd) {
+    const transitionLocalProgress = (clampedProgress - overviewPhaseEnd) / (transitionPhaseEnd - overviewPhaseEnd);
+    const eased = transitionLocalProgress * transitionLocalProgress * (3 - 2 * transitionLocalProgress);
+
+    const focusX = cardWidth / 2;
+    const focusY = cardHeight * 0.62;
+    const runnerCenterX = clampNumber(activePoint.x, focusX, mapW - focusX);
+    const runnerCenterY = clampNumber(activePoint.y, focusY, mapH - focusY);
+
+    let heading = 0;
+    if (prepared.animatedSegments.length > 0) {
+      const segment = prepared.animatedSegments.find((s) => clampedProgress <= s.end.progress) ?? prepared.animatedSegments.at(-1);
+      if (segment) {
+        heading = Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
+      }
+    }
+
+    camera = {
+      centerX: lerpNumber(overviewCenterX, runnerCenterX, eased),
+      centerY: lerpNumber(overviewCenterY, runnerCenterY, eased),
+      zoom: lerpNumber(overviewZoom, 1.2, eased),
+      headingRadians: heading,
+      phase: 'transition',
+    };
+  } else {
+    const focusX = cardWidth / 2;
+    const focusY = cardHeight * 0.62;
+    const clampedX = clampNumber(activePoint.x, focusX, mapW - focusX);
+    const clampedY = clampNumber(activePoint.y, focusY, mapH - focusY);
+
+    let heading = 0;
+    if (prepared.animatedSegments.length > 0) {
+      const segment = prepared.animatedSegments.find((s) => clampedProgress <= s.end.progress) ?? prepared.animatedSegments.at(-1);
+      if (segment) {
+        const dx = segment.end.x - segment.start.x;
+        const dy = segment.end.y - segment.start.y;
+        heading = Math.atan2(dy, dx);
+      }
+    }
+
+    camera = {
+      centerX: clampedX,
+      centerY: clampedY,
+      zoom: 1.2,
+      headingRadians: heading,
+      phase: 'runnerCam',
     };
   }
 
-  const focusX = cardWidth / 2;
-  const focusY = cardHeight * 0.64;
-  const clampedX = clampNumber(
-    activePoint.x,
-    focusX,
-    prepared.mapSurface.width - (cardWidth - focusX),
-  );
-  const clampedY = clampNumber(
-    activePoint.y,
-    focusY,
-    prepared.mapSurface.height - (cardHeight - focusY),
-  );
-
-  let headingRadians = 0;
-  if (prepared.animatedSegments.length > 0) {
-    const segment = prepared.animatedSegments.find((s) => clampedProgress <= s.end.progress) ?? prepared.animatedSegments.at(-1);
-    if (segment) {
-      headingRadians = Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
-    }
-  }
-
-  return {
-    x: clampedX,
-    y: clampedY,
-    progress: clampedProgress,
-    headingRadians,
-    distanceKm: activePoint.distanceKm,
-    paceSecondsPerKm: activePoint.paceSecondsPerKm,
-    elapsedSeconds: activePoint.elapsedSeconds,
-  };
+  return { camera, activePoint };
 }
 
 
@@ -2442,21 +2492,14 @@ function renderRouteVideoFrame(
 ) {
   const width = context.canvas.width;
   const height = context.canvas.height;
+  const mapCardX = 52;
+  const mapCardY = 234;
   const mapCardWidth = width - 104;
   const mapCardHeight = 726;
 
-  const establishingPhaseEnd = 0.12;
-  const isEstablishingPhase = progress <= establishingPhaseEnd;
-  const runnerCamProgress = isEstablishingPhase ? 0 : (progress - establishingPhaseEnd) / (1 - establishingPhaseEnd);
-
-  const snapshot = isEstablishingPhase
-    ? resolveRouteVideoSnapshot(prepared, 0, mapCardWidth, mapCardHeight, false)
-    : resolveRouteVideoSnapshot(prepared, runnerCamProgress, mapCardWidth, mapCardHeight, true);
-  const paceLabel =
-    snapshot.paceSecondsPerKm !== null
-      ? formatPace(snapshot.paceSecondsPerKm)
-      : formatPace(input.run.paceSecondsPerKm);
-  const completion = clampNumber(input.run.distanceKm > 0 ? snapshot.distanceKm / input.run.distanceKm : progress, 0, 1);
+  const { camera, activePoint } = resolveVideoCameraForProgress(prepared, progress, mapCardWidth, mapCardHeight);
+  const paceLabel = activePoint.paceSecondsPerKm !== null ? formatPace(activePoint.paceSecondsPerKm) : formatPace(input.run.paceSecondsPerKm);
+  const completion = clampNumber(input.run.distanceKm > 0 ? activePoint.distanceKm / input.run.distanceKm : progress, 0, 1);
 
   context.clearRect(0, 0, width, height);
 
@@ -2541,9 +2584,7 @@ function renderRouteVideoFrame(
     206,
   );
 
-  drawRouteVideoMapCard(context, prepared, snapshot, 52, 234, width - 104, 726, 22, {
-    isRunnerCam: !isEstablishingPhase,
-  });
+  drawVideoMapLayer(context, prepared, camera, mapCardX, mapCardY, mapCardWidth, mapCardHeight, 22);
 
   // Increase panel height to avoid clipping the progress bar and footer texts.
   // Add more vertical room for labels, values and the progress bar.
@@ -2562,7 +2603,7 @@ function renderRouteVideoFrame(
 
   context.fillStyle = '#FFFFFF';
   context.font = canvasDisplayFont(80, 600);
-  context.fillText(`${snapshot.distanceKm.toFixed(1)}`, 78, 1102);
+  context.fillText(`${activePoint.distanceKm.toFixed(1)}`, 78, 1102);
   context.font = canvasTextFont(20, 600);
   context.fillStyle = 'rgba(255,255,255,0.72)';
   context.fillText('KM', 82, 1140);
@@ -2570,7 +2611,7 @@ function renderRouteVideoFrame(
   context.fillStyle = '#FFFFFF';
   context.font = canvasDisplayFont(34, 600);
   context.fillText(paceLabel, 420, 1104);
-  context.fillText(formatDuration(snapshot.elapsedSeconds), 420, 1198);
+  context.fillText(formatDuration(activePoint.elapsedSeconds), 420, 1198);
 
   fillRoundedPanel(context, 78, 1212, width - 156, 14, {
     radius: 999,
@@ -2633,11 +2674,11 @@ async function exportRunRouteVideo(input: {
     input.route,
     mapWidth + mapOverscan,
     mapHeight + mapOverscan,
-    24,
+    32,
     {
       maxZoom: 16,
-      hillshadeOpacity: 0.46,
-      labelOpacity: 0.22,
+      hillshadeOpacity: sharedMapStyleConfig.hillshadeOpacity,
+      labelOpacity: sharedMapStyleConfig.labelOpacity,
       zoomBoost: 0,
     },
   );
