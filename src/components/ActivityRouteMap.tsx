@@ -10,42 +10,87 @@ const HILLSHADE_URL =
 const LABELS_URL =
   'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
 
-function FitRouteBounds({ points }: { points: LatLngTuple[] }) {
+function FitRouteBounds({ points, isActive }: { points: LatLngTuple[]; isActive?: boolean }) {
   const map = useMap();
 
   useEffect(() => {
-    if (points.length < 2) {
+    if (points.length < 2 || isActive === false) {
       return;
     }
 
+    const container = map.getContainer();
     const bounds = latLngBounds(points);
-    const fit = () => {
-      map.invalidateSize(false);
+    let frameId: number | null = null;
+    let retryTimer: number | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let intersectionObserver: IntersectionObserver | null = null;
+
+    const attemptFit = () => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || document.hidden) {
+        return false;
+      }
+
+      map.invalidateSize(true);
       map.fitBounds(bounds, {
-        padding: [30, 30],
+        padding: [36, 36],
         maxZoom: 15,
+        animate: false,
+      });
+      return true;
+    };
+
+    const scheduleFit = () => {
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+
+      frameId = requestAnimationFrame(() => {
+        if (!attemptFit()) {
+          retryTimer = window.setTimeout(scheduleFit, 220);
+        }
       });
     };
 
-    const frameId = requestAnimationFrame(fit);
-    const settleTimer = window.setTimeout(fit, 180);
-    const animationTimer = window.setTimeout(fit, 420);
+    const handleResize = () => {
+      scheduleFit();
+    };
 
-    let observer: ResizeObserver | null = null;
+    map.whenReady(() => {
+      scheduleFit();
+    });
+
     if (typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(() => {
-        fit();
-      });
-      observer.observe(map.getContainer());
+      resizeObserver = new ResizeObserver(handleResize);
+      resizeObserver.observe(container);
     }
 
+    if (typeof IntersectionObserver !== 'undefined') {
+      intersectionObserver = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            scheduleFit();
+          }
+        },
+        { threshold: 0.1 },
+      );
+      intersectionObserver.observe(container);
+    }
+
+    window.addEventListener('resize', handleResize);
+
     return () => {
-      cancelAnimationFrame(frameId);
-      window.clearTimeout(settleTimer);
-      window.clearTimeout(animationTimer);
-      observer?.disconnect();
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+      resizeObserver?.disconnect();
+      intersectionObserver?.disconnect();
+      window.removeEventListener('resize', handleResize);
     };
-  }, [map, points]);
+  }, [map, points, isActive]);
 
   return null;
 }
@@ -119,9 +164,11 @@ function buildRouteSegments(route: ActivityRoute) {
 export function ActivityRouteMap({
   route,
   title,
+  isActive,
 }: {
   route: ActivityRoute;
   title: string;
+  isActive?: boolean;
 }) {
   const points = route.points as LatLngTuple[];
   const mapKey = `${route.source}-${title}-${points.length}-${points[0]?.join('-') ?? 'route'}`;
@@ -154,20 +201,21 @@ export function ActivityRouteMap({
           zoomControl={false}
           zoom={13}
         >
-          <FitRouteBounds points={points} />
+          <FitRouteBounds points={points} isActive={isActive} />
 
           <TileLayer
             attribution='&copy; Esri'
             className="route-map-satellite"
             url={SATELLITE_URL}
+            crossOrigin="anonymous"
           />
 
           <Pane name="relief" style={{ zIndex: 250 }}>
-            <TileLayer attribution='&copy; Esri' className="route-map-hillshade" opacity={0.46} url={HILLSHADE_URL} />
+            <TileLayer pane="relief" attribution='&copy; Esri' className="route-map-hillshade" opacity={0.46} url={HILLSHADE_URL} crossOrigin="anonymous" />
           </Pane>
 
           <Pane name="labels" style={{ zIndex: 320 }}>
-            <TileLayer attribution='&copy; Esri' className="route-map-labels" opacity={0.22} url={LABELS_URL} />
+            <TileLayer pane="labels" attribution='&copy; Esri' className="route-map-labels" opacity={0.22} url={LABELS_URL} crossOrigin="anonymous" />
           </Pane>
 
           <Pane name="route-glow" style={{ zIndex: 410 }}>
@@ -221,8 +269,8 @@ export function ActivityRouteMap({
           {marks.start ? (
             <CircleMarker
               center={marks.start}
-              pathOptions={{ className: 'route-marker route-marker-start', color: '#f9f6eb', fillColor: '#f9f6eb', fillOpacity: 1, weight: 2 }}
-              radius={5}
+              pathOptions={{ className: 'route-marker route-marker-start', color: '#ffffff', fillColor: '#ffffff', fillOpacity: 1, weight: 3, opacity: 1 }}
+              radius={7}
             >
               <Tooltip direction="top" offset={[0, -8]} opacity={0.96} permanent={false} sticky>
                 Inicio
@@ -233,8 +281,8 @@ export function ActivityRouteMap({
           {marks.finish ? (
             <CircleMarker
               center={marks.finish}
-              pathOptions={{ className: 'route-marker route-marker-finish', color: '#df3e3e', fillColor: '#df3e3e', fillOpacity: 1, weight: 2 }}
-              radius={5}
+              pathOptions={{ className: 'route-marker route-marker-finish', color: '#ff6d6d', fillColor: '#ff6d6d', fillOpacity: 1, weight: 3, opacity: 1 }}
+              radius={7}
             >
               <Tooltip direction="top" offset={[0, -8]} opacity={0.96} permanent={false} sticky>
                 Fin

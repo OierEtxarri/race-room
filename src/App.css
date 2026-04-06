@@ -2000,7 +2000,7 @@
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: #101010;
-  aspect-ratio: 16 / 8.8;
+  aspect-ratio: 16 / 9;
   min-height: 320px;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
@@ -2103,7 +2103,7 @@
 }
 
 .route-map-satellite {
-  filter: saturate(0.52) brightness(0.62) contrast(1.18) hue-rotate(-6deg);
+  filter: saturate(0.72) brightness(0.78) contrast(1.16) hue-rotate(-4deg);
 }
 
 .route-map .leaflet-tooltip {
@@ -2128,7 +2128,7 @@
 }
 
 .route-map-labels {
-  filter: grayscale(0.22) brightness(1.02) contrast(1.08);
+  filter: grayscale(0.18) brightness(1.04) contrast(1.10);
 }
 
 .route-map .route-line {

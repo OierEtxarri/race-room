@@ -141,6 +141,7 @@ type PrepareStaticRouteMapOptions = {
   maxZoom?: number;
   hillshadeOpacity?: number;
   labelOpacity?: number;
+  zoomBoost?: number;
 };
 type VideoExportFormat = {
   mimeType: string;
@@ -939,7 +940,10 @@ function chooseStaticMapZoom(
   height: number,
   padding: number,
   maxZoom = 16,
+  zoomBoost = 0,
 ) {
+  // Find the highest zoom where the route still fits, then apply an optional
+  // zoomBoost allowing a tighter (more zoomed) initial framing for video.
   for (let zoom = maxZoom; zoom >= 3; zoom -= 1) {
     const projected = points.map(([lat, lng]) => mercatorPixel(lat, lng, zoom));
     const xs = projected.map((point) => point.x);
@@ -948,11 +952,11 @@ function chooseStaticMapZoom(
     const spanY = Math.max(...ys) - Math.min(...ys);
 
     if (spanX <= width - padding * 2 && spanY <= height - padding * 2) {
-      return zoom;
+      return Math.min(maxZoom, zoom + zoomBoost);
     }
   }
 
-  return 3;
+  return Math.min(maxZoom, 3 + zoomBoost);
 }
 
 function staticMapViewport(
@@ -961,8 +965,9 @@ function staticMapViewport(
   height: number,
   padding: number,
   maxZoom = 16,
+  zoomBoost = 0,
 ) {
-  const zoom = chooseStaticMapZoom(route.points, width, height, padding, maxZoom);
+  const zoom = chooseStaticMapZoom(route.points, width, height, padding, maxZoom, zoomBoost);
   const projected = route.points.map(([lat, lng]) => mercatorPixel(lat, lng, zoom));
   const xs = projected.map((point) => point.x);
   const ys = projected.map((point) => point.y);
@@ -984,21 +989,25 @@ async function loadRemoteImageAsset(url: string) {
   if (!staticTileCache.has(url)) {
     staticTileCache.set(
       url,
-      fetch(url)
-        .then((response) => (response.ok ? response.blob() : null))
-        .then(async (blob) => {
-          if (!blob) {
-            return null;
-          }
+      Promise.race([
+        fetch(url, { mode: 'cors' })
+          .then((response) => (response.ok ? response.blob() : null))
+          .then(async (blob) => {
+            if (!blob) {
+              return null;
+            }
 
-          const blobUrl = URL.createObjectURL(blob);
-          try {
-            return await loadImageElement(blobUrl);
-          } finally {
-            URL.revokeObjectURL(blobUrl);
-          }
-        })
-        .catch(() => null),
+            const blobUrl = URL.createObjectURL(blob);
+            try {
+              const image = await loadImageElement(blobUrl);
+              return image;
+            } finally {
+              URL.revokeObjectURL(blobUrl);
+            }
+          })
+          .catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)), // 5 second timeout
+      ]),
     );
   }
 
@@ -1017,8 +1026,8 @@ function drawPreparedRouteMapBase(
     labelOpacity?: number;
   } = {},
 ) {
-  const hillshadeOpacity = options.hillshadeOpacity ?? 0.18;
-  const labelOpacity = options.labelOpacity ?? 0.06;
+  const hillshadeOpacity = options.hillshadeOpacity ?? 0.46;
+  const labelOpacity = options.labelOpacity ?? 0.22;
 
   context.save();
   context.imageSmoothingEnabled = true;
@@ -1036,6 +1045,16 @@ function drawPreparedRouteMapBase(
   context.save();
   context.globalAlpha = hillshadeOpacity;
   context.globalCompositeOperation = 'screen';
+  prepared.tiles.forEach((tile) => {
+    if (tile.hillshade) {
+      context.drawImage(tile.hillshade, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
+    }
+  });
+  context.restore();
+
+  context.save();
+  context.globalAlpha = hillshadeOpacity * 0.18;
+  context.globalCompositeOperation = 'multiply';
   prepared.tiles.forEach((tile) => {
     if (tile.hillshade) {
       context.drawImage(tile.hillshade, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
@@ -1065,7 +1084,7 @@ async function prepareStaticRouteMap(
   padding: number,
   options: PrepareStaticRouteMapOptions = {},
 ) {
-  const viewport = staticMapViewport(route, width, height, padding, options.maxZoom ?? 16);
+  const viewport = staticMapViewport(route, width, height, padding, options.maxZoom ?? 16, options.zoomBoost ?? 0);
   const startTileX = Math.floor(viewport.originX / staticTileSize);
   const endTileX = Math.floor((viewport.originX + width) / staticTileSize);
   const startTileY = Math.floor(viewport.originY / staticTileSize);
@@ -1253,29 +1272,29 @@ function interpolateAnimatedPoint(prepared: PreparedStaticRouteMap, progress: nu
   };
 }
 
-function resolveSmoothedHeadingRadians(prepared: PreparedStaticRouteMap, progress: number) {
-  const lookBehind = interpolateAnimatedPoint(prepared, progress - 0.016);
-  const lookAhead = interpolateAnimatedPoint(prepared, progress + 0.028);
+// function resolveSmoothedHeadingRadians(prepared: PreparedStaticRouteMap, progress: number) {
+//   const lookBehind = interpolateAnimatedPoint(prepared, progress - 0.016);
+//   const lookAhead = interpolateAnimatedPoint(prepared, progress + 0.028);
 
-  if (lookBehind && lookAhead) {
-    const dx = lookAhead.x - lookBehind.x;
-    const dy = lookAhead.y - lookBehind.y;
-    if (Math.hypot(dx, dy) > 0.1) {
-      return Math.atan2(dy, dx);
-    }
-  }
+//   if (lookBehind && lookAhead) {
+//     const dx = lookAhead.x - lookBehind.x;
+//     const dy = lookAhead.y - lookBehind.y;
+//     if (Math.hypot(dx, dy) > 0.1) {
+//       return Math.atan2(dy, dx);
+//     }
+//   }
 
-  const segment =
-    prepared.animatedSegments.find((candidate) => progress <= candidate.end.progress)
-    ?? prepared.animatedSegments.at(-1)
-    ?? null;
+//   const segment =
+//     prepared.animatedSegments.find((candidate) => progress <= candidate.end.progress)
+//     ?? prepared.animatedSegments.at(-1)
+//     ?? null;
 
-  if (segment) {
-    return Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
-  }
+//   if (segment) {
+//     return Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
+//   }
 
-  return -Math.PI / 2;
-}
+//   return -Math.PI / 2;
+// }
 
 function drawAnimatedRouteProgress(
   context: CanvasRenderingContext2D,
@@ -1325,18 +1344,24 @@ function drawAnimatedRouteProgress(
 
   if (options.showActiveMarker !== false) {
     context.save();
-    context.fillStyle = 'rgba(255,255,255,0.92)';
+    context.shadowColor = 'rgba(255,255,255,0.16)';
+    context.shadowBlur = 16;
+    context.fillStyle = 'rgba(255,255,255,0.12)';
     context.beginPath();
-    context.arc(activePoint.x, activePoint.y, 4, 0, Math.PI * 2);
+    context.arc(activePoint.x, activePoint.y, 20, 0, Math.PI * 2);
     context.fill();
+    context.restore();
+
+    context.save();
     context.fillStyle = '#DF3E3E';
     context.beginPath();
     context.arc(activePoint.x, activePoint.y, 8, 0, Math.PI * 2);
     context.fill();
-    context.strokeStyle = 'rgba(255,255,255,0.48)';
-    context.lineWidth = 2.5;
+
+    context.strokeStyle = '#FFFFFF';
+    context.lineWidth = 3;
     context.beginPath();
-    context.arc(activePoint.x, activePoint.y, 18, 0, Math.PI * 2);
+    context.arc(activePoint.x, activePoint.y, 11, 0, Math.PI * 2);
     context.stroke();
     context.restore();
   }
@@ -1448,11 +1473,12 @@ function drawRouteVideoMapCard(
   width: number,
   height: number,
   radius = 22,
+  options: { isRunnerCam?: boolean } = {},
 ) {
   const matteFill = '#101010';
   const focusX = width / 2;
-  const focusY = height * 0.82;
-  const rotation = -Math.PI / 2 - snapshot.headingRadians;
+  const focusY = height * 0.64;
+  const isRunnerCam = options.isRunnerCam !== false;
 
   context.save();
   context.shadowColor = 'rgba(0,0,0,0.34)';
@@ -1471,47 +1497,23 @@ function drawRouteVideoMapCard(
   context.fillRect(x, y, width, height);
 
   context.translate(x, y);
-  context.translate(focusX, focusY);
-  context.rotate(rotation);
-  context.transform(1.06, 0.08, -0.3, 0.66, 0, 0);
-  context.translate(-snapshot.x, -snapshot.y);
+
+  if (isRunnerCam) {
+    const smoothHeading = Math.atan2(
+      snapshot.y - (prepared.animatedPoints[Math.max(0, prepared.animatedPoints.length - 2)]?.y ?? snapshot.y),
+      snapshot.x - (prepared.animatedPoints[Math.max(0, prepared.animatedPoints.length - 2)]?.x ?? snapshot.x),
+    );
+    context.translate(focusX, focusY);
+    context.rotate(smoothHeading + Math.PI / 2);
+    context.translate(-snapshot.x, -snapshot.y);
+  } else {
+    context.translate(-snapshot.x + focusX, -snapshot.y + focusY);
+  }
+
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
-
-  const previousFilter = context.filter;
-  context.filter = 'contrast(1.16) saturate(1.06) brightness(0.88)';
   context.drawImage(prepared.mapSurface, 0, 0);
-  context.filter = previousFilter;
 
-  const reliefGlow = context.createRadialGradient(
-    focusX * 0.46,
-    focusY * 0.22,
-    0,
-    focusX * 0.46,
-    focusY * 0.22,
-    width * 0.68,
-  );
-  reliefGlow.addColorStop(0, 'rgba(83, 157, 245, 0.05)');
-  reliefGlow.addColorStop(0.48, 'rgba(83, 157, 245, 0.018)');
-  reliefGlow.addColorStop(1, 'rgba(83, 157, 245, 0)');
-  context.globalCompositeOperation = 'screen';
-  context.fillStyle = reliefGlow;
-  context.fillRect(-width, -height, width * 3, height * 3);
-
-  context.globalCompositeOperation = 'source-over';
-  context.fillStyle = 'rgba(8, 12, 18, 0.09)';
-  context.fillRect(-width, -height, width * 3, height * 3);
-
-  const surfaceShade = context.createLinearGradient(0, -height * 0.16, 0, height * 1.04);
-  surfaceShade.addColorStop(0, 'rgba(255,255,255,0.03)');
-  surfaceShade.addColorStop(0.28, 'rgba(255,255,255,0.01)');
-  surfaceShade.addColorStop(0.72, 'rgba(0,0,0,0)');
-  surfaceShade.addColorStop(1, 'rgba(0,0,0,0.22)');
-  context.fillStyle = surfaceShade;
-  context.fillRect(-width, -height, width * 3, height * 3);
-
-  drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.08)', 11);
-  drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.16)', 3.5);
   drawAnimatedRouteProgress(context, prepared, snapshot.progress, {
     showActiveMarker: true,
   });
@@ -1519,17 +1521,17 @@ function drawRouteVideoMapCard(
   context.restore();
 
   const vignette = context.createLinearGradient(x, y, x, y + height);
-  vignette.addColorStop(0, 'rgba(0,0,0,0.02)');
-  vignette.addColorStop(0.7, 'rgba(0,0,0,0)');
-  vignette.addColorStop(1, 'rgba(0,0,0,0.16)');
+  vignette.addColorStop(0, 'rgba(0,0,0,0.08)');
+  vignette.addColorStop(0.5, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.24)');
   context.fillStyle = vignette;
   drawRoundedRect(context, x, y, width, height, radius);
   context.fill();
 
   fillRoundedPanel(context, x, y, width, height, {
     radius,
-    stroke: 'rgba(255,255,255,0.06)',
-    lineWidth: 1.2,
+    stroke: 'rgba(255,255,255,0.08)',
+    lineWidth: 1.5,
   });
 }
 
@@ -2369,26 +2371,64 @@ async function exportRunShareImage(input: {
 function resolveRouteVideoSnapshot(
   prepared: PreparedStaticRouteMap,
   progress: number,
+  cardWidth: number,
+  cardHeight: number,
+  isRunnerCam: boolean = false,
 ) {
   const clampedProgress = clampNumber(progress, 0, 1);
-  const fallbackPoint = interpolateAnimatedPoint(prepared, clampedProgress) ?? {
-    x: 0,
-    y: 0,
-    progress: 0,
+  const activePoint = interpolateAnimatedPoint(prepared, clampedProgress) ?? {
+    x: prepared.projectedPoints[0]?.[0] ?? 0,
+    y: prepared.projectedPoints[0]?.[1] ?? 0,
+    progress: clampedProgress,
     distanceKm: 0,
     elapsedSeconds: 0,
     paceSecondsPerKm: null,
   };
+
+  if (!isRunnerCam) {
+    return {
+      x: prepared.mapSurface.width / 2,
+      y: prepared.mapSurface.height / 2,
+      progress: clampedProgress,
+      headingRadians: 0,
+      distanceKm: activePoint.distanceKm,
+      paceSecondsPerKm: activePoint.paceSecondsPerKm,
+      elapsedSeconds: activePoint.elapsedSeconds,
+    };
+  }
+
+  const focusX = cardWidth / 2;
+  const focusY = cardHeight * 0.64;
+  const clampedX = clampNumber(
+    activePoint.x,
+    focusX,
+    prepared.mapSurface.width - (cardWidth - focusX),
+  );
+  const clampedY = clampNumber(
+    activePoint.y,
+    focusY,
+    prepared.mapSurface.height - (cardHeight - focusY),
+  );
+
+  let headingRadians = 0;
+  if (prepared.animatedSegments.length > 0) {
+    const segment = prepared.animatedSegments.find((s) => clampedProgress <= s.end.progress) ?? prepared.animatedSegments.at(-1);
+    if (segment) {
+      headingRadians = Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
+    }
+  }
+
   return {
-    x: fallbackPoint.x,
-    y: fallbackPoint.y,
+    x: clampedX,
+    y: clampedY,
     progress: clampedProgress,
-    headingRadians: resolveSmoothedHeadingRadians(prepared, clampedProgress),
-    distanceKm: fallbackPoint.distanceKm,
-    paceSecondsPerKm: fallbackPoint.paceSecondsPerKm,
-    elapsedSeconds: fallbackPoint.elapsedSeconds,
+    headingRadians,
+    distanceKm: activePoint.distanceKm,
+    paceSecondsPerKm: activePoint.paceSecondsPerKm,
+    elapsedSeconds: activePoint.elapsedSeconds,
   };
 }
+
 
 function renderRouteVideoFrame(
   context: CanvasRenderingContext2D,
@@ -2402,7 +2442,16 @@ function renderRouteVideoFrame(
 ) {
   const width = context.canvas.width;
   const height = context.canvas.height;
-  const snapshot = resolveRouteVideoSnapshot(prepared, progress);
+  const mapCardWidth = width - 104;
+  const mapCardHeight = 726;
+
+  const establishingPhaseEnd = 0.12;
+  const isEstablishingPhase = progress <= establishingPhaseEnd;
+  const runnerCamProgress = isEstablishingPhase ? 0 : (progress - establishingPhaseEnd) / (1 - establishingPhaseEnd);
+
+  const snapshot = isEstablishingPhase
+    ? resolveRouteVideoSnapshot(prepared, 0, mapCardWidth, mapCardHeight, false)
+    : resolveRouteVideoSnapshot(prepared, runnerCamProgress, mapCardWidth, mapCardHeight, true);
   const paceLabel =
     snapshot.paceSecondsPerKm !== null
       ? formatPace(snapshot.paceSecondsPerKm)
@@ -2492,9 +2541,13 @@ function renderRouteVideoFrame(
     206,
   );
 
-  drawRouteVideoMapCard(context, prepared, snapshot, 52, 234, width - 104, 726, 22);
+  drawRouteVideoMapCard(context, prepared, snapshot, 52, 234, width - 104, 726, 22, {
+    isRunnerCam: !isEstablishingPhase,
+  });
 
-  fillRoundedPanel(context, 52, 980, width - 104, 214, {
+  // Increase panel height to avoid clipping the progress bar and footer texts.
+  // Add more vertical room for labels, values and the progress bar.
+  fillRoundedPanel(context, 52, 980, width - 104, 284, {
     radius: 22,
     fill: 'rgba(32,32,32,0.96)',
     stroke: 'rgba(255,255,255,0.05)',
@@ -2503,31 +2556,31 @@ function renderRouteVideoFrame(
 
   context.fillStyle = 'rgba(255,255,255,0.52)';
   context.font = canvasTextFont(13, 500);
-  context.fillText('KM', 78, 1018);
-  context.fillText('PACE', 420, 1018);
-  context.fillText('TIME', 420, 1108);
+  context.fillText('KM', 78, 1034);
+  context.fillText('PACE', 420, 1034);
+  context.fillText('TIME', 420, 1146);
 
   context.fillStyle = '#FFFFFF';
   context.font = canvasDisplayFont(80, 600);
-  context.fillText(`${snapshot.distanceKm.toFixed(1)}`, 78, 1092);
+  context.fillText(`${snapshot.distanceKm.toFixed(1)}`, 78, 1102);
   context.font = canvasTextFont(20, 600);
   context.fillStyle = 'rgba(255,255,255,0.72)';
-  context.fillText('KM', 82, 1123);
+  context.fillText('KM', 82, 1140);
 
   context.fillStyle = '#FFFFFF';
   context.font = canvasDisplayFont(34, 600);
-  context.fillText(paceLabel, 420, 1078);
-  context.fillText(formatDuration(snapshot.elapsedSeconds), 420, 1170);
+  context.fillText(paceLabel, 420, 1104);
+  context.fillText(formatDuration(snapshot.elapsedSeconds), 420, 1198);
 
-  fillRoundedPanel(context, 78, 1172, width - 156, 14, {
+  fillRoundedPanel(context, 78, 1212, width - 156, 14, {
     radius: 999,
     fill: 'rgba(255,255,255,0.06)',
   });
-  const progressGradient = context.createLinearGradient(78, 1172, width - 78, 1172);
+  const progressGradient = context.createLinearGradient(78, 1212, width - 78, 1212);
   progressGradient.addColorStop(0, '#539df5');
   progressGradient.addColorStop(0.65, '#2f7de8');
   progressGradient.addColorStop(1, '#f25774');
-  fillRoundedPanel(context, 78, 1172, (width - 156) * completion, 14, {
+  fillRoundedPanel(context, 78, 1212, (width - 156) * completion, 14, {
     radius: 999,
     fill: progressGradient,
   });
@@ -2537,12 +2590,12 @@ function renderRouteVideoFrame(
   context.fillText(
     `TOTAL ${formatActivityDistance(input.run.distanceKm).toUpperCase()}`,
     78,
-    1205,
+    1240,
   );
   context.fillText(
     `RITMO MEDIO ${formatPace(input.run.paceSecondsPerKm) ?? 'SIN DATO'} · DESNIVEL ${metricValue(input.run.elevationGain, ' m')}`,
     250,
-    1205,
+    1240,
   );
 }
 
@@ -2563,7 +2616,7 @@ async function exportRunRouteVideo(input: {
   const height = 1280;
   const mapWidth = width - 104;
   const mapHeight = 718;
-  const mapOverscan = 280;
+  const mapOverscan = Math.round(Math.max(mapWidth, mapHeight) * 1.5);
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -2573,11 +2626,27 @@ async function exportRunRouteVideo(input: {
     throw new Error('El navegador no ha podido crear el canvas para el video.');
   }
 
-  const prepared = await prepareStaticRouteMap(input.route, mapWidth + mapOverscan, mapHeight + mapOverscan, 44, {
-    maxZoom: 14,
-    hillshadeOpacity: 0.38,
-    labelOpacity: 0.02,
-  });
+  // Prepare map tiles at a higher max zoom and request a stronger zoom boost so the
+  // video starts more focused and avoids showing the entire route at once.
+  // Reduce padding to allow a tighter framing.
+  const prepared = await prepareStaticRouteMap(
+    input.route,
+    mapWidth + mapOverscan,
+    mapHeight + mapOverscan,
+    24,
+    {
+      maxZoom: 16,
+      hillshadeOpacity: 0.46,
+      labelOpacity: 0.22,
+      zoomBoost: 0,
+    },
+  );
+
+  // Use the user-requested target: 2 seconds per km for the final video length.
+  const routeDistanceKm = input.run.distanceKm ?? prepared.animatedPoints.at(-1)?.distanceKm ?? 1;
+  const targetMs = Math.round(routeDistanceKm * 2000);
+  const videoDurationMs = clampNumber(Math.max(2000, targetMs), 2000, 120_000) || routeVideoDurationMs;
+
   renderRouteVideoFrame(context, prepared, input, 0);
 
   if (typeof canvas.captureStream !== 'function') {
@@ -2613,25 +2682,28 @@ async function exportRunRouteVideo(input: {
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const startedAt = performance.now();
+      const frameDurationMs = 1000 / routeVideoFps;
+      const totalFrames = Math.max(1, Math.ceil(videoDurationMs / frameDurationMs));
+      let currentFrame = 1;
 
-      const render = (now: number) => {
+      const renderFrame = () => {
         try {
-          const progress = clampNumber((now - startedAt) / routeVideoDurationMs, 0, 1);
+          const progress = clampNumber(currentFrame / totalFrames, 0, 1);
           renderRouteVideoFrame(context, prepared, input, progress);
 
-          if (progress >= 1) {
-            window.setTimeout(resolve, Math.ceil(1_000 / routeVideoFps) * 2);
+          if (currentFrame >= totalFrames) {
+            window.setTimeout(resolve, frameDurationMs * 2);
             return;
           }
 
-          window.requestAnimationFrame(render);
+          currentFrame += 1;
+          window.setTimeout(renderFrame, frameDurationMs);
         } catch (error) {
           reject(error);
         }
       };
 
-      window.requestAnimationFrame(render);
+      window.setTimeout(renderFrame, 0);
     });
   } finally {
     if (recorder.state !== 'inactive') {
@@ -4659,7 +4731,7 @@ function App() {
                       </Skeleton>
                     }
                   >
-                    <ActivityRouteMap route={routeState.data} title={selectedRun.name} />
+                    <ActivityRouteMap route={routeState.data} title={selectedRun.name} isActive={activeSection === 'sessions'} />
                   </Suspense>
                 ) : routeState.status === 'loading' ? (
                   <Skeleton
