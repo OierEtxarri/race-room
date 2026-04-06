@@ -29,3 +29,4 @@ data/*.sqlite-*
 *.sln
 *.sw?
 vendor/garmin-connect-mcp
+.continue/
