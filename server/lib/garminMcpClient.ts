@@ -110,6 +110,7 @@ class GarminMcpSessionClient {
           HOME: this.auth.homeDir,
           GARMIN_EMAIL: this.auth.garminEmail,
           GARMIN_PASSWORD: this.auth.garminPassword,
+          GARMIN_MCP_TOKEN_DIR: this.auth.tokenDirs.mcp,
         } as Record<string, string>,
         cwd: config.rootDir,
         stderr: 'pipe',
