@@ -224,8 +224,8 @@ const runOverlayTemplate = {
   headline: 'Blur card',
   description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
 };
-const routeVideoDurationMs = 12_000;
-const routeVideoFps = 30;
+const routeVideoDurationMs = 10_000;
+const routeVideoFps = 24;
 const canvasDisplayFontFamily =
   '"SF Pro Display", "SF Pro Text", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif';
 const canvasTextFontFamily =
@@ -893,7 +893,136 @@ async function resolveAthleteAvatarAsset(avatarPath: string | null, sessionId: s
 const staticTileSize = TILE_SIZE;
 // Tile URLs are now imported from mapStyle.ts (shared with ActivityRouteMap.tsx)
 // See: SATELLITE_TILE_URL, HILLSHADE_TILE_URL, LABELS_TILE_URL
-const staticTileCache = new Map<string, Promise<HTMLImageElement | null>>();
+const staticTileCache = new Map<string, Promise<HTMLImageElement>>();
+const tileBundleCache = new Map<string, TileBundle>();
+const tileBundlePromises = new Map<string, Promise<TileBundle>>();
+
+type TileBundle = {
+  satellite: HTMLImageElement;
+  hillshade: HTMLImageElement;
+  labels: HTMLImageElement;
+};
+
+function tileBundleKey(tile: { z: number; x: number; y: number }) {
+  return `${tile.z}:${tile.x}:${tile.y}`;
+}
+
+function buildTileBundleUrls(tile: { z: number; x: number; y: number }) {
+  const replace = (template: string) =>
+    template
+      .replace('{z}', String(tile.z))
+      .replace('{x}', String(tile.x))
+      .replace('{y}', String(tile.y));
+
+  return {
+    satellite: replace(SATELLITE_TILE_URL),
+    hillshade: replace(HILLSHADE_TILE_URL),
+    labels: replace(LABELS_TILE_URL),
+  };
+}
+
+function distinctTileCoordinates(tiles: Array<{ z: number; x: number; y: number }>) {
+  const unique = new Map<string, { z: number; x: number; y: number }>();
+  tiles.forEach((tile) => {
+    const key = tileBundleKey(tile);
+    if (!unique.has(key)) {
+      unique.set(key, tile);
+    }
+  });
+  return Array.from(unique.values());
+}
+
+async function loadRemoteImageAsset(url: string): Promise<HTMLImageElement> {
+  if (!staticTileCache.has(url)) {
+    const loadPromise = (async () => {
+      const maxAttempts = 3;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
+
+          const response = await fetch(url, {
+            mode: 'cors',
+            cache: 'force-cache',
+            signal: controller.signal,
+          });
+          window.clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            throw new Error(`Tile fetch failed ${response.status} ${response.statusText}`);
+          }
+
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+
+          try {
+            return await loadImageElement(blobUrl);
+          } finally {
+            URL.revokeObjectURL(blobUrl);
+          }
+        } catch (error) {
+          lastError = error;
+          if (attempt === maxAttempts) {
+            throw new Error(`Fallo cargando tile ${url}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+        }
+      }
+
+      throw lastError;
+    })();
+
+    staticTileCache.set(url, loadPromise);
+    loadPromise.catch(() => {
+      staticTileCache.delete(url);
+    });
+  }
+
+  return staticTileCache.get(url)!;
+}
+
+async function preloadTileBundle(tile: { z: number; x: number; y: number }) {
+  const key = tileBundleKey(tile);
+  if (!tileBundlePromises.has(key)) {
+    const promise = (async () => {
+      const urls = buildTileBundleUrls(tile);
+      const [satellite, hillshade, labels] = await Promise.all([
+        loadRemoteImageAsset(urls.satellite),
+        loadRemoteImageAsset(urls.hillshade),
+        loadRemoteImageAsset(urls.labels),
+      ]);
+
+      const bundle = { satellite, hillshade, labels };
+      tileBundleCache.set(key, bundle);
+      return bundle;
+    })();
+
+    tileBundlePromises.set(key, promise);
+    promise.catch(() => {
+      tileBundlePromises.delete(key);
+      tileBundleCache.delete(key);
+    });
+  }
+
+  return tileBundlePromises.get(key)!;
+}
+
+async function preloadVisibleTileBundles(tiles: Array<{ z: number; x: number; y: number }>) {
+  const uniqueTiles = distinctTileCoordinates(tiles);
+  await Promise.all(uniqueTiles.map(preloadTileBundle));
+  return uniqueTiles.length;
+}
+
+function getLoadedTileBundle(tile: { z: number; x: number; y: number }) {
+  const key = tileBundleKey(tile);
+  const bundle = tileBundleCache.get(key);
+  if (!bundle) {
+    throw new Error(`Tile bundle ${key} no está precargado`);
+  }
+  return bundle;
+}
 
 function paceThresholds(route: ActivityRoute) {
   const paces = route.samples
@@ -998,35 +1127,6 @@ function staticMapViewport(
     originX: centerX - width / 2,
     originY: centerY - height / 2,
   };
-}
-
-async function loadRemoteImageAsset(url: string) {
-  if (!staticTileCache.has(url)) {
-    staticTileCache.set(
-      url,
-      Promise.race([
-        fetch(url, { mode: 'cors' })
-          .then((response) => (response.ok ? response.blob() : null))
-          .then(async (blob) => {
-            if (!blob) {
-              return null;
-            }
-
-            const blobUrl = URL.createObjectURL(blob);
-            try {
-              const image = await loadImageElement(blobUrl);
-              return image;
-            } finally {
-              URL.revokeObjectURL(blobUrl);
-            }
-          })
-          .catch(() => null),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)), // 5 second timeout
-      ]),
-    );
-  }
-
-  return staticTileCache.get(url)!;
 }
 
 function drawPreparedRouteMapBase(
@@ -1496,8 +1596,8 @@ function drawVideoMapLayer(
  */
 type PlaybackState = {
   progress: number;
-  x: number;
-  y: number;
+  worldX: number;
+  worldY: number;
   distanceKm: number;
   elapsedSeconds: number;
   paceSecondsPerKm: number | null;
@@ -1520,7 +1620,7 @@ type WorldRect = {
  * Build playback samples from route points
  * Creates a time-indexed map of route progress for smooth interpolation
  */
-function buildPlaybackSamples(route: ActivityRoute): PlaybackState[] {
+function buildPlaybackSamples(route: ActivityRoute, zoom: number): PlaybackState[] {
   const animationSource =
     route.samples.length >= 2
       ? route.samples
@@ -1571,22 +1671,22 @@ function buildPlaybackSamples(route: ActivityRoute): PlaybackState[] {
       cumulativeElapsedSeconds += Math.max(segmentElapsedSeconds, 0.35);
     }
 
-    // Compute heading from segment
+    const pixel = mercatorPixel(sample.point[0], sample.point[1], zoom);
+
     let segmentHeading = 0;
     if (index > 0) {
       const prev = animationSource[index - 1]!;
-      const curr = sample;
       const [lat1, lng1] = prev.point;
-      const [lat2, lng2] = curr.point;
+      const [lat2, lng2] = sample.point;
       const latDiff = lat2 - lat1;
       const lngDiff = lng2 - lng1;
       segmentHeading = Math.atan2(lngDiff, latDiff);
     }
 
     samples.push({
-      progress: 0, // Will be filled in second pass
-      x: 0,        // Will be filled with world pixel, depends on zoom
-      y: 0,        // Will be filled with world pixel, depends on zoom
+      progress: 0,
+      worldX: pixel.x,
+      worldY: pixel.y,
       distanceKm: cumulativeDistanceKm,
       elapsedSeconds: cumulativeElapsedSeconds,
       paceSecondsPerKm: sample.paceSecondsPerKm,
@@ -1594,7 +1694,6 @@ function buildPlaybackSamples(route: ActivityRoute): PlaybackState[] {
     });
   }
 
-  // Second pass: normalize progress
   const totalElapsedSeconds = samples.at(-1)?.elapsedSeconds ?? 0;
   samples.forEach((sample, index) => {
     sample.progress =
@@ -1618,11 +1717,10 @@ function interpolatePlaybackState(samples: PlaybackState[], progress: number): P
   const lastSample = samples.at(-1);
 
   if (!firstSample || !lastSample) {
-    // Fallback for empty route
     return {
       progress: clampedProgress,
-      x: 0,
-      y: 0,
+      worldX: 0,
+      worldY: 0,
       distanceKm: 0,
       elapsedSeconds: 0,
       paceSecondsPerKm: null,
@@ -1638,7 +1736,6 @@ function interpolatePlaybackState(samples: PlaybackState[], progress: number): P
     return { ...lastSample, progress: clampedProgress };
   }
 
-  // Binary search for surrounding samples
   let left = 0;
   let right = samples.length - 1;
 
@@ -1658,8 +1755,8 @@ function interpolatePlaybackState(samples: PlaybackState[], progress: number): P
 
   return {
     progress: clampedProgress,
-    x: lerpNumber(sample1.x, sample2.x, t),
-    y: lerpNumber(sample1.y, sample2.y, t),
+    worldX: lerpNumber(sample1.worldX, sample2.worldX, t),
+    worldY: lerpNumber(sample1.worldY, sample2.worldY, t),
     distanceKm: lerpNumber(sample1.distanceKm, sample2.distanceKm, t),
     elapsedSeconds: Math.round(lerpNumber(sample1.elapsedSeconds, sample2.elapsedSeconds, t)),
     paceSecondsPerKm: sample2.paceSecondsPerKm ?? sample1.paceSecondsPerKm,
@@ -1678,8 +1775,8 @@ function resolveSmoothedHeadingRadians(samples: PlaybackState[], progress: numbe
   const behindPoint = interpolatePlaybackState(samples, behindProgress);
   const aheadPoint = interpolatePlaybackState(samples, aheadProgress);
 
-  const dx = aheadPoint.x - behindPoint.x;
-  const dy = aheadPoint.y - behindPoint.y;
+  const dx = aheadPoint.worldX - behindPoint.worldX;
+  const dy = aheadPoint.worldY - behindPoint.worldY;
   const distSquared = dx * dx + dy * dy;
 
   if (distSquared < 1) {
@@ -1696,18 +1793,17 @@ function resolveSmoothedHeadingRadians(samples: PlaybackState[], progress: numbe
  * Interpolate between two camera states with easing (Hermite)
  */
 function interpolateCamera(
-  cameraA: { centerX: number; centerY: number; zoom: number; heading: number; tilt: number },
-  cameraB: { centerX: number; centerY: number; zoom: number; heading: number; tilt: number },
+  cameraA: { centerX: number; centerY: number; scale: number; heading: number },
+  cameraB: { centerX: number; centerY: number; scale: number; heading: number },
   t: number,
 ) {
-  const eased = t * t * (3 - 2 * t); // Hermite easing
+  const eased = t * t * (3 - 2 * t);
 
   return {
     centerX: lerpNumber(cameraA.centerX, cameraB.centerX, eased),
     centerY: lerpNumber(cameraA.centerY, cameraB.centerY, eased),
-    zoom: lerpNumber(cameraA.zoom, cameraB.zoom, eased),
+    scale: lerpNumber(cameraA.scale, cameraB.scale, eased),
     heading: lerpNumber(cameraA.heading, cameraB.heading, eased),
-    tilt: lerpNumber(cameraA.tilt, cameraB.tilt, eased),
   };
 }
 
@@ -1715,17 +1811,42 @@ function interpolateCamera(
  * Compute visible world rectangle given camera and card dimensions
  */
 function computeVisibleWorldRect(
-  camera: { centerX: number; centerY: number; zoom: number },
+  camera: { centerX: number; centerY: number; scale: number },
   cardWidth: number,
   cardHeight: number,
 ): WorldRect {
-  const zoomScale = Math.pow(2, camera.zoom);
+  return {
+    x: camera.centerX - cardWidth / (2 * camera.scale),
+    y: camera.centerY - cardHeight / (2 * camera.scale),
+    width: cardWidth / camera.scale,
+    height: cardHeight / camera.scale,
+  };
+}
+
+function cameraCenterForFocus(
+  worldX: number,
+  worldY: number,
+  heading: number,
+  cardX: number,
+  cardY: number,
+  cardWidth: number,
+  cardHeight: number,
+  focusX: number,
+  focusY: number,
+  scale: number,
+) {
+  const anchorX = cardX + cardWidth / 2;
+  const anchorY = cardY + cardHeight / 2;
+  const dx = focusX - anchorX;
+  const dy = focusY - anchorY;
+  const cos = Math.cos(heading);
+  const sin = Math.sin(heading);
+  const worldDx = (dx / scale) * cos + (dy / scale) * sin;
+  const worldDy = -(dx / scale) * sin + (dy / scale) * cos;
 
   return {
-    x: camera.centerX - cardWidth / (2 * zoomScale),
-    y: camera.centerY - cardHeight / (2 * zoomScale),
-    width: cardWidth / zoomScale,
-    height: cardHeight / zoomScale,
+    centerX: worldX - worldDx,
+    centerY: worldY - worldDy,
   };
 }
 
@@ -1761,64 +1882,43 @@ function resolveVisibleTiles(worldRect: WorldRect, tileZoom: number): Array<{ z:
  * Render base map layer (satellite with hillshade and labels)
  * Maps world pixels to canvas coordinates using camera transform
  */
-async function drawBaseMapForCamera(
+function drawBaseMapForCamera(
   context: CanvasRenderingContext2D,
   tileCoords: Array<{ z: number; x: number; y: number }>,
-  camera: { centerX: number; centerY: number; zoom: number; heading: number },
+  camera: { centerX: number; centerY: number; scale: number; heading: number },
   cardX: number,
   cardY: number,
   cardWidth: number,
   cardHeight: number,
 ) {
   const tileSize = TILE_SIZE;
-  const zoomScale = Math.pow(2, camera.zoom);
   const anchorX = cardX + cardWidth / 2;
   const anchorY = cardY + cardHeight / 2;
 
   context.save();
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
   context.translate(anchorX, anchorY);
   context.rotate(camera.heading);
-  context.scale(zoomScale, zoomScale);
+  context.scale(camera.scale, camera.scale);
   context.translate(-camera.centerX, -camera.centerY);
 
-  // Fetch and render tiles
+  context.globalCompositeOperation = 'source-over';
+
   for (const tileCoord of tileCoords) {
+    const bundle = getLoadedTileBundle(tileCoord);
     const tileX = tileCoord.x * tileSize;
     const tileY = tileCoord.y * tileSize;
 
-    // Fetch and render satellite
-    const satUrl = SATELLITE_TILE_URL.replace('{z}', String(tileCoord.z))
-      .replace('{x}', String(tileCoord.x))
-      .replace('{y}', String(tileCoord.y));
-    const satellite = await loadRemoteImageAsset(satUrl);
+    context.drawImage(bundle.satellite, tileX, tileY, tileSize, tileSize);
 
-    if (satellite) {
-      context.drawImage(satellite, tileX, tileY, tileSize, tileSize);
-    }
+    context.globalAlpha = MAP_LAYER_OPACITIES.hillshade;
+    context.drawImage(bundle.hillshade, tileX, tileY, tileSize, tileSize);
+    context.globalAlpha = 1;
 
-    // Fetch and render hillshade
-    const hillUrl = HILLSHADE_TILE_URL.replace('{z}', String(tileCoord.z))
-      .replace('{x}', String(tileCoord.x))
-      .replace('{y}', String(tileCoord.y));
-    const hillshade = await loadRemoteImageAsset(hillUrl);
-
-    if (hillshade) {
-      context.globalAlpha = MAP_LAYER_OPACITIES.hillshade;
-      context.drawImage(hillshade, tileX, tileY, tileSize, tileSize);
-      context.globalAlpha = 1;
-    }
-
-    // Fetch and render labels
-    const labelsUrl = LABELS_TILE_URL.replace('{z}', String(tileCoord.z))
-      .replace('{x}', String(tileCoord.x))
-      .replace('{y}', String(tileCoord.y));
-    const labels = await loadRemoteImageAsset(labelsUrl);
-
-    if (labels) {
-      context.globalAlpha = MAP_LAYER_OPACITIES.labels;
-      context.drawImage(labels, tileX, tileY, tileSize, tileSize);
-      context.globalAlpha = 1;
-    }
+    context.globalAlpha = MAP_LAYER_OPACITIES.labels;
+    context.drawImage(bundle.labels, tileX, tileY, tileSize, tileSize);
+    context.globalAlpha = 1;
   }
 
   context.restore();
@@ -1829,8 +1929,9 @@ async function drawBaseMapForCamera(
  */
 function drawFullRouteOverview(
   context: CanvasRenderingContext2D,
-  projectedPoints: Array<[number, number]>,
-  animatedSegments: Array<{ start: [number, number]; end: [number, number]; color: string }>,
+  camera: { centerX: number; centerY: number; scale: number; heading: number },
+  worldPoints: Array<{ x: number; y: number }>,
+  worldSegments: Array<{ start: { x: number; y: number }; end: { x: number; y: number }; color: string }>,
   cardX: number,
   cardY: number,
   cardWidth: number,
@@ -1838,53 +1939,51 @@ function drawFullRouteOverview(
 ) {
   context.save();
   context.translate(cardX + cardWidth / 2, cardY + cardHeight / 2);
+  context.rotate(camera.heading);
+  context.scale(camera.scale, camera.scale);
+  context.translate(-camera.centerX, -camera.centerY);
 
-  // Draw shadow
   context.strokeStyle = ROUTE_LINE_STYLES.shadow.color;
   context.lineWidth = ROUTE_LINE_STYLES.shadow.width;
   context.lineCap = 'round';
   context.lineJoin = 'round';
   context.globalAlpha = ROUTE_LINE_STYLES.shadow.opacity;
   context.beginPath();
-  projectedPoints.forEach(([x, y], idx) => {
-    if (idx === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
+  worldPoints.forEach((point, idx) => {
+    if (idx === 0) context.moveTo(point.x, point.y);
+    else context.lineTo(point.x, point.y);
   });
   context.stroke();
 
-  // Draw glow
   context.globalAlpha = ROUTE_LINE_STYLES.glow.opacity;
-  animatedSegments.forEach((segment) => {
+  worldSegments.forEach((segment) => {
     context.strokeStyle = segment.color;
     context.lineWidth = ROUTE_LINE_STYLES.glow.width;
     context.beginPath();
-    context.moveTo(segment.start[0], segment.start[1]);
-    context.lineTo(segment.end[0], segment.end[1]);
+    context.moveTo(segment.start.x, segment.start.y);
+    context.lineTo(segment.end.x, segment.end.y);
     context.stroke();
   });
 
-  // Draw main line
   context.globalAlpha = ROUTE_LINE_STYLES.main.opacity;
-  animatedSegments.forEach((segment) => {
+  worldSegments.forEach((segment) => {
     context.strokeStyle = segment.color;
     context.lineWidth = ROUTE_LINE_STYLES.main.width;
     context.beginPath();
-    context.moveTo(segment.start[0], segment.start[1]);
-    context.lineTo(segment.end[0], segment.end[1]);
+    context.moveTo(segment.start.x, segment.start.y);
+    context.lineTo(segment.end.x, segment.end.y);
     context.stroke();
   });
 
-  // Draw start marker
   context.globalAlpha = 1;
   context.fillStyle = ROUTE_MARKERS.start.color;
   context.beginPath();
-  context.arc(projectedPoints[0]![0], projectedPoints[0]![1], ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
+  context.arc(worldPoints[0]!.x, worldPoints[0]!.y, ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
   context.fill();
 
-  // Draw finish marker
   context.fillStyle = ROUTE_MARKERS.finish.color;
   context.beginPath();
-  context.arc(projectedPoints.at(-1)![0], projectedPoints.at(-1)![1], ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
+  context.arc(worldPoints.at(-1)!.x, worldPoints.at(-1)!.y, ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
   context.fill();
 
   context.restore();
@@ -1895,9 +1994,10 @@ function drawFullRouteOverview(
  */
 function drawRouteProgressFrame(
   context: CanvasRenderingContext2D,
+  camera: { centerX: number; centerY: number; scale: number; heading: number },
   playbackState: PlaybackState,
-  projectedPoints: Array<[number, number]>,
-  animatedSegments: Array<{ start: [number, number]; end: [number, number]; color: string }>,
+  worldPoints: Array<{ x: number; y: number }>,
+  worldSegments: Array<{ start: { x: number; y: number }; end: { x: number; y: number }; color: string }>,
   progression: number,
   cardX: number,
   cardY: number,
@@ -1906,60 +2006,57 @@ function drawRouteProgressFrame(
 ) {
   context.save();
   context.translate(cardX + cardWidth / 2, cardY + cardHeight / 2);
+  context.rotate(camera.heading);
+  context.scale(camera.scale, camera.scale);
+  context.translate(-camera.centerX, -camera.centerY);
 
-  // Draw completed route
   context.strokeStyle = ROUTE_LINE_STYLES.shadow.color;
   context.lineWidth = ROUTE_LINE_STYLES.shadow.width;
   context.lineCap = 'round';
   context.lineJoin = 'round';
   context.globalAlpha = ROUTE_LINE_STYLES.shadow.opacity;
   context.beginPath();
-  projectedPoints.slice(0, Math.ceil(projectedPoints.length * progression) + 1).forEach(([x, y], idx) => {
-    if (idx === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
+  worldPoints.slice(0, Math.ceil(worldPoints.length * progression) + 1).forEach((point, idx) => {
+    if (idx === 0) context.moveTo(point.x, point.y);
+    else context.lineTo(point.x, point.y);
   });
   context.stroke();
 
-  // Draw glow for completed segments
   context.globalAlpha = ROUTE_LINE_STYLES.glow.opacity;
-  animatedSegments.forEach((segment) => {
+  worldSegments.forEach((segment) => {
     context.strokeStyle = segment.color;
     context.lineWidth = ROUTE_LINE_STYLES.glow.width;
     context.beginPath();
-    context.moveTo(segment.start[0], segment.start[1]);
-    context.lineTo(segment.end[0], segment.end[1]);
+    context.moveTo(segment.start.x, segment.start.y);
+    context.lineTo(segment.end.x, segment.end.y);
     context.stroke();
   });
 
-  // Draw main line for completed
   context.globalAlpha = ROUTE_LINE_STYLES.main.opacity;
-  animatedSegments.forEach((segment) => {
+  worldSegments.forEach((segment) => {
     context.strokeStyle = segment.color;
     context.lineWidth = ROUTE_LINE_STYLES.main.width;
     context.beginPath();
-    context.moveTo(segment.start[0], segment.start[1]);
-    context.lineTo(segment.end[0], segment.end[1]);
+    context.moveTo(segment.start.x, segment.start.y);
+    context.lineTo(segment.end.x, segment.end.y);
     context.stroke();
   });
 
-  // Draw start marker
   context.globalAlpha = 1;
   context.fillStyle = ROUTE_MARKERS.start.color;
   context.beginPath();
-  context.arc(projectedPoints[0]![0], projectedPoints[0]![1], ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
+  context.arc(worldPoints[0]!.x, worldPoints[0]!.y, ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
   context.fill();
 
-  // Draw finish marker
   context.fillStyle = ROUTE_MARKERS.finish.color;
   context.beginPath();
-  context.arc(projectedPoints.at(-1)![0], projectedPoints.at(-1)![1], ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
+  context.arc(worldPoints.at(-1)!.x, worldPoints.at(-1)!.y, ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
   context.fill();
 
-  // Draw active position marker
   context.fillStyle = '#00F0FF';
   context.globalAlpha = 0.8;
   context.beginPath();
-  context.arc(playbackState.x, playbackState.y, 6, 0, Math.PI * 2);
+  context.arc(playbackState.worldX, playbackState.worldY, 6, 0, Math.PI * 2);
   context.fill();
 
   context.restore();
@@ -1968,7 +2065,31 @@ function drawRouteProgressFrame(
 /**
  * Draw video overlay (header, metrics, progress bar)
  */
-function drawVideoOverlay(
+function drawVideoBackground(context: CanvasRenderingContext2D) {
+  const width = context.canvas.width;
+  const height = context.canvas.height;
+
+  const background = context.createLinearGradient(0, 0, 0, height);
+  background.addColorStop(0, '#171717');
+  background.addColorStop(0.36, '#122');
+  background.addColorStop(1, '#0d0d0d');
+  context.fillStyle = background;
+  context.fillRect(0, 0, width, height);
+
+  const topGlow = context.createRadialGradient(width * 0.86, height * 0.14, 0, width * 0.86, height * 0.14, width * 0.72);
+  topGlow.addColorStop(0, 'rgba(83,157,245,0.18)');
+  topGlow.addColorStop(1, 'rgba(83,157,245,0)');
+  context.fillStyle = topGlow;
+  context.fillRect(0, 0, width, height);
+
+  const sideGlow = context.createRadialGradient(width * 0.18, height * 0.84, 0, width * 0.18, height * 0.84, width * 0.64);
+  sideGlow.addColorStop(0, 'rgba(242,87,116,0.12)');
+  sideGlow.addColorStop(1, 'rgba(242,87,116,0)');
+  context.fillStyle = sideGlow;
+  context.fillRect(0, 0, width, height);
+}
+
+function drawVideoForeground(
   context: CanvasRenderingContext2D,
   layout: typeof VIDEO_LAYOUT,
   playbackState: PlaybackState,
@@ -1977,35 +2098,11 @@ function drawVideoOverlay(
   providerLabel: string,
 ) {
   const width = context.canvas.width;
-  const height = context.canvas.height;
   const paceLabel = playbackState.paceSecondsPerKm !== null
     ? formatPace(playbackState.paceSecondsPerKm)
     : formatPace(run.paceSecondsPerKm);
   const completion = clampNumber(run.distanceKm > 0 ? playbackState.distanceKm / run.distanceKm : playbackState.progress, 0, 1);
 
-  // Background gradient
-  const background = context.createLinearGradient(0, 0, 0, height);
-  background.addColorStop(0, '#171717');
-  background.addColorStop(0.36, '#122');
-  background.addColorStop(1, '#0d0d0d');
-  context.fillStyle = background;
-  context.fillRect(0, 0, width, height);
-
-  // Top glow
-  const topGlow = context.createRadialGradient(width * 0.86, height * 0.14, 0, width * 0.86, height * 0.14, width * 0.72);
-  topGlow.addColorStop(0, 'rgba(83,157,245,0.18)');
-  topGlow.addColorStop(1, 'rgba(83,157,245,0)');
-  context.fillStyle = topGlow;
-  context.fillRect(0, 0, width, height);
-
-  // Side glow
-  const sideGlow = context.createRadialGradient(width * 0.18, height * 0.84, 0, width * 0.18, height * 0.84, width * 0.64);
-  sideGlow.addColorStop(0, 'rgba(242,87,116,0.12)');
-  sideGlow.addColorStop(1, 'rgba(242,87,116,0)');
-  context.fillStyle = sideGlow;
-  context.fillRect(0, 0, width, height);
-
-  // Header panel
   fillRoundedPanel(context, layout.header.x, layout.header.y, layout.header.w, layout.header.h, {
     radius: 30,
     fill: 'rgba(24,24,24,0.92)',
@@ -2013,7 +2110,6 @@ function drawVideoOverlay(
     lineWidth: 1.2,
   });
 
-  // Badge
   context.save();
   context.beginPath();
   context.arc(layout.header.x + 42, layout.header.y + 48, 22, 0, Math.PI * 2);
@@ -2036,7 +2132,6 @@ function drawVideoOverlay(
   context.textAlign = 'left';
   context.textBaseline = 'alphabetic';
 
-  // Pills
   drawOverlayPill(context, layout.header.x + 76, layout.header.y + 24, 'SESSION SHORT', {
     fill: 'rgba(255,255,255,0.035)',
     stroke: 'rgba(255,255,255,0.08)',
@@ -2062,7 +2157,6 @@ function drawVideoOverlay(
     paddingX: 16,
   });
 
-  // Title
   context.fillStyle = '#FFFFFF';
   context.font = canvasDisplayFont(36, 600);
   wrapCanvasText(context, run.name, layout.header.x + 20, layout.header.y + 86, layout.header.w - 40, 42, 2);
@@ -2074,7 +2168,6 @@ function drawVideoOverlay(
     layout.header.y + 172
   );
 
-  // Metrics panel
   fillRoundedPanel(context, layout.metricsCard.x, layout.metricsCard.y, layout.metricsCard.w, layout.metricsCard.h, {
     radius: layout.metricsCard.r,
     fill: 'rgba(32,32,32,0.96)',
@@ -2082,7 +2175,6 @@ function drawVideoOverlay(
     lineWidth: 1.2,
   });
 
-  // Metrics text
   context.fillStyle = 'rgba(255,255,255,0.52)';
   context.font = canvasTextFont(13, 500);
   context.fillText('KM', layout.metricsCard.x + 26, layout.metricsCard.y + 54);
@@ -2101,7 +2193,6 @@ function drawVideoOverlay(
   context.fillText(paceLabel ?? '--:--', layout.metricsCard.x + 368, layout.metricsCard.y + 124);
   context.fillText(formatDuration(playbackState.elapsedSeconds), layout.metricsCard.x + 368, layout.metricsCard.y + 218);
 
-  // Progress bar
   fillRoundedPanel(context, layout.metricsCard.x + 26, layout.metricsCard.y + 232, layout.metricsCard.w - 52, 14, {
     radius: 999,
     fill: 'rgba(255,255,255,0.06)',
@@ -2118,7 +2209,6 @@ function drawVideoOverlay(
     fill: progressGradient,
   });
 
-  // Footer stats
   context.fillStyle = 'rgba(255,255,255,0.66)';
   context.font = canvasTextFont(14, 500);
   context.fillText(
@@ -3068,6 +3158,7 @@ async function exportRunRouteVideo(input: {
   providerLabel: string;
 }) {
   await document.fonts.ready.catch(() => undefined);
+  console.log('[exportRunRouteVideo] start', { runId: input.run.id, date: input.run.date });
 
   const format = pickRouteVideoExportFormat();
   if (!format) {
@@ -3084,51 +3175,130 @@ async function exportRunRouteVideo(input: {
     throw new Error('El navegador no ha podido crear el canvas para el video.');
   }
 
-  // Build playback samples  from route (frame data indexed by progress)
-  const playbackSamples = buildPlaybackSamples(input.route);
-
-  // Get static viewport for overview camera position
-  const viewport = staticMapViewport(input.route, layout.mapCard.w, layout.mapCard.h, 64, 14);
-
-  // Project route points to world pixel space at selected zoom
-  const projectedPoints = input.route.points.map(([lat, lng]) => {
-    const pixel = mercatorPixel(lat, lng, viewport.zoom);
-    return [pixel.x - viewport.originX, pixel.y - viewport.originY] as [number, number];
-  });
-
-  // Build animated segments with colors
-  const animatedSegments: Array<{ start: [number, number]; end: [number, number]; color: string }> = [];
+  const playbackSamples = buildPlaybackSamples(input.route, VIDEO_TILE_ZOOM);
+  const worldRoutePoints = input.route.points.map(([lat, lng]) => mercatorPixel(lat, lng, VIDEO_TILE_ZOOM));
   const thresholds = paceThresholds(input.route);
-  for (let i = 1; i < projectedPoints.length; i += 1) {
-    const sample1 = input.route.samples[i - 1];
-    const sample2 = input.route.samples[i];
-    const frameSegmentPace =
-      sample2?.paceSecondsPerKm !== null && sample1?.paceSecondsPerKm !== null
-        ? (sample2.paceSecondsPerKm + sample1.paceSecondsPerKm) / 2
-        : sample2?.paceSecondsPerKm ?? sample1?.paceSecondsPerKm ?? null;
 
-    animatedSegments.push({
-      start: projectedPoints[i - 1] ?? [0, 0],
-      end: projectedPoints[i] ?? [0, 0],
-      color: paceColor(frameSegmentPace, thresholds),
+  const worldSegments: Array<{ start: { x: number; y: number }; end: { x: number; y: number }; color: string }> = [];
+  for (let index = 1; index < worldRoutePoints.length; index += 1) {
+    const prevSample = input.route.samples[index - 1];
+    const nextSample = input.route.samples[index];
+    const segmentPace =
+      nextSample?.paceSecondsPerKm !== null && prevSample?.paceSecondsPerKm !== null
+        ? (nextSample.paceSecondsPerKm + prevSample.paceSecondsPerKm) / 2
+        : nextSample?.paceSecondsPerKm ?? prevSample?.paceSecondsPerKm ?? routeMedianPace(input.route) ?? 360;
+
+    worldSegments.push({
+      start: worldRoutePoints[index - 1],
+      end: worldRoutePoints[index],
+      color: paceColor(segmentPace, thresholds),
     });
   }
 
-  // Video duration: 2 seconds per km
-  const routeDistanceKm = input.run.distanceKm ?? 1;
-  const targetMs = Math.round(routeDistanceKm * 2000);
-  const videoDurationMs = clampNumber(Math.max(2000, targetMs), 2000, 120_000) || routeVideoDurationMs;
+  const xs = worldRoutePoints.map((point) => point.x);
+  const ys = worldRoutePoints.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const routeWidth = Math.max(1, maxX - minX);
+  const routeHeight = Math.max(1, maxY - minY);
+  const overviewScale = Math.min(
+    Math.max((layout.mapCard.w - 80) / routeWidth, 0.08),
+    Math.max((layout.mapCard.h - 80) / routeHeight, 0.08),
+  );
 
-  // Render first frame to test
-  drawVideoOverlay(context, layout, playbackSamples[0] ?? {
-    progress: 0,
-    x: 0,
-    y: 0,
-    distanceKm: 0,
-    elapsedSeconds: 0,
-    paceSecondsPerKm: null,
-    segmentHeading: 0,
-  }, input.run, input.athleteName, input.providerLabel);
+  const overviewCamera = {
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
+    scale: overviewScale,
+    heading: 0,
+  };
+
+  const followScale = 1.8;
+  const followFocus = {
+    x: layout.mapCard.x + layout.mapCard.w * 0.5,
+    y: layout.mapCard.y + layout.mapCard.h * 0.64,
+  };
+
+  const buildRunnerCamera = (progress: number) => {
+    const playbackState = interpolatePlaybackState(playbackSamples, progress);
+    const heading = resolveSmoothedHeadingRadians(playbackSamples, progress);
+    const center = cameraCenterForFocus(
+      playbackState.worldX,
+      playbackState.worldY,
+      heading,
+      layout.mapCard.x,
+      layout.mapCard.y,
+      layout.mapCard.w,
+      layout.mapCard.h,
+      followFocus.x,
+      followFocus.y,
+      followScale,
+    );
+
+    return {
+      centerX: center.centerX,
+      centerY: center.centerY,
+      scale: followScale,
+      heading,
+    };
+  };
+
+  const buildCamera = (progress: number) => {
+    const clampedProgress = clampNumber(progress, 0, 1);
+    if (clampedProgress <= VIDEO_PHASES.overview.end) {
+      return overviewCamera;
+    }
+
+    if (clampedProgress <= VIDEO_PHASES.transition.end) {
+      const transitionLocalProgress =
+        (clampedProgress - VIDEO_PHASES.overview.end) /
+        Math.max(VIDEO_PHASES.transition.end - VIDEO_PHASES.overview.end, 0.0001);
+      return interpolateCamera(overviewCamera, buildRunnerCamera(clampedProgress), transitionLocalProgress);
+    }
+
+    return buildRunnerCamera(clampedProgress);
+  };
+
+  const keyCameras: Array<{ centerX: number; centerY: number; scale: number; heading: number }> = [overviewCamera];
+  const transitionSamples = 5;
+  for (let index = 0; index < transitionSamples; index += 1) {
+    const progress = clampNumber(
+      VIDEO_PHASES.overview.end + ((index + 1) / transitionSamples) * (VIDEO_PHASES.transition.end - VIDEO_PHASES.overview.end),
+      0,
+      1,
+    );
+    keyCameras.push(buildCamera(progress));
+  }
+
+  const followSamples = 8;
+  for (let index = 0; index < followSamples; index += 1) {
+    const progress = clampNumber(
+      VIDEO_PHASES.transition.end + ((index + 1) / followSamples) * (1 - VIDEO_PHASES.transition.end),
+      0,
+      1,
+    );
+    keyCameras.push(buildCamera(progress));
+  }
+
+  const visibleTileMap = new Map<string, { z: number; x: number; y: number }>();
+  keyCameras.forEach((camera) => {
+    resolveVisibleTiles(computeVisibleWorldRect(camera, layout.mapCard.w, layout.mapCard.h), VIDEO_TILE_ZOOM).forEach((tile) => {
+      visibleTileMap.set(tileBundleKey(tile), tile);
+    });
+  });
+
+  const visibleTiles = Array.from(visibleTileMap.values());
+  console.log('[exportRunRouteVideo] key cameras', keyCameras.length, 'visible tile bundles', visibleTiles.length);
+
+  const preloadStart = performance.now();
+  await preloadVisibleTileBundles(visibleTiles);
+  console.log('[exportRunRouteVideo] preload complete', visibleTiles.length, 'tiles in', Math.round(performance.now() - preloadStart), 'ms');
+
+  if (visibleTiles.length === 0) {
+    throw new Error('No hay tiles visibles para generar el video.');
+  }
 
   if (typeof canvas.captureStream !== 'function') {
     throw new Error('Tu navegador no permite grabar el canvas como video.');
@@ -3160,103 +3330,65 @@ async function exportRunRouteVideo(input: {
   });
 
   recorder.start();
+  console.log('[exportRunRouteVideo] recorder started', recorder.state);
 
   try {
     await new Promise<void>((resolve, reject) => {
       const frameDurationMs = 1000 / routeVideoFps;
-      const totalFrames = Math.max(1, Math.ceil(videoDurationMs / frameDurationMs));
-      let currentFrame = 1;
+      const totalFrames = Math.max(1, Math.round(routeVideoDurationMs * routeVideoFps / 1000));
+      console.log('[exportRunRouteVideo] totalFrames', totalFrames, 'durationMs', routeVideoDurationMs, 'fps', routeVideoFps);
+      let currentFrame = 0;
 
-      const renderFrame = async () => {
+      const renderFrame = () => {
         try {
-          const progress = clampNumber(currentFrame / totalFrames, 0, 1);
+          const progress = clampNumber(currentFrame / Math.max(totalFrames - 1, 1), 0, 1);
+          const playbackState = interpolatePlaybackState(playbackSamples, progress);
+          const camera = buildCamera(progress);
+          const frameTiles = resolveVisibleTiles(computeVisibleWorldRect(camera, layout.mapCard.w, layout.mapCard.h), VIDEO_TILE_ZOOM);
+          frameTiles.forEach(getLoadedTileBundle);
 
-          // Update playback samples with world pixel coordinates
-          playbackSamples.forEach((sample) => {
-            if (input.route.samples.length >= 2) {
-              // Find corresponding route index
-              const routeSample = input.route.samples.find(
-                (s) => s.paceSecondsPerKm === sample.paceSecondsPerKm
-              ) ?? input.route.samples[Math.floor(Math.random() * input.route.samples.length)];
-              const pixel = mercatorPixel(routeSample.point[0], routeSample.point[1], viewport.zoom);
-              sample.x = pixel.x - viewport.originX;
-              sample.y = pixel.y - viewport.originY;
-            }
+          context.clearRect(0, 0, layout.canvasWidth, layout.canvasHeight);
+          drawVideoBackground(context);
+
+          context.save();
+          context.shadowColor = 'rgba(0,0,0,0.34)';
+          context.shadowBlur = 34;
+          context.shadowOffsetY = 14;
+          fillRoundedPanel(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, {
+            radius: layout.mapCard.r,
+            fill: '#0A1015',
+          });
+          context.restore();
+
+          context.save();
+          drawRoundedRect(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, layout.mapCard.r);
+          context.clip();
+          drawBaseMapForCamera(context, frameTiles, camera, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+          if (progress <= VIDEO_PHASES.overview.end) {
+            drawFullRouteOverview(context, camera, worldRoutePoints, worldSegments, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+          } else {
+            drawRouteProgressFrame(context, camera, playbackState, worldRoutePoints, worldSegments, progress, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+          }
+          context.restore();
+
+          fillRoundedPanel(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, {
+            radius: layout.mapCard.r,
+            stroke: 'rgba(255,255,255,0.08)',
+            lineWidth: 1.5,
           });
 
-          const playbackState = interpolatePlaybackState(playbackSamples, progress);
+          drawVideoForeground(context, layout, playbackState, input.run, input.athleteName, input.providerLabel);
 
-          // Resolve camera based on video phase
-          let camera: { centerX: number; centerY: number; zoom: number; heading: number; tilt: number };
-          if (progress <= VIDEO_PHASES.overview.end) {
-            // Overview phase: show full route
-            camera = {
-              centerX: layout.mapCard.w / 2 + viewport.originX,
-              centerY: layout.mapCard.h / 2 + viewport.originY,
-              zoom: 0,
-              heading: 0,
-              tilt: 0,
-            };
-          } else if (progress <= VIDEO_PHASES.transition.end) {
-            // Transition phase: interpolate to follow cam
-            const overviewEndProgress = VIDEO_PHASES.overview.end;
-            const transitionLocalProgress = (progress - overviewEndProgress) / (VIDEO_PHASES.transition.end - overviewEndProgress);
-
-            const overviewCamera = {
-              centerX: layout.mapCard.w / 2 + viewport.originX,
-              centerY: layout.mapCard.h / 2 + viewport.originY,
-              zoom: 0,
-              heading: 0,
-              tilt: 0,
-            };
-
-            const followCamera = {
-              centerX: playbackState.x,
-              centerY: playbackState.y,
-              zoom: 1.2,
-              heading: resolveSmoothedHeadingRadians(playbackSamples, progress),
-              tilt: 0.06,
-            };
-
-            camera = interpolateCamera(overviewCamera, followCamera, transitionLocalProgress);
-          } else {
-            // Follow cam phase: runner cam with heading
-            camera = {
-              centerX: playbackState.x,
-              centerY: playbackState.y,
-              zoom: 1.2,
-              heading: resolveSmoothedHeadingRadians(playbackSamples, progress),
-              tilt: 0.06,
-            };
-          }
-
-          // Compute visible tiles
-          const worldRect = computeVisibleWorldRect(camera, layout.mapCard.w, layout.mapCard.h);
-          const visibleTiles = resolveVisibleTiles(worldRect, VIDEO_TILE_ZOOM);
-
-          // Clear canvas
-          context.clearRect(0, 0, layout.canvasWidth, layout.canvasHeight);
-
-          // Draw base map (tiles)
-          if (progress <= VIDEO_PHASES.overview.end) {
-            // In overview, draw full route overview
-            await drawBaseMapForCamera(context, visibleTiles, camera, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-            drawFullRouteOverview(context, projectedPoints, animatedSegments, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-          } else {
-            // In transition/follow, draw route progress
-            await drawBaseMapForCamera(context, visibleTiles, camera, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-            drawRouteProgressFrame(context, playbackState, projectedPoints, animatedSegments, progress, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-          }
-
-          // Draw overlay (header, metrics, progress bar)
-          drawVideoOverlay(context, layout, playbackState, input.run, input.athleteName, input.providerLabel);
-
-          if (currentFrame >= totalFrames) {
-            window.setTimeout(resolve, frameDurationMs * 2);
-            return;
+          if (currentFrame % 20 === 0) {
+            console.log(`[exportRunRouteVideo] frame ${currentFrame + 1}/${totalFrames} progress=${progress.toFixed(3)}`);
           }
 
           currentFrame += 1;
+          if (currentFrame >= totalFrames) {
+            window.setTimeout(resolve, frameDurationMs * 1.5);
+            return;
+          }
+
           window.setTimeout(renderFrame, frameDurationMs);
         } catch (error) {
           reject(error);
@@ -3268,12 +3400,14 @@ async function exportRunRouteVideo(input: {
   } finally {
     if (recorder.state !== 'inactive') {
       recorder.stop();
+      console.log('[exportRunRouteVideo] recorder stopped');
     }
   }
 
   const blob = await finished;
   stream.getTracks().forEach((track) => track.stop());
   downloadBlobAsset(blob, `run-route-video-${input.run.date}-${input.run.id}.${format.extension}`);
+  console.log('[exportRunRouteVideo] finished', { durationMs: routeVideoDurationMs, totalFrames: Math.max(1, Math.round(routeVideoDurationMs * routeVideoFps / 1000)) });
 }
 
 function apiUrl(pathname: string) {
