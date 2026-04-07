@@ -180,8 +180,70 @@ function displayLabelForSession(session: SessionRecord): string {
   return isGarminSession(session) ? maskEmail(session.garminEmail) : session.accountLabel;
 }
 
-function isTemporaryGarminAuthError(message: string): boolean {
-  return message.includes('429') || message.includes('427');
+/**
+ * Detect if a warm-up error is temporary/transient and should NOT destroy the session.
+ * Only hard auth failures (invalid credentials) should destroy the session.
+ * Network issues, timeouts, and rate-limiting are temporary.
+ */
+function isTemporaryGarminWarmupError(message: string): boolean {
+  // Rate limiting - definitely temporary
+  if (message.includes('429') || message.includes('427')) {
+    return true;
+  }
+
+  // Network errors - definitely temporary
+  if (
+    message.includes('ECONNREFUSED') ||
+    message.includes('ECONNRESET') ||
+    message.includes('ENOTFOUND') ||
+    message.includes('EHOSTUNREACH') ||
+    message.includes('ENETUNREACH')
+  ) {
+    return true;
+  }
+
+  // Timeout - definitely temporary (this was the bug!)
+  if (message.includes('Timeout') || message.includes('timeout')) {
+    return true;
+  }
+
+  // Normalized error messages from garminClient that indicate transient issues
+  if (
+    message.includes('está respondiendo lentamente') ||
+    message.includes('respondiendo lentamente') ||
+    message.includes('Reintentando')
+  ) {
+    return true;
+  }
+
+  // MCP/Python client transient errors
+  if (message.includes('fall back') || message.includes('fallback')) {
+    return true;
+  }
+
+  // Actual auth failures that SHOULD destroy the session
+  // 401 Unauthorized, 403 Forbidden for auth endpoints, MFA required, etc.
+  // These strings suggest actual credential/auth problems, not transient network issues
+  if (message.includes('401') || message.includes('401 Unauthorized')) {
+    return false;
+  }
+
+  if (message.includes('Unauthorized') && !message.includes('429') && !message.includes('427')) {
+    return false;
+  }
+
+  if (message.includes('Invalid credentials') || message.includes('invalid credentials')) {
+    return false;
+  }
+
+  if (message.includes('Mal token') || message.includes('mal token')) {
+    return false;
+  }
+
+  // Default to treating it as transient to be conservative
+  // (i.e., keep the session alive and let dashboard retry)
+  // Better to have stale session than lose working credentials
+  return true;
 }
 
 function matchingGoal(left: UserGoal, right: UserGoal): boolean {
@@ -529,8 +591,14 @@ app.post('/api/session/login', async (request, response) => {
           ? error.message
           : 'No se pudo validar las credenciales contra Garmin durante el warmup.';
 
-      if (!isTemporaryGarminAuthError(message)) {
-        console.warn(`[login:${session.id}] warmup failed: ${message}`);
+      // CRITICAL FIX: Use new isTemporaryGarminWarmupError that includes timeout detection
+      // Previously: only checked 429/427, so timeouts would destroy valid sessions
+      // Now: timeouts keep session alive, only hard auth failures destroy it
+      if (isTemporaryGarminWarmupError(message)) {
+        console.warn(`[login:${session.id}] warmup transient error (session kept alive): ${message.substring(0, 100)}`);
+        // Keep session alive - let dashboard retry later
+      } else {
+        console.warn(`[login:${session.id}] warmup hard auth failure (destroying session): ${message.substring(0, 100)}`);
         destroySession(session.id);
         invalidateSessionCache(session.id);
         void garminClient.close(session.id).catch(() => undefined);

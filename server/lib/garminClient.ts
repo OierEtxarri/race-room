@@ -11,7 +11,7 @@ const authFailureCooldownMs = 5 * 60 * 1_000;
 const toolTimeouts: Record<string, number> = {
   get_user_profile: 5_000,
   get_social_profile: 4_000,
-  get_devices: 3_000,
+  get_devices: 8_000,  // Increased from 3000: non-critical, should not block core profile
   get_daily_summary: 5_000,
   get_sleep_data_range: 5_000,
   get_hrv_range: 5_000,
@@ -229,9 +229,13 @@ export class GarminClient {
       );
       return result;
     } catch (primaryError) {
-      // Only retry if error is transient and we have a different backend available
+      // Extract raw message BEFORE normalization to detect transient errors correctly
+      const rawMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
       const normalizedError = normalizeGarminError(primaryError);
-      const shouldRetry = isTransientError(normalizedError) && backend === 'python' && this.hasMcpTokens(auth);
+      
+      // CRITICAL FIX: Check isTransientError on raw message BEFORE normalization
+      // Otherwise timeout gets normalized away and fallback never triggers
+      const shouldRetry = isTransientError(rawMessage) && backend === 'python' && this.hasMcpTokens(auth);
 
       if (shouldRetry) {
         try {
@@ -244,12 +248,13 @@ export class GarminClient {
           this.recordBackendSuccess(auth, 'mcp');
           this.clearFailure(auth);
           console.log(
-            `[perf] garmin fallback backend=python->mcp tool=${name} time=${Date.now() - startTime}ms`,
+            `[perf] garmin fallback backend=python->mcp tool=${name} raw_error="${rawMessage.substring(0, 60)}..." time=${Date.now() - startTime}ms`,
           );
           return fallbackResult;
         } catch (fallbackError) {
+          const fallbackRawMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
           const normalizedFallback = normalizeGarminError(fallbackError);
-          if (normalizedError === normalizedFallback) {
+          if (rawMessage === fallbackRawMessage) {
             throw new Error(normalizedError);
           }
 
@@ -260,7 +265,7 @@ export class GarminClient {
       }
 
       // If authentication throttle, remember it
-      if (isAuthThrottleError(normalizedError)) {
+      if (isAuthThrottleError(rawMessage)) {
         this.rememberFailure(auth, normalizedError);
       }
 

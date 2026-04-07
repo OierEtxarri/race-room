@@ -2096,28 +2096,43 @@ async function buildGarminDashboardData(input: {
   const weightStart = isoDate(subWeeks(today, 4));
   const buildStartTime = Date.now();
 
-  // Phase 1: Fetch profile (quick, blocks nothing else)
-  const [userProfile, socialProfile, devices] = await Promise.all([
-    garminClient.callJson(input.auth, 'get_user_profile'),
-    garminClient.callJson(input.auth, 'get_social_profile').catch(() => null),
-    garminClient.callJson(input.auth, 'get_devices'),
-  ]);
+  // PHASE 1: CRITICAL CORE DATA - MUST SUCCEED for dashboard to be useful
+  // These are essential for profile display and basic metrics
+  let userProfile: unknown;
+  let dailySummary: unknown;
+  let activitiesRaw: unknown;
+  
+  try {
+    [userProfile, dailySummary, activitiesRaw] = await Promise.all([
+      garminClient.callJson(input.auth, 'get_user_profile'),
+      garminClient.callJson(input.auth, 'get_daily_summary', { date: referenceDate }),
+      garminClient.callJson(input.auth, 'get_activities_by_date', {
+        startDate: runningStart,
+        endDate: runningEnd,
+      }),
+    ]);
+    console.log(`[perf] garmin core data loaded (profile, daily, activities)`);
+  } catch (coreError) {
+    const coreMsg = coreError instanceof Error ? coreError.message : String(coreError);
+    console.error(`[garmin] core dashboard data failed: ${coreMsg.substring(0, 100)}`);
+    throw coreError;
+  }
 
-  // Phase 2: Parallel wellness, training, and activity data
+  // PHASE 2: ENRICHMENT DATA - Optional but nice to have
+  // These can fail without breaking the dashboard. Use Promise.allSettled to tolerate partial failures.
   const [
-    dailySummary,
-    sleepRange,
-    hrvRange,
-    readinessRange,
-    stepsRange,
-    maxMetricsRange,
-    vo2Range,
-    trainingStatusRaw,
-    racePredictionsRaw,
-    activitiesRaw,
-    bodyCompositionRaw,
-  ] = await Promise.all([
-    garminClient.callJson(input.auth, 'get_daily_summary', { date: referenceDate }),
+    sleepRangeResult,
+    hrvRangeResult,
+    readinessRangeResult,
+    stepsRangeResult,
+    maxMetricsRangeResult,
+    vo2RangeResult,
+    trainingStatusResult,
+    racePredictionsResult,
+    bodyCompositionResult,
+    socialProfileResult,
+    devicesResult,
+  ] = await Promise.allSettled([
     garminClient.callJson(input.auth, 'get_sleep_data_range', {
       startDate: wellnessStart,
       endDate: referenceDate,
@@ -2141,18 +2156,43 @@ async function buildGarminDashboardData(input: {
     garminClient.callJson(input.auth, 'get_vo2max_range', {
       startDate: runningStart,
       endDate: referenceDate,
-    }).catch(() => null),
+    }),
     garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate }),
     garminClient.callJson(input.auth, 'get_race_predictions'),
-    garminClient.callJson(input.auth, 'get_activities_by_date', {
-      startDate: runningStart,
-      endDate: runningEnd,
-    }),
     garminClient.callJson(input.auth, 'get_body_composition', {
       startDate: weightStart,
       endDate: referenceDate,
     }),
+    garminClient.callJson(input.auth, 'get_social_profile'),
+    garminClient.callJson(input.auth, 'get_devices'),
   ]);
+
+  // Extract successful enrichment results, or null if failed
+  const sleepRange = sleepRangeResult.status === 'fulfilled' ? sleepRangeResult.value : null;
+  const hrvRange = hrvRangeResult.status === 'fulfilled' ? hrvRangeResult.value : null;
+  const readinessRange = readinessRangeResult.status === 'fulfilled' ? readinessRangeResult.value : null;
+  const stepsRange = stepsRangeResult.status === 'fulfilled' ? stepsRangeResult.value : null;
+  const maxMetricsRange = maxMetricsRangeResult.status === 'fulfilled' ? maxMetricsRangeResult.value : null;
+  const vo2Range = vo2RangeResult.status === 'fulfilled' ? vo2RangeResult.value : null;
+  const trainingStatusRaw = trainingStatusResult.status === 'fulfilled' ? trainingStatusResult.value : null;
+  const racePredictionsRaw = racePredictionsResult.status === 'fulfilled' ? racePredictionsResult.value : null;
+  const bodyCompositionRaw = bodyCompositionResult.status === 'fulfilled' ? bodyCompositionResult.value : null;
+  const socialProfile = socialProfileResult.status === 'fulfilled' ? socialProfileResult.value : null;
+  const devices = devicesResult.status === 'fulfilled' ? devicesResult.value : null;
+
+  // Log any optional fetch failures for debugging
+  if (sleepRangeResult.status === 'rejected') {
+    const msg = sleepRangeResult.reason instanceof Error ? sleepRangeResult.reason.message : String(sleepRangeResult.reason);
+    console.warn(`[perf] garmin optional tool=get_sleep_data_range failed: ${msg.substring(0, 60)}`);
+  }
+  if (devicesResult.status === 'rejected') {
+    const msg = devicesResult.reason instanceof Error ? devicesResult.reason.message : String(devicesResult.reason);
+    console.warn(`[perf] garmin optional tool=get_devices failed: ${msg.substring(0, 60)}`);
+  }
+  if (socialProfileResult.status === 'rejected') {
+    const msg = socialProfileResult.reason instanceof Error ? socialProfileResult.reason.message : String(socialProfileResult.reason);
+    console.warn(`[perf] garmin optional tool=get_social_profile failed: ${msg.substring(0, 60)}`);
+  }
 
   const recentActivities = Array.isArray(activitiesRaw)
     ? activitiesRaw.map(normalizeGarminActivity).filter((activity): activity is ActivitySummary => activity !== null)
