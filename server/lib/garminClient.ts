@@ -7,6 +7,26 @@ import { garminPythonClient } from './garminPythonClient.ts';
 type JsonLike = Record<string, unknown> | unknown[] | string | number | boolean | null;
 const authFailureCooldownMs = 5 * 60 * 1_000;
 
+// Per-tool timeout config (in ms)
+const toolTimeouts: Record<string, number> = {
+  get_user_profile: 5_000,
+  get_social_profile: 4_000,
+  get_devices: 3_000,
+  get_daily_summary: 5_000,
+  get_sleep_data_range: 5_000,
+  get_hrv_range: 5_000,
+  get_training_readiness_range: 5_000,
+  get_daily_steps_range: 5_000,
+  get_max_metrics_range: 5_000,
+  get_vo2max_range: 5_000,
+  get_training_status: 5_000,
+  get_race_predictions: 5_000,
+  get_activities_by_date: 6_000,
+  get_body_composition: 5_000,
+  get_activity_details: 8_000,
+  upload_and_schedule_workout: 8_000,
+};
+
 function normalizeGarminError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
@@ -22,11 +42,24 @@ function normalizeGarminError(error: unknown): string {
     return 'Garmin requiere MFA para este usuario. La renovación automática no puede completar ese paso.';
   }
 
+  if (message.includes('TIMEOUT') || message.includes('timeout')) {
+    return 'Garmin Connect está respondiendo lentamente. Reintentando...';
+  }
+
   return message;
 }
 
 function isAuthThrottleError(message: string): boolean {
   return message.includes('429') || message.includes('427');
+}
+
+function isTransientError(message: string): boolean {
+  return (
+    message.includes('timeout') ||
+    message.includes('TIMEOUT') ||
+    message.includes('ECONNREFUSED') ||
+    message.includes('ECONNRESET')
+  );
 }
 
 export class GarminClient {
@@ -35,6 +68,15 @@ export class GarminClient {
     {
       message: string;
       expiresAt: number;
+    }
+  >();
+
+  private backendCircuitBreaker = new Map<
+    string,
+    {
+      preferred: 'python' | 'mcp';
+      lastFailedAt: number;
+      failureCount: number;
     }
   >();
 
@@ -74,8 +116,67 @@ export class GarminClient {
     return hasGarminMcpTokens(auth.tokenDirs.mcp);
   }
 
-  private shouldPreferMcp(auth: GarminSessionAuth): boolean {
-    return this.hasMcpTokens(auth) && !this.hasPythonTokens(auth);
+  private getPreferredBackend(auth: GarminSessionAuth): 'python' | 'mcp' | null {
+    const breaker = this.backendCircuitBreaker.get(auth.id);
+    if (!breaker) {
+      return null;
+    }
+
+    // If failed recently and multiple failures, try other backend
+    const recentFailure = Date.now() - breaker.lastFailedAt < 10_000;
+    if (recentFailure && breaker.failureCount >= 3) {
+      return breaker.preferred === 'python' ? 'mcp' : 'python';
+    }
+
+    return breaker.preferred;
+  }
+
+  private selectBackend(auth: GarminSessionAuth): 'python' | 'mcp' {
+    const preferredBreaker = this.getPreferredBackend(auth);
+    if (preferredBreaker) {
+      return preferredBreaker;
+    }
+
+    // Prefer MCP if available, Python as fallback
+    const hasMcp = this.hasMcpTokens(auth);
+    const hasPython = this.hasPythonTokens(auth);
+
+    if (hasMcp && !hasPython) {
+      return 'mcp';
+    }
+
+    return 'python';
+  }
+
+  private recordBackendSuccess(auth: GarminSessionAuth, backend: 'python' | 'mcp'): void {
+    this.backendCircuitBreaker.set(auth.id, {
+      preferred: backend,
+      lastFailedAt: 0,
+      failureCount: 0,
+    });
+  }
+
+  private recordBackendFailure(auth: GarminSessionAuth, backend: 'python' | 'mcp'): void {
+    const existing = this.backendCircuitBreaker.get(auth.id) ?? {
+      preferred: backend,
+      lastFailedAt: Date.now(),
+      failureCount: 0,
+    };
+
+    this.backendCircuitBreaker.set(auth.id, {
+      preferred: existing.preferred,
+      lastFailedAt: Date.now(),
+      failureCount: existing.failureCount + 1,
+    });
+  }
+
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number, toolName: string): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms for ${toolName}`)), timeoutMs),
+      ),
+    ]);
   }
 
   async callJson<T extends JsonLike = JsonLike>(
@@ -100,79 +201,81 @@ export class GarminClient {
       GARMIN_PASSWORD: auth.garminPassword,
       GARMINTOKENS: auth.tokenDirs.python,
     };
-    const primary = this.shouldPreferMcp(auth) ? 'mcp' : 'python';
 
-    if (primary === 'mcp') {
-      try {
-        const result = await garminMcpClient.callJson<T>(auth, name, args);
+    const timeoutMs = toolTimeouts[name] ?? 8_000;
+    const backend = this.selectBackend(auth);
+    const startTime = Date.now();
+
+    try {
+      if (backend === 'mcp') {
+        const result = await this.withTimeout(garminMcpClient.callJson<T>(auth, name, args), timeoutMs, name);
+        this.recordBackendSuccess(auth, 'mcp');
         this.clearFailure(auth);
+        console.log(
+          `[perf] garmin call backend=mcp tool=${name} time=${Date.now() - startTime}ms`,
+        );
         return result;
-      } catch (mcpError) {
-        const normalizedMcpError = normalizeGarminError(mcpError);
-        if (isAuthThrottleError(normalizedMcpError)) {
-          this.rememberFailure(auth, normalizedMcpError);
-          throw new Error(normalizedMcpError);
-        }
+      }
 
-        console.warn(`[garmin-mcp:${auth.id}] falling back to Python after error in ${name}: ${normalizedMcpError}`);
+      const result = await this.withTimeout(
+        garminPythonClient.callJson<T>(name, args, pythonEnv),
+        timeoutMs,
+        name,
+      );
+      this.recordBackendSuccess(auth, 'python');
+      this.clearFailure(auth);
+      console.log(
+        `[perf] garmin call backend=python tool=${name} time=${Date.now() - startTime}ms`,
+      );
+      return result;
+    } catch (primaryError) {
+      // Only retry if error is transient and we have a different backend available
+      const normalizedError = normalizeGarminError(primaryError);
+      const shouldRetry = isTransientError(normalizedError) && backend === 'python' && this.hasMcpTokens(auth);
 
+      if (shouldRetry) {
         try {
-          const result = await garminPythonClient.callJson<T>(name, args, pythonEnv);
+          this.recordBackendFailure(auth, 'python');
+          const fallbackResult = await this.withTimeout(
+            garminMcpClient.callJson<T>(auth, name, args),
+            timeoutMs,
+            name,
+          );
+          this.recordBackendSuccess(auth, 'mcp');
           this.clearFailure(auth);
-          return result;
-        } catch (pythonError) {
-          const normalizedPythonError = normalizeGarminError(pythonError);
-          if (normalizedPythonError === normalizedMcpError) {
-            throw new Error(normalizedMcpError);
+          console.log(
+            `[perf] garmin fallback backend=python->mcp tool=${name} time=${Date.now() - startTime}ms`,
+          );
+          return fallbackResult;
+        } catch (fallbackError) {
+          const normalizedFallback = normalizeGarminError(fallbackError);
+          if (normalizedError === normalizedFallback) {
+            throw new Error(normalizedError);
           }
 
           throw new Error(
-            `MCP y Python API fallaron para ${name}: ${normalizedMcpError} / ${normalizedPythonError}`,
+            `Garmin ${name} falló en ambos backends: ${normalizedError} / ${normalizedFallback}`,
           );
         }
       }
-    }
 
-    try {
-      const result = await garminPythonClient.callJson<T>(name, args, pythonEnv);
-      this.clearFailure(auth);
-      return result;
-    } catch (pythonError) {
-      const normalizedPythonError = normalizeGarminError(pythonError);
-
-      if (isAuthThrottleError(normalizedPythonError)) {
-        this.rememberFailure(auth, normalizedPythonError);
-        throw new Error(normalizedPythonError);
+      // If authentication throttle, remember it
+      if (isAuthThrottleError(normalizedError)) {
+        this.rememberFailure(auth, normalizedError);
       }
 
-      console.warn(`[garmin-python:${auth.id}] falling back to MCP after error in ${name}: ${normalizedPythonError}`);
-
-      try {
-        const result = await garminMcpClient.callJson<T>(auth, name, args);
-        this.clearFailure(auth);
-        return result;
-      } catch (mcpError) {
-        const normalizedMcpError = normalizeGarminError(mcpError);
-        if (isAuthThrottleError(normalizedMcpError)) {
-          this.rememberFailure(auth, normalizedMcpError);
-        }
-
-        if (normalizedMcpError === normalizedPythonError) {
-          throw new Error(normalizedPythonError);
-        }
-
-        throw new Error(
-          `Python API y MCP fallaron para ${name}: ${normalizedPythonError} / ${normalizedMcpError}`,
-        );
-      }
+      this.recordBackendFailure(auth, backend);
+      throw primaryError;
     }
   }
 
   async close(sessionId?: string): Promise<void> {
     if (sessionId) {
       this.recentFailures.delete(sessionId);
+      this.backendCircuitBreaker.delete(sessionId);
     } else {
       this.recentFailures.clear();
+      this.backendCircuitBreaker.clear();
     }
 
     await garminMcpClient.close(sessionId);

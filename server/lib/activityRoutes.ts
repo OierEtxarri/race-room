@@ -877,65 +877,107 @@ export async function getGarminActivityRoute(
   auth: GarminSessionAuth,
   activityId: number,
 ): Promise<ActivityRouteData> {
-  const details = await garminClient.callJson(auth, 'get_activity_details', { activityId });
-  const detailSamples = buildRouteSamplesFromGarminDetails(details);
-  const points = extractRoutePoints(details);
+  const routeStartTime = Date.now();
+  const routeTimeoutMs = 10_000; // Global timeout for route fetch
 
-  if (detailSamples && detailSamples.length >= 2) {
-    return {
-      points: points.length >= 2 ? points : detailSamples.map((sample) => sample.point),
-      samples: detailSamples,
-      source: 'garmin',
-    };
-  }
+  try {
+    // Fetch activity details with timeout
+    const details = await Promise.race([
+      garminClient.callJson(auth, 'get_activity_details', { activityId }),
+      new Promise<any>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout fetching activity details')), 8_000),
+      ),
+    ]);
 
-  const orderedSamples = collectOrderedSampleCandidates(details);
+    const detailSamples = buildRouteSamplesFromGarminDetails(details);
+    const points = extractRoutePoints(details);
 
-  if (orderedSamples.length >= 2) {
+    if (detailSamples && detailSamples.length >= 2) {
+      console.log(`[perf] getGarminActivityRoute success from details total=${Date.now() - routeStartTime}ms`);
+      return {
+        points: points.length >= 2 ? points : detailSamples.map((sample) => sample.point),
+        samples: detailSamples,
+        source: 'garmin',
+      };
+    }
+
+    const orderedSamples = collectOrderedSampleCandidates(details);
+
+    if (orderedSamples.length >= 2) {
+      console.log(`[perf] getGarminActivityRoute success from ordered samples total=${Date.now() - routeStartTime}ms`);
+      return {
+        points,
+        samples: orderedSamples,
+        source: 'garmin',
+      };
+    }
+
+    if (points.length < 2) {
+      // No basic points yet, try splits with timeout window
+      const splitsStartTime = Date.now();
+      const splitsTimeoutMs = Math.max(2_000, routeTimeoutMs - (Date.now() - routeStartTime) - 1_000);
+
+      if (splitsTimeoutMs > 500) {
+        const splitSources: unknown[] = [];
+        
+        for (const toolName of ['get_activity_splits', 'get_activity_split_summaries', 'get_activity_typed_splits']) {
+          try {
+            splitSources.push(
+              await Promise.race([
+                garminClient.callJson(auth, toolName, { activityId }),
+                new Promise<any>((_, reject) =>
+                  setTimeout(() => reject(new Error(`Timeout fetching ${toolName}`)), splitsTimeoutMs / 3),
+                ),
+              ]),
+            );
+          } catch (e) {
+            const splitElapsed = Date.now() - splitsStartTime;
+            if (splitElapsed > splitsTimeoutMs) {
+              break; // Stop trying if we're out of time
+            }
+            // Otherwise ignore and keep trying other tools
+          }
+        }
+
+        let bestSplitSamples: RouteSplitSample[] = [];
+        splitSources.forEach((source) => {
+          const candidates = collectOrderedSplitCandidates(source);
+          if (candidates.length > bestSplitSamples.length) {
+            bestSplitSamples = candidates;
+          }
+        });
+
+        if (bestSplitSamples.length >= 2) {
+          const splitRouteSamples = buildRouteSamplesFromSplitCandidates(points, bestSplitSamples);
+          if (splitRouteSamples && splitRouteSamples.length >= 2) {
+            console.log(`[perf] getGarminActivityRoute success from splits total=${Date.now() - routeStartTime}ms`);
+            return routeDataFromSamples(splitRouteSamples, 'garmin');
+          }
+        }
+      }
+
+      if (points.length < 2) {
+        throw new Error('Garmin no ha devuelto una ruta utilizable para este entrenamiento.');
+      }
+    }
+
+    console.log(`[perf] getGarminActivityRoute fallback to points total=${Date.now() - routeStartTime}ms`);
     return {
       points,
-      samples: orderedSamples,
+      samples: points.map((point) => ({
+        point,
+        paceSecondsPerKm: null,
+        timestampSeconds: null,
+      })),
       source: 'garmin',
     };
+  } catch (error) {
+    const elapsed = Date.now() - routeStartTime;
+    console.error(
+      `[perf] getGarminActivityRoute failed total=${elapsed}ms error=${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw error;
   }
-
-  if (points.length < 2) {
-    throw new Error('Garmin no ha devuelto una ruta utilizable para este entrenamiento.');
-  }
-
-  const splitSources: unknown[] = [];
-  for (const toolName of ['get_activity_splits', 'get_activity_split_summaries', 'get_activity_typed_splits']) {
-    try {
-      splitSources.push(await garminClient.callJson(auth, toolName, { activityId }));
-    } catch {
-      // Ignore and keep scanning the other Garmin split endpoints.
-    }
-  }
-
-  let bestSplitSamples: RouteSplitSample[] = [];
-  splitSources.forEach((source) => {
-    const candidates = collectOrderedSplitCandidates(source);
-    if (candidates.length > bestSplitSamples.length) {
-      bestSplitSamples = candidates;
-    }
-  });
-
-  if (bestSplitSamples.length >= 2) {
-    const splitRouteSamples = buildRouteSamplesFromSplitCandidates(points, bestSplitSamples);
-    if (splitRouteSamples && splitRouteSamples.length >= 2) {
-      return routeDataFromSamples(splitRouteSamples, 'garmin');
-    }
-  }
-
-  return {
-    points,
-    samples: points.map((point) => ({
-      point,
-      paceSecondsPerKm: null,
-      timestampSeconds: null,
-    })),
-    source: 'garmin',
-  };
 }
 
 type StravaStreamsResponse = {

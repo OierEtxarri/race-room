@@ -323,19 +323,35 @@ async function liveRefreshDashboardData(
     return existing;
   }
 
+  const refreshStartTime = Date.now();
+  const dashboardTimeoutMs = 15_000; // Global timeout for dashboard fetch
+
   const refresh = (async () => {
     try {
-      const data = isGarminSession(session)
-        ? await buildDashboardData({
+      const buildPromise = isGarminSession(session)
+        ? buildDashboardData({
             provider: 'garmin',
             auth: sessionToGarminAuth(session),
             goal: session.goal,
           })
-        : await buildDashboardData({
+        : buildDashboardData({
             provider: 'strava',
             auth: session,
             goal: session.goal,
           });
+
+      // Apply global timeout
+      const raceAgainstTimeout = Promise.race([
+        buildPromise,
+        new Promise<any>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Dashboard fetch exceeded timeout of ${dashboardTimeoutMs}ms`)),
+            dashboardTimeoutMs,
+          ),
+        ),
+      ]);
+
+      const data = await raceAgainstTimeout;
       const decorated = await decorateDashboardForSession(session, data);
 
       upsertPersistedDashboard({
@@ -344,9 +360,14 @@ async function liveRefreshDashboardData(
         dashboard: decorated,
       });
 
+      const totalTime = Date.now() - refreshStartTime;
+      console.log(`[perf] dashboard refresh total=${totalTime}ms sessionId=${session.id}`);
       return cacheDashboard(session.id, decorated, cacheTtlMs);
     } catch (error) {
-      console.error(`[api] dashboard fetch failed for ${session.accountKey}`, error);
+      const totalTime = Date.now() - refreshStartTime;
+      console.warn(
+        `[perf] dashboard refresh failed total=${totalTime}ms sessionId=${session.id} error=${error instanceof Error ? error.message : String(error)}`,
+      );
       const message =
         error instanceof Error
           ? error.message
@@ -492,38 +513,32 @@ app.post('/api/session/login', async (request, response) => {
     cacheDashboard(session.id, persistedDashboard, fallbackCacheTtlMs);
   }
 
-  try {
-    await garminClient.callJson(sessionToGarminAuth(session), 'get_user_profile');
-  } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : 'No he podido validar las credenciales contra Garmin.';
-
-    if (isTemporaryGarminAuthError(message)) {
-      response.setHeader('Set-Cookie', buildSessionCookie(session.id));
-      response.status(202).json({
-        ok: true,
-        degraded: true,
-        provider: 'garmin',
-        sessionId: session.id,
-        accountLabel: displayLabelForSession(session),
-        goal,
-        hasStoredPlan: Boolean(persistedDashboard),
-        message,
-      });
-      return;
-    }
-
-    destroySession(session.id);
-    invalidateSessionCache(session.id);
-    await garminClient.close(session.id).catch(() => undefined);
-
-    response.status(401).json({ message });
-    return;
-  }
-
+  // Set cookie immediately before async validation
   response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+
+  // Warm up Garmin in background (non-blocking)
+  const warmupStartTime = Date.now();
+  garminClient
+    .callJson(sessionToGarminAuth(session), 'get_user_profile')
+    .then(() => {
+      console.log(`[perf] login warmup success total=${Date.now() - warmupStartTime}ms`);
+    })
+    .catch((error) => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'No se pudo validar las credenciales contra Garmin durante el warmup.';
+
+      if (!isTemporaryGarminAuthError(message)) {
+        console.warn(`[login:${session.id}] warmup failed: ${message}`);
+        destroySession(session.id);
+        invalidateSessionCache(session.id);
+        void garminClient.close(session.id).catch(() => undefined);
+      }
+    });
+
+  // Respond quickly with session created
+  const loginStartTime = Date.now();
   response.json({
     ok: true,
     provider: 'garmin',
@@ -531,9 +546,10 @@ app.post('/api/session/login', async (request, response) => {
     accountLabel: displayLabelForSession(session),
     goal,
     hasStoredPlan: Boolean(persistedDashboard),
+    dashboardStatus: 'pending',
+    totalTime: Date.now() - loginStartTime,
   });
-
-  void liveRefreshDashboardData(session, persistedDashboard);
+  console.log(`[perf] login response total=${Date.now() - loginStartTime}ms sessionId=${session.id}`);
 });
 
 app.get('/api/session/strava/start', (request, response) => {
@@ -718,6 +734,7 @@ app.put('/api/session/goal', async (request, response) => {
 });
 
 app.get('/api/dashboard', async (request, response) => {
+  const dashboardReqStart = Date.now();
   const session = resolveSessionFromRequest(request);
   if (!session) {
     response.status(401).json({
@@ -729,6 +746,7 @@ app.get('/api/dashboard', async (request, response) => {
   const forceRefresh = request.query.refresh === '1';
   const data = await getDashboardData(session, { force: forceRefresh });
   response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+  console.log(`[perf] GET /api/dashboard total=${Date.now() - dashboardReqStart}ms sessionId=${session.id}`);
   response.json(data);
 });
 
@@ -900,6 +918,7 @@ app.post('/api/coach/what-if', async (request, response) => {
 });
 
 app.get('/api/activities/:activityId/route', async (request, response) => {
+  const routeReqStart = Date.now();
   const session = resolveSessionFromRequest(request);
   if (!session) {
     response.status(401).json({
@@ -922,8 +941,10 @@ app.get('/api/activities/:activityId/route', async (request, response) => {
       : await getStravaActivityRoute(session, activityId);
 
     response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+    console.log(`[perf] GET /api/activities/:activityId/route total=${Date.now() - routeReqStart}ms activityId=${activityId}`);
     response.json(route);
   } catch (error) {
+    console.log(`[perf] GET /api/activities/:activityId/route failed total=${Date.now() - routeReqStart}ms activityId=${activityId} error=${error instanceof Error ? error.message : String(error)}`);
     response.status(404).json({
       message:
         error instanceof Error ? error.message : 'No se pudo cargar el recorrido de la actividad.',

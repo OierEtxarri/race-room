@@ -2094,45 +2094,65 @@ async function buildGarminDashboardData(input: {
   const runningStart = isoDate(subWeeks(today, 6));
   const runningEnd = isoDate(today);
   const weightStart = isoDate(subWeeks(today, 4));
+  const buildStartTime = Date.now();
 
-  const userProfile = await garminClient.callJson(input.auth, 'get_user_profile');
-  const socialProfile = await garminClient.callJson(input.auth, 'get_social_profile').catch(() => null);
-  const devices = await garminClient.callJson(input.auth, 'get_devices');
-  const dailySummary = await garminClient.callJson(input.auth, 'get_daily_summary', { date: referenceDate });
-  const sleepRange = await garminClient.callJson(input.auth, 'get_sleep_data_range', {
-    startDate: wellnessStart,
-    endDate: referenceDate,
-  });
-  const hrvRange = await garminClient.callJson(input.auth, 'get_hrv_range', {
-    startDate: wellnessStart,
-    endDate: referenceDate,
-  });
-  const readinessRange = await garminClient.callJson(input.auth, 'get_training_readiness_range', {
-    startDate: wellnessStart,
-    endDate: referenceDate,
-  });
-  const stepsRange = await garminClient.callJson(input.auth, 'get_daily_steps_range', {
-    startDate: wellnessStart,
-    endDate: referenceDate,
-  });
-  const maxMetricsRange = await garminClient.callJson(input.auth, 'get_max_metrics_range', {
-    startDate: runningStart,
-    endDate: referenceDate,
-  });
-  const vo2Range = await garminClient.callJson(input.auth, 'get_vo2max_range', {
-    startDate: runningStart,
-    endDate: referenceDate,
-  }).catch(() => null);
-  const trainingStatusRaw = await garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate });
-  const racePredictionsRaw = await garminClient.callJson(input.auth, 'get_race_predictions');
-  const activitiesRaw = await garminClient.callJson(input.auth, 'get_activities_by_date', {
-    startDate: runningStart,
-    endDate: runningEnd,
-  });
-  const bodyCompositionRaw = await garminClient.callJson(input.auth, 'get_body_composition', {
-    startDate: weightStart,
-    endDate: referenceDate,
-  });
+  // Phase 1: Fetch profile (quick, blocks nothing else)
+  const [userProfile, socialProfile, devices] = await Promise.all([
+    garminClient.callJson(input.auth, 'get_user_profile'),
+    garminClient.callJson(input.auth, 'get_social_profile').catch(() => null),
+    garminClient.callJson(input.auth, 'get_devices'),
+  ]);
+
+  // Phase 2: Parallel wellness, training, and activity data
+  const [
+    dailySummary,
+    sleepRange,
+    hrvRange,
+    readinessRange,
+    stepsRange,
+    maxMetricsRange,
+    vo2Range,
+    trainingStatusRaw,
+    racePredictionsRaw,
+    activitiesRaw,
+    bodyCompositionRaw,
+  ] = await Promise.all([
+    garminClient.callJson(input.auth, 'get_daily_summary', { date: referenceDate }),
+    garminClient.callJson(input.auth, 'get_sleep_data_range', {
+      startDate: wellnessStart,
+      endDate: referenceDate,
+    }),
+    garminClient.callJson(input.auth, 'get_hrv_range', {
+      startDate: wellnessStart,
+      endDate: referenceDate,
+    }),
+    garminClient.callJson(input.auth, 'get_training_readiness_range', {
+      startDate: wellnessStart,
+      endDate: referenceDate,
+    }),
+    garminClient.callJson(input.auth, 'get_daily_steps_range', {
+      startDate: wellnessStart,
+      endDate: referenceDate,
+    }),
+    garminClient.callJson(input.auth, 'get_max_metrics_range', {
+      startDate: runningStart,
+      endDate: referenceDate,
+    }),
+    garminClient.callJson(input.auth, 'get_vo2max_range', {
+      startDate: runningStart,
+      endDate: referenceDate,
+    }).catch(() => null),
+    garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate }),
+    garminClient.callJson(input.auth, 'get_race_predictions'),
+    garminClient.callJson(input.auth, 'get_activities_by_date', {
+      startDate: runningStart,
+      endDate: runningEnd,
+    }),
+    garminClient.callJson(input.auth, 'get_body_composition', {
+      startDate: weightStart,
+      endDate: referenceDate,
+    }),
+  ]);
 
   const recentActivities = Array.isArray(activitiesRaw)
     ? activitiesRaw.map(normalizeGarminActivity).filter((activity): activity is ActivitySummary => activity !== null)
@@ -2183,7 +2203,7 @@ async function buildGarminDashboardData(input: {
     ['profileImageUrlLarge', 'profileImageUrlMedium', 'profileImageUrlSmall', 'profileImageUrl'],
   );
 
-  return buildDashboardFromSource({
+  const result = buildDashboardFromSource({
     provider: garminProviderMeta,
     goal: input.goal,
     today,
@@ -2219,6 +2239,9 @@ async function buildGarminDashboardData(input: {
     acuteChronicRatio: extractAcuteChronicRatio(trainingStatusRaw),
     loadBalanceFeedback: extractLoadBalanceFeedback(trainingStatusRaw),
   });
+
+  console.log(`[perf] buildGarminDashboardData total=${Date.now() - buildStartTime}ms`);
+  return result;
 }
 
 async function buildStravaDashboardData(input: {
