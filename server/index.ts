@@ -8,7 +8,7 @@ import {
   buildFallbackDashboardData,
   type DashboardData,
 } from './lib/dashboard.ts';
-import { garminClient } from './lib/garminClient.ts';
+import { garminClient, normalizeGarminError } from './lib/garminClient.ts';
 import type { GarminSessionAuth } from './lib/garminMcpClient.ts';
 import { schedulePlanWorkoutOnGarmin } from './lib/planWorkouts.ts';
 import {
@@ -79,6 +79,7 @@ const cachedDashboards = new Map<string, CachedDashboard>();
 const inflightRefreshes = new Map<string, Promise<DashboardData>>();
 const stravaLoginStates = new Map<string, StravaLoginState>();
 let refreshTimer: NodeJS.Timeout | null = null;
+const loginValidationTimeoutMs = 30_000;
 
 function isPrivateLanHostname(hostname: string): boolean {
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) {
@@ -181,11 +182,10 @@ function displayLabelForSession(session: SessionRecord): string {
 }
 
 /**
- * Detect if a warm-up error is temporary/transient and should NOT destroy the session.
- * Only hard auth failures (invalid credentials) should destroy the session.
- * Network issues, timeouts, and rate-limiting are temporary.
+ * Detect if a Garmin login/validation error is temporary and should be retried later.
+ * Only clear credential failures should be surfaced as auth errors.
  */
-function isTemporaryGarminWarmupError(message: string): boolean {
+function isTemporaryGarminLoginError(message: string): boolean {
   // Rate limiting - definitely temporary
   if (message.includes('429') || message.includes('427')) {
     return true;
@@ -240,9 +240,8 @@ function isTemporaryGarminWarmupError(message: string): boolean {
     return false;
   }
 
-  // Default to treating it as transient to be conservative
-  // (i.e., keep the session alive and let dashboard retry)
-  // Better to have stale session than lose working credentials
+  // Default to treating it as retryable to avoid clasifying
+  // transient Garmin issues as bad credentials.
   return true;
 }
 
@@ -274,6 +273,102 @@ function fallbackFromBase(
   return {
     ...base,
     fallbackReason: reason,
+  };
+}
+
+function normalizePersistedDashboard(
+  session: SessionRecord,
+  dashboard: DashboardData | null,
+): DashboardData | null {
+  if (!dashboard) {
+    return null;
+  }
+
+  const fallback: DashboardData = {
+    ...buildFallbackDashboardData(session.goal, 'Persisted dashboard hydration', session.provider),
+    advice: [],
+    fitnessSummary: {
+      title: `Sincronizando ${session.provider === 'garmin' ? 'Garmin' : 'Strava'}`,
+      body: 'Mostrando el último dashboard compatible mientras se actualiza la sesión.',
+    },
+    fallbackReason: undefined,
+  };
+
+  return {
+    ...fallback,
+    ...dashboard,
+    provider: dashboard.provider ?? fallback.provider,
+    athlete: {
+      ...fallback.athlete,
+      ...(dashboard.athlete ?? {}),
+      avatarPath: dashboard.athlete?.avatarPath ?? fallback.athlete.avatarPath,
+    },
+    goal: {
+      ...fallback.goal,
+      ...(dashboard.goal ?? {}),
+    },
+    overview: {
+      ...fallback.overview,
+      ...(dashboard.overview ?? {}),
+    },
+    wellnessTrend: dashboard.wellnessTrend ?? fallback.wellnessTrend,
+    weeklyRunning: dashboard.weeklyRunning ?? fallback.weeklyRunning,
+    vo2Trend: dashboard.vo2Trend ?? fallback.vo2Trend,
+    recentActivities: dashboard.recentActivities ?? dashboard.recentRuns ?? fallback.recentActivities,
+    recentRuns: dashboard.recentRuns ?? fallback.recentRuns,
+    fitnessSummary: dashboard.fitnessSummary ?? fallback.fitnessSummary,
+    adaptive: dashboard.adaptive
+      ? {
+          ...fallback.adaptive,
+          ...dashboard.adaptive,
+          volume: {
+            ...fallback.adaptive.volume,
+            ...(dashboard.adaptive.volume ?? {}),
+          },
+          pace: {
+            ...fallback.adaptive.pace,
+            ...(dashboard.adaptive.pace ?? {}),
+          },
+          recovery: {
+            ...fallback.adaptive.recovery,
+            ...(dashboard.adaptive.recovery ?? {}),
+          },
+          signals: {
+            ...fallback.adaptive.signals,
+            ...(dashboard.adaptive.signals ?? {}),
+          },
+        }
+      : fallback.adaptive,
+    advice: dashboard.advice ?? fallback.advice,
+    checkIn: dashboard.checkIn
+      ? {
+          ...fallback.checkIn,
+          ...dashboard.checkIn,
+          recent: dashboard.checkIn.recent ?? fallback.checkIn.recent,
+          latest: dashboard.checkIn.latest ?? fallback.checkIn.latest,
+        }
+      : fallback.checkIn,
+    coach: dashboard.coach
+      ? {
+          ...fallback.coach,
+          ...dashboard.coach,
+          weeklyReview: dashboard.coach.weeklyReview ?? fallback.coach.weeklyReview,
+          latestDebrief: dashboard.coach.latestDebrief ?? fallback.coach.latestDebrief,
+        }
+      : fallback.coach,
+    plan: dashboard.plan
+      ? {
+          ...fallback.plan,
+          ...dashboard.plan,
+          paces: {
+            ...fallback.plan.paces,
+            ...(dashboard.plan.paces ?? {}),
+          },
+          weeks: dashboard.plan.weeks ?? fallback.plan.weeks,
+        }
+      : fallback.plan,
+    fetchedAt: dashboard.fetchedAt ?? fallback.fetchedAt,
+    fallbackReason: dashboard.fallbackReason,
   };
 }
 
@@ -386,7 +481,7 @@ async function liveRefreshDashboardData(
   }
 
   const refreshStartTime = Date.now();
-  const dashboardTimeoutMs = 15_000; // Global timeout for dashboard fetch
+  const dashboardTimeoutMs = isGarminSession(session) ? 90_000 : 15_000;
 
   const refresh = (async () => {
     try {
@@ -462,7 +557,7 @@ async function getDashboardData(
     matchingGoal(persistedState.goal, session.goal) &&
     persistedState.dashboard.goal &&
     matchingGoal(persistedState.dashboard.goal, session.goal)
-      ? persistedState.dashboard
+      ? normalizePersistedDashboard(session, persistedState.dashboard)
       : null;
 
   if (!force && persistedDashboard && !cached) {
@@ -561,52 +656,52 @@ app.post('/api/session/login', async (request, response) => {
     goal,
   });
 
-  upsertPersistedGoal(accountKey, goal);
-
   const persistedDashboard =
     persistedState?.dashboard &&
     matchingGoal(persistedState.goal, goal) &&
     persistedState.dashboard.goal &&
     matchingGoal(persistedState.dashboard.goal, goal)
-      ? persistedState.dashboard
+      ? normalizePersistedDashboard(session, persistedState.dashboard)
       : null;
+
+  const loginStartTime = Date.now();
+  try {
+    await garminClient.callJson(sessionToGarminAuth(session), 'get_user_profile', undefined, {
+      backend: 'mcp',
+      timeoutMs: loginValidationTimeoutMs,
+    });
+    console.log(
+      `[perf] login validation success total=${Date.now() - loginStartTime}ms sessionId=${session.id}`,
+    );
+  } catch (error) {
+    const rawMessage =
+      error instanceof Error
+        ? error.message
+        : 'No se pudo validar las credenciales contra Garmin durante el login.';
+    const normalizedMessage = normalizeGarminError(error);
+    const statusCode = isTemporaryGarminLoginError(rawMessage) ? 503 : 401;
+
+    console.warn(
+      `[login:${session.id}] validation failed status=${statusCode}: ${normalizedMessage.substring(0, 100)}`,
+    );
+    destroySession(session.id);
+    invalidateSessionCache(session.id);
+    await garminClient.close(session.id).catch(() => undefined);
+    response.status(statusCode).json({
+      message: normalizedMessage,
+    });
+    return;
+  }
+
+  upsertPersistedGoal(accountKey, goal);
 
   if (persistedDashboard) {
     cacheDashboard(session.id, persistedDashboard, fallbackCacheTtlMs);
   }
 
-  // Set cookie immediately before async validation
   response.setHeader('Set-Cookie', buildSessionCookie(session.id));
 
-  // Warm up Garmin in background (non-blocking)
-  const warmupStartTime = Date.now();
-  garminClient
-    .callJson(sessionToGarminAuth(session), 'get_user_profile')
-    .then(() => {
-      console.log(`[perf] login warmup success total=${Date.now() - warmupStartTime}ms`);
-    })
-    .catch((error) => {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'No se pudo validar las credenciales contra Garmin durante el warmup.';
-
-      // CRITICAL FIX: Use new isTemporaryGarminWarmupError that includes timeout detection
-      // Previously: only checked 429/427, so timeouts would destroy valid sessions
-      // Now: timeouts keep session alive, only hard auth failures destroy it
-      if (isTemporaryGarminWarmupError(message)) {
-        console.warn(`[login:${session.id}] warmup transient error (session kept alive): ${message.substring(0, 100)}`);
-        // Keep session alive - let dashboard retry later
-      } else {
-        console.warn(`[login:${session.id}] warmup hard auth failure (destroying session): ${message.substring(0, 100)}`);
-        destroySession(session.id);
-        invalidateSessionCache(session.id);
-        void garminClient.close(session.id).catch(() => undefined);
-      }
-    });
-
-  // Respond quickly with session created
-  const loginStartTime = Date.now();
+  // Respond only after Garmin validated the session.
   response.json({
     ok: true,
     provider: 'garmin',

@@ -99,7 +99,16 @@ function copyTokenFile(sourcePath: string, targetPath: string): void {
   }
 }
 
-function seedSessionTokenDirs(tokenDirs: GarminSessionRecord['tokenDirs']): void {
+function shouldSeedGlobalGarminTokens(email: string): boolean {
+  const configuredEmail = config.garminEmail.trim().toLowerCase();
+  return Boolean(configuredEmail) && configuredEmail === email.trim().toLowerCase();
+}
+
+function seedSessionTokenDirs(tokenDirs: GarminSessionRecord['tokenDirs'], email: string): void {
+  if (!shouldSeedGlobalGarminTokens(email)) {
+    return;
+  }
+
   const pythonSeedDir = hasTokenPair(globalPythonTokenDir)
     ? globalPythonTokenDir
     : hasTokenPair(globalMcpTokenDir)
@@ -168,10 +177,10 @@ export function createGarminSession(input: {
   ensureDir(homeDir);
   ensureDir(tokenDirs.python);
   ensureDir(tokenDirs.mcp);
-  seedSessionTokenDirs(tokenDirs);
+  const normalizedEmail = input.garminEmail.trim().toLowerCase();
+  seedSessionTokenDirs(tokenDirs, normalizedEmail);
 
   const now = Date.now();
-  const normalizedEmail = input.garminEmail.trim().toLowerCase();
   const session: GarminSessionRecord = {
     id,
     provider: 'garmin',
@@ -242,7 +251,7 @@ export function getSession(sessionId: string | null | undefined): SessionRecord 
   }
 
   if (session.provider === 'garmin') {
-    seedSessionTokenDirs(session.tokenDirs);
+    seedSessionTokenDirs(session.tokenDirs, session.garminEmail);
   }
 
   session.updatedAt = Date.now();

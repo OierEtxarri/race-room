@@ -269,6 +269,16 @@ function normalizeAccountKey(accountKey: string): string {
   return accountKey.trim().toLowerCase();
 }
 
+function resolvePersistedAccountKeys(accountKey: string): string[] {
+  const normalized = normalizeAccountKey(accountKey);
+  if (!normalized.startsWith('garmin:')) {
+    return [normalized];
+  }
+
+  const legacyEmail = normalized.slice('garmin:'.length).trim();
+  return legacyEmail ? [normalized, legacyEmail] : [normalized];
+}
+
 function mapDailyCheckInRow(row: DailyCheckInRow): DailyCheckInRecord {
   return {
     accountKey: row.account_key,
@@ -308,8 +318,47 @@ function mapCoachMemoryRow(row: CoachMemoryRow): CoachMemoryRecord {
   };
 }
 
+function persistedRowScore(row: UserStateRow): number {
+  const dashboard = parseDashboard(row.dashboard_json);
+  if (!dashboard) {
+    return 0;
+  }
+
+  let score = dashboard.fallbackReason ? 1 : 3;
+
+  if (dashboard.overview.hrv !== null || dashboard.overview.readiness !== null || dashboard.overview.vo2Max !== null) {
+    score += 3;
+  }
+
+  if (dashboard.wellnessTrend.some((entry) => entry.hrv !== null || entry.readiness !== null)) {
+    score += 3;
+  }
+
+  if (dashboard.vo2Trend.some((entry) => entry.value !== null)) {
+    score += 2;
+  }
+
+  return score;
+}
+
 export function getPersistedUserState(accountKey: string): PersistedUserState | null {
-  return mapRow(selectStateStatement.get(normalizeAccountKey(accountKey)) as UserStateRow | undefined);
+  let bestRow: UserStateRow | null = null;
+  let bestScore = -1;
+
+  for (const candidate of resolvePersistedAccountKeys(accountKey)) {
+    const row = selectStateStatement.get(candidate) as UserStateRow | undefined;
+    if (!row) {
+      continue;
+    }
+
+    const score = persistedRowScore(row);
+    if (score > bestScore) {
+      bestRow = row;
+      bestScore = score;
+    }
+  }
+
+  return mapRow(bestRow ?? undefined);
 }
 
 export function upsertPersistedGoal(accountKey: string, goal: UserGoal): void {

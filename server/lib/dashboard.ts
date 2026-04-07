@@ -2090,11 +2090,15 @@ async function buildGarminDashboardData(input: {
   const today = startOfToday();
   const goalMeta = buildGoalMeta(input.goal, today);
   const referenceDate = pickReferenceDate(today);
+  const recoverySignalStart = isoDate(subDays(today, 6));
   const wellnessStart = isoDate(subDays(today, 13));
   const runningStart = isoDate(subWeeks(today, 6));
   const runningEnd = isoDate(today);
   const weightStart = isoDate(subWeeks(today, 4));
   const buildStartTime = Date.now();
+  const garminCoreTimeoutMs = 20_000;
+  const garminRangeTimeoutMs = 75_000;
+  const garminOptionalTimeoutMs = 20_000;
 
   // PHASE 1: CRITICAL CORE DATA - MUST SUCCEED for dashboard to be useful
   // These are essential for profile display and basic metrics
@@ -2104,11 +2108,20 @@ async function buildGarminDashboardData(input: {
   
   try {
     [userProfile, dailySummary, activitiesRaw] = await Promise.all([
-      garminClient.callJson(input.auth, 'get_user_profile'),
-      garminClient.callJson(input.auth, 'get_daily_summary', { date: referenceDate }),
+      garminClient.callJson(input.auth, 'get_user_profile', undefined, {
+        backend: 'mcp',
+        timeoutMs: garminCoreTimeoutMs,
+      }),
+      garminClient.callJson(input.auth, 'get_daily_summary', { date: referenceDate }, {
+        backend: 'mcp',
+        timeoutMs: garminCoreTimeoutMs,
+      }),
       garminClient.callJson(input.auth, 'get_activities_by_date', {
         startDate: runningStart,
         endDate: runningEnd,
+      }, {
+        backend: 'mcp',
+        timeoutMs: garminCoreTimeoutMs,
       }),
     ]);
     console.log(`[perf] garmin core data loaded (profile, daily, activities)`);
@@ -2126,7 +2139,6 @@ async function buildGarminDashboardData(input: {
     readinessRangeResult,
     stepsRangeResult,
     maxMetricsRangeResult,
-    vo2RangeResult,
     trainingStatusResult,
     racePredictionsResult,
     bodyCompositionResult,
@@ -2134,37 +2146,63 @@ async function buildGarminDashboardData(input: {
     devicesResult,
   ] = await Promise.allSettled([
     garminClient.callJson(input.auth, 'get_sleep_data_range', {
-      startDate: wellnessStart,
+      startDate: recoverySignalStart,
       endDate: referenceDate,
+    }, {
+      backend: 'python',
+      timeoutMs: garminRangeTimeoutMs,
     }),
     garminClient.callJson(input.auth, 'get_hrv_range', {
-      startDate: wellnessStart,
+      startDate: recoverySignalStart,
       endDate: referenceDate,
+    }, {
+      backend: 'python',
+      timeoutMs: garminRangeTimeoutMs,
     }),
     garminClient.callJson(input.auth, 'get_training_readiness_range', {
       startDate: wellnessStart,
       endDate: referenceDate,
+    }, {
+      backend: 'python',
+      timeoutMs: garminRangeTimeoutMs,
     }),
     garminClient.callJson(input.auth, 'get_daily_steps_range', {
       startDate: wellnessStart,
       endDate: referenceDate,
+    }, {
+      backend: 'mcp',
+      timeoutMs: garminOptionalTimeoutMs,
     }),
     garminClient.callJson(input.auth, 'get_max_metrics_range', {
       startDate: runningStart,
       endDate: referenceDate,
+    }, {
+      backend: 'python',
+      timeoutMs: garminRangeTimeoutMs,
     }),
-    garminClient.callJson(input.auth, 'get_vo2max_range', {
-      startDate: runningStart,
-      endDate: referenceDate,
+    garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate }, {
+      backend: 'mcp',
+      timeoutMs: garminOptionalTimeoutMs,
     }),
-    garminClient.callJson(input.auth, 'get_training_status', { date: referenceDate }),
-    garminClient.callJson(input.auth, 'get_race_predictions'),
+    garminClient.callJson(input.auth, 'get_race_predictions', undefined, {
+      backend: 'mcp',
+      timeoutMs: garminOptionalTimeoutMs,
+    }),
     garminClient.callJson(input.auth, 'get_body_composition', {
       startDate: weightStart,
       endDate: referenceDate,
+    }, {
+      backend: 'mcp',
+      timeoutMs: garminOptionalTimeoutMs,
     }),
-    garminClient.callJson(input.auth, 'get_social_profile'),
-    garminClient.callJson(input.auth, 'get_devices'),
+    garminClient.callJson(input.auth, 'get_social_profile', undefined, {
+      backend: 'mcp',
+      timeoutMs: garminOptionalTimeoutMs,
+    }),
+    garminClient.callJson(input.auth, 'get_devices', undefined, {
+      backend: 'mcp',
+      timeoutMs: garminOptionalTimeoutMs,
+    }),
   ]);
 
   // Extract successful enrichment results, or null if failed
@@ -2173,7 +2211,6 @@ async function buildGarminDashboardData(input: {
   const readinessRange = readinessRangeResult.status === 'fulfilled' ? readinessRangeResult.value : null;
   const stepsRange = stepsRangeResult.status === 'fulfilled' ? stepsRangeResult.value : null;
   const maxMetricsRange = maxMetricsRangeResult.status === 'fulfilled' ? maxMetricsRangeResult.value : null;
-  const vo2Range = vo2RangeResult.status === 'fulfilled' ? vo2RangeResult.value : null;
   const trainingStatusRaw = trainingStatusResult.status === 'fulfilled' ? trainingStatusResult.value : null;
   const racePredictionsRaw = racePredictionsResult.status === 'fulfilled' ? racePredictionsResult.value : null;
   const bodyCompositionRaw = bodyCompositionResult.status === 'fulfilled' ? bodyCompositionResult.value : null;
@@ -2184,6 +2221,20 @@ async function buildGarminDashboardData(input: {
   if (sleepRangeResult.status === 'rejected') {
     const msg = sleepRangeResult.reason instanceof Error ? sleepRangeResult.reason.message : String(sleepRangeResult.reason);
     console.warn(`[perf] garmin optional tool=get_sleep_data_range failed: ${msg.substring(0, 60)}`);
+  }
+  if (hrvRangeResult.status === 'rejected') {
+    const msg = hrvRangeResult.reason instanceof Error ? hrvRangeResult.reason.message : String(hrvRangeResult.reason);
+    console.warn(`[perf] garmin optional tool=get_hrv_range failed: ${msg.substring(0, 60)}`);
+  }
+  if (readinessRangeResult.status === 'rejected') {
+    const msg =
+      readinessRangeResult.reason instanceof Error ? readinessRangeResult.reason.message : String(readinessRangeResult.reason);
+    console.warn(`[perf] garmin optional tool=get_training_readiness_range failed: ${msg.substring(0, 60)}`);
+  }
+  if (maxMetricsRangeResult.status === 'rejected') {
+    const msg =
+      maxMetricsRangeResult.reason instanceof Error ? maxMetricsRangeResult.reason.message : String(maxMetricsRangeResult.reason);
+    console.warn(`[perf] garmin optional tool=get_max_metrics_range failed: ${msg.substring(0, 60)}`);
   }
   if (devicesResult.status === 'rejected') {
     const msg = devicesResult.reason instanceof Error ? devicesResult.reason.message : String(devicesResult.reason);
@@ -2204,10 +2255,7 @@ async function buildGarminDashboardData(input: {
   const hrvSeries = normalizeRangeSeries(hrvRange, extractHrv);
   const readinessSeries = normalizeRangeSeries(readinessRange, extractReadiness);
   const stepsSeries = normalizeSteps(stepsRange);
-  const vo2SeriesFromMaxMetrics = normalizeRangeSeries(maxMetricsRange, extractVo2);
-  const vo2SeriesFromLegacyRange = normalizeRangeSeries(vo2Range, extractVo2);
-  const vo2Series =
-    vo2SeriesFromMaxMetrics.some((entry) => entry.value !== null) ? vo2SeriesFromMaxMetrics : vo2SeriesFromLegacyRange;
+  const vo2Series = normalizeRangeSeries(maxMetricsRange, extractVo2);
   const latestVo2 =
     vo2Series.filter((entry) => entry.value !== null).at(-1)?.value ??
     extractVo2(trainingStatusRaw) ??

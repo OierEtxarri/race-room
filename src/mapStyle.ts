@@ -69,40 +69,39 @@ export const TILE_SIZE = 256;
 
 // Default tiling zoom for video rendering
 // Higher zoom = more detail, but more tiles to fetch
-export const VIDEO_TILE_ZOOM = 14;
+export const VIDEO_TILE_ZOOM = 15;
 
-// Video layout dimensions (720x1280 vertical format)
+// Video layout dimensions (compact vertical format similar to run-cam exports)
 export const VIDEO_LAYOUT = {
-  canvasWidth: 720,
-  canvasHeight: 1280,
-  outerPadding: 36,
+  canvasWidth: 480,
+  canvasHeight: 848,
+  outerPadding: 20,
   header: {
-    x: 36,
-    y: 42,
-    w: 648,
-    h: 96,
+    x: 20,
+    y: 22,
+    w: 440,
+    h: 84,
   },
   mapCard: {
-    x: 52,
-    y: 234,
-    w: 616,
-    h: 726,
-    r: 22,
+    x: 0,
+    y: 0,
+    w: 480,
+    h: 848,
+    r: 0,
   },
   metricsCard: {
-    x: 52,
-    y: 980,
-    w: 616,
-    h: 284,
+    x: 20,
+    y: 114,
+    w: 440,
+    h: 86,
     r: 22,
   },
 };
 
 // Video phase timing
 export const VIDEO_PHASES = {
-  overview: { start: 0.0, end: 0.16 },      // 16% - full route visible
-  transition: { start: 0.16, end: 0.30 },   // 14% - smooth camera move
-  followCam: { start: 0.30, end: 1.0 },     // 70% - runner cam follow
+  followCam: { start: 0.0, end: 0.84 },
+  recap: { start: 0.84, end: 1.0 },
 };
 
 // Camera anchor points (in map card coordinate space)

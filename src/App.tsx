@@ -21,6 +21,14 @@ import {
   YAxis,
 } from 'recharts';
 import { Skeleton } from 'boneyard-js/react';
+import {
+  BufferTarget,
+  CanvasSource,
+  Output,
+  WebMOutputFormat,
+  QUALITY_HIGH,
+  getFirstEncodableVideoCodec,
+} from 'mediabunny';
 import type {
   ActivityRoute,
   DashboardActivitySummary,
@@ -36,6 +44,7 @@ import {
   PACE_COLORS,
   ROUTE_LINE_STYLES,
   ROUTE_MARKERS,
+  MAP_LAYER_FILTERS,
   MAP_LAYER_OPACITIES,
   TILE_SIZE,
   VIDEO_TILE_ZOOM,
@@ -160,6 +169,25 @@ type VideoExportFormat = {
   mimeType: string;
   extension: 'webm' | 'mp4';
 };
+type RouteVideoTheme = {
+  bg: string;
+  bgDeep: string;
+  panel: string;
+  panelStrong: string;
+  surface: string;
+  heading: string;
+  text: string;
+  muted: string;
+  line: string;
+  lineStrong: string;
+  accent: string;
+  accentDeep: string;
+  accentSoft: string;
+  accentWarm: string;
+  accentWarmSoft: string;
+  warning: string;
+  mapBase: string;
+};
 
 type SpeechRecognitionResultLike = {
   0: {
@@ -224,8 +252,26 @@ const runOverlayTemplate = {
   headline: 'Blur card',
   description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
 };
-const routeVideoDurationMs = 10_000;
-const routeVideoFps = 24;
+const routeVideoDurationMs = 20_000;
+const routeVideoFps = 15;
+const routeVideoRenderScale = 1;
+const routeVideoTileOverscanPx = 280;
+const routeVideoPerspective = {
+  followScale: 2.2,
+  sourceWidthMultiplier: 1.22,
+  sourceHeightMultiplier: 1.55,
+  sourceResolutionScale: 1.45,
+  sourceFocusX: 0.5,
+  sourceFocusY: 0.88,
+  horizonRatio: 0.1,
+  runnerRatio: 0.84,
+  nearSourceTailRatio: 0.08,
+  planeDepth: 3.4,
+  planeHalfWidth: 1.48,
+  cameraHeight: 1.24,
+  cameraDistance: 0.84,
+  cameraLookAhead: 2.06,
+};
 const canvasDisplayFontFamily =
   '"SF Pro Display", "SF Pro Text", "SF Pro Icons", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif';
 const canvasTextFontFamily =
@@ -237,6 +283,37 @@ function canvasDisplayFont(sizePx: number, weight: number | string) {
 
 function canvasTextFont(sizePx: number, weight: number | string) {
   return `${weight} ${sizePx}px ${canvasTextFontFamily}`;
+}
+
+function cssVar(name: string, fallback: string) {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return fallback;
+  }
+
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function resolveRouteVideoTheme(): RouteVideoTheme {
+  return {
+    bg: cssVar('--bg', '#121212'),
+    bgDeep: cssVar('--bg-deep', '#0d0d0d'),
+    panel: cssVar('--panel', '#181818'),
+    panelStrong: cssVar('--panel-strong', '#1f1f1f'),
+    surface: cssVar('--surface', '#232323'),
+    heading: cssVar('--heading', '#ffffff'),
+    text: cssVar('--text', 'rgba(255,255,255,0.92)'),
+    muted: cssVar('--muted', '#b3b3b3'),
+    line: cssVar('--line', 'rgba(255,255,255,0.06)'),
+    lineStrong: cssVar('--line-strong', '#4d4d4d'),
+    accent: cssVar('--accent', '#539df5'),
+    accentDeep: cssVar('--accent-deep', '#2f7de8'),
+    accentSoft: cssVar('--accent-soft', 'rgba(83,157,245,0.16)'),
+    accentWarm: cssVar('--accent-warm', '#f25774'),
+    accentWarmSoft: cssVar('--accent-warm-soft', 'rgba(242,87,116,0.16)'),
+    warning: cssVar('--warning', '#ffa42b'),
+    mapBase: '#11161d',
+  };
 }
 
 const routeVideoFormatCandidates: VideoExportFormat[] = [
@@ -550,14 +627,86 @@ function pickRouteVideoExportFormat(): VideoExportFormat | null {
   return routeVideoFormatCandidates.find((candidate) => MediaRecorder.isTypeSupported(candidate.mimeType)) ?? null;
 }
 
+function supportsOfflineRouteVideoExport() {
+  return typeof window !== 'undefined'
+    && typeof HTMLCanvasElement !== 'undefined'
+    && typeof VideoEncoder !== 'undefined';
+}
+
 function supportsRouteVideoExport() {
   if (typeof window === 'undefined' || typeof HTMLCanvasElement === 'undefined') {
     return false;
   }
 
-  return typeof MediaRecorder !== 'undefined'
-    && typeof HTMLCanvasElement.prototype.captureStream === 'function'
-    && pickRouteVideoExportFormat() !== null;
+  return supportsOfflineRouteVideoExport()
+    || (
+      typeof MediaRecorder !== 'undefined'
+      && typeof HTMLCanvasElement.prototype.captureStream === 'function'
+      && pickRouteVideoExportFormat() !== null
+    );
+}
+
+async function encodeRouteVideoCanvasOffline(input: {
+  canvas: HTMLCanvasElement;
+  totalFrames: number;
+  renderFrame: (frameIndex: number) => void;
+}): Promise<{ blob: Blob; extension: 'webm' } | null> {
+  if (!supportsOfflineRouteVideoExport()) {
+    return null;
+  }
+
+  const outputFormat = new WebMOutputFormat();
+  const codec = await getFirstEncodableVideoCodec(outputFormat.getSupportedVideoCodecs(), {
+    width: input.canvas.width,
+    height: input.canvas.height,
+    bitrate: QUALITY_HIGH,
+  });
+
+  if (!codec) {
+    return null;
+  }
+
+  const output = new Output({
+    format: outputFormat,
+    target: new BufferTarget(),
+  });
+  const source = new CanvasSource(input.canvas, {
+    codec,
+    bitrate: QUALITY_HIGH,
+  });
+
+  output.addVideoTrack(source, {
+    frameRate: routeVideoFps,
+  });
+
+  await output.start();
+
+  try {
+    for (let frameIndex = 0; frameIndex < input.totalFrames; frameIndex += 1) {
+      input.renderFrame(frameIndex);
+      await source.add(frameIndex / routeVideoFps, 1 / routeVideoFps);
+
+      if (frameIndex % 20 === 0) {
+        const progress = clampNumber(frameIndex / Math.max(input.totalFrames - 1, 1), 0, 1);
+        console.log(`[exportRunRouteVideo] frame ${frameIndex + 1}/${input.totalFrames} progress=${progress.toFixed(3)}`);
+      }
+    }
+
+    await output.finalize();
+  } catch (error) {
+    await output.cancel().catch(() => undefined);
+    throw error;
+  }
+
+  const buffer = output.target.buffer;
+  if (!buffer) {
+    throw new Error('No se pudo componer el archivo de video offline.');
+  }
+
+  return {
+    blob: new Blob([buffer], { type: outputFormat.mimeType }),
+    extension: 'webm',
+  };
 }
 
 function wrapCanvasText(
@@ -1790,36 +1939,27 @@ function resolveSmoothedHeadingRadians(samples: PlaybackState[], progress: numbe
 // Overview camera and follow camera logic moved inline to exportRunRouteVideo
 
 /**
- * Interpolate between two camera states with easing (Hermite)
- */
-function interpolateCamera(
-  cameraA: { centerX: number; centerY: number; scale: number; heading: number },
-  cameraB: { centerX: number; centerY: number; scale: number; heading: number },
-  t: number,
-) {
-  const eased = t * t * (3 - 2 * t);
-
-  return {
-    centerX: lerpNumber(cameraA.centerX, cameraB.centerX, eased),
-    centerY: lerpNumber(cameraA.centerY, cameraB.centerY, eased),
-    scale: lerpNumber(cameraA.scale, cameraB.scale, eased),
-    heading: lerpNumber(cameraA.heading, cameraB.heading, eased),
-  };
-}
-
-/**
  * Compute visible world rectangle given camera and card dimensions
  */
 function computeVisibleWorldRect(
-  camera: { centerX: number; centerY: number; scale: number },
+  camera: { centerX: number; centerY: number; scale: number; heading?: number },
   cardWidth: number,
   cardHeight: number,
+  overscanPx = 0,
 ): WorldRect {
+  const halfWidth = cardWidth / (2 * camera.scale);
+  const halfHeight = cardHeight / (2 * camera.scale);
+  const rotation = camera.heading ?? 0;
+  const cos = Math.abs(Math.cos(rotation));
+  const sin = Math.abs(Math.sin(rotation));
+  const rotatedHalfWidth = halfWidth * cos + halfHeight * sin + overscanPx / camera.scale;
+  const rotatedHalfHeight = halfWidth * sin + halfHeight * cos + overscanPx / camera.scale;
+
   return {
-    x: camera.centerX - cardWidth / (2 * camera.scale),
-    y: camera.centerY - cardHeight / (2 * camera.scale),
-    width: cardWidth / camera.scale,
-    height: cardHeight / camera.scale,
+    x: camera.centerX - rotatedHalfWidth,
+    y: camera.centerY - rotatedHalfHeight,
+    width: rotatedHalfWidth * 2,
+    height: rotatedHalfHeight * 2,
   };
 }
 
@@ -1910,17 +2050,28 @@ function drawBaseMapForCamera(
     const tileX = tileCoord.x * tileSize;
     const tileY = tileCoord.y * tileSize;
 
+    context.filter = MAP_LAYER_FILTERS.satellite;
     context.drawImage(bundle.satellite, tileX, tileY, tileSize, tileSize);
 
     context.globalAlpha = MAP_LAYER_OPACITIES.hillshade;
+    context.globalCompositeOperation = 'screen';
+    context.filter = MAP_LAYER_FILTERS.hillshade;
     context.drawImage(bundle.hillshade, tileX, tileY, tileSize, tileSize);
-    context.globalAlpha = 1;
+
+    context.globalAlpha = MAP_LAYER_OPACITIES.hillshade * 0.18;
+    context.globalCompositeOperation = 'multiply';
+    context.drawImage(bundle.hillshade, tileX, tileY, tileSize, tileSize);
 
     context.globalAlpha = MAP_LAYER_OPACITIES.labels;
+    context.globalCompositeOperation = 'source-over';
+    context.filter = MAP_LAYER_FILTERS.labels;
     context.drawImage(bundle.labels, tileX, tileY, tileSize, tileSize);
+    context.filter = 'none';
     context.globalAlpha = 1;
   }
 
+  context.filter = 'none';
+  context.globalCompositeOperation = 'source-over';
   context.restore();
 }
 
@@ -2003,7 +2154,15 @@ function drawRouteProgressFrame(
   cardY: number,
   cardWidth: number,
   cardHeight: number,
+  options: {
+    showActiveMarker?: boolean;
+    visualScale?: number;
+  } = {},
 ) {
+  const completedPointCount = Math.max(2, Math.ceil((worldPoints.length - 1) * progression) + 1);
+  const completedSegmentCount = Math.max(1, Math.ceil(worldSegments.length * progression));
+  const visualScale = options.visualScale ?? 1;
+
   context.save();
   context.translate(cardX + cardWidth / 2, cardY + cardHeight / 2);
   context.rotate(camera.heading);
@@ -2011,31 +2170,37 @@ function drawRouteProgressFrame(
   context.translate(-camera.centerX, -camera.centerY);
 
   context.strokeStyle = ROUTE_LINE_STYLES.shadow.color;
-  context.lineWidth = ROUTE_LINE_STYLES.shadow.width;
+  context.lineWidth = ROUTE_LINE_STYLES.shadow.width * visualScale;
   context.lineCap = 'round';
   context.lineJoin = 'round';
   context.globalAlpha = ROUTE_LINE_STYLES.shadow.opacity;
   context.beginPath();
-  worldPoints.slice(0, Math.ceil(worldPoints.length * progression) + 1).forEach((point, idx) => {
+  worldPoints.slice(0, completedPointCount).forEach((point, idx) => {
     if (idx === 0) context.moveTo(point.x, point.y);
     else context.lineTo(point.x, point.y);
   });
   context.stroke();
 
-  context.globalAlpha = ROUTE_LINE_STYLES.glow.opacity;
-  worldSegments.forEach((segment) => {
+  worldSegments.forEach((segment, index) => {
+    const completed = index < completedSegmentCount;
+    context.globalAlpha = completed ? ROUTE_LINE_STYLES.glow.opacity : 0.08;
     context.strokeStyle = segment.color;
-    context.lineWidth = ROUTE_LINE_STYLES.glow.width;
+    context.lineWidth = completed
+      ? ROUTE_LINE_STYLES.glow.width * visualScale
+      : ROUTE_LINE_STYLES.glow.width * 0.72 * visualScale;
     context.beginPath();
     context.moveTo(segment.start.x, segment.start.y);
     context.lineTo(segment.end.x, segment.end.y);
     context.stroke();
   });
 
-  context.globalAlpha = ROUTE_LINE_STYLES.main.opacity;
-  worldSegments.forEach((segment) => {
+  worldSegments.forEach((segment, index) => {
+    const completed = index < completedSegmentCount;
+    context.globalAlpha = completed ? ROUTE_LINE_STYLES.main.opacity : 0.2;
     context.strokeStyle = segment.color;
-    context.lineWidth = ROUTE_LINE_STYLES.main.width;
+    context.lineWidth = completed
+      ? ROUTE_LINE_STYLES.main.width * visualScale
+      : ROUTE_LINE_STYLES.main.width * 0.78 * visualScale;
     context.beginPath();
     context.moveTo(segment.start.x, segment.start.y);
     context.lineTo(segment.end.x, segment.end.y);
@@ -2045,47 +2210,405 @@ function drawRouteProgressFrame(
   context.globalAlpha = 1;
   context.fillStyle = ROUTE_MARKERS.start.color;
   context.beginPath();
-  context.arc(worldPoints[0]!.x, worldPoints[0]!.y, ROUTE_MARKERS.start.radius, 0, Math.PI * 2);
+  context.arc(worldPoints[0]!.x, worldPoints[0]!.y, ROUTE_MARKERS.start.radius * visualScale, 0, Math.PI * 2);
   context.fill();
 
   context.fillStyle = ROUTE_MARKERS.finish.color;
   context.beginPath();
-  context.arc(worldPoints.at(-1)!.x, worldPoints.at(-1)!.y, ROUTE_MARKERS.finish.radius, 0, Math.PI * 2);
+  context.arc(
+    worldPoints.at(-1)!.x,
+    worldPoints.at(-1)!.y,
+    ROUTE_MARKERS.finish.radius * visualScale,
+    0,
+    Math.PI * 2,
+  );
   context.fill();
 
-  context.fillStyle = '#00F0FF';
-  context.globalAlpha = 0.8;
-  context.beginPath();
-  context.arc(playbackState.worldX, playbackState.worldY, 6, 0, Math.PI * 2);
-  context.fill();
+  if (options.showActiveMarker !== false) {
+    const markerRadius = 6.5 * visualScale;
+    context.fillStyle = 'rgba(255,255,255,0.18)';
+    context.globalAlpha = 1;
+    context.beginPath();
+    context.arc(playbackState.worldX, playbackState.worldY, markerRadius * 2.4, 0, Math.PI * 2);
+    context.fill();
+    const markerGradient = context.createLinearGradient(
+      playbackState.worldX - markerRadius,
+      playbackState.worldY - markerRadius,
+      playbackState.worldX + markerRadius,
+      playbackState.worldY + markerRadius,
+    );
+    markerGradient.addColorStop(0, '#F25774');
+    markerGradient.addColorStop(1, '#FF9B52');
+    context.fillStyle = markerGradient;
+    context.beginPath();
+    context.arc(playbackState.worldX, playbackState.worldY, markerRadius, 0, Math.PI * 2);
+    context.fill();
+    context.strokeStyle = 'rgba(255,255,255,0.94)';
+    context.lineWidth = 2.5 * visualScale;
+    context.beginPath();
+    context.arc(playbackState.worldX, playbackState.worldY, markerRadius * 1.5, 0, Math.PI * 2);
+    context.stroke();
+  }
 
+  context.restore();
+}
+
+function drawRouteVideoMapCardShell(
+  context: CanvasRenderingContext2D,
+  layout: typeof VIDEO_LAYOUT,
+  theme: RouteVideoTheme,
+) {
+  context.save();
+  context.fillStyle = theme.mapBase;
+  context.fillRect(layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
+  context.restore();
+}
+
+type RouteVideoGroundProjector = {
+  canvas: HTMLCanvasElement;
+  render: (sourceCanvas: HTMLCanvasElement) => void;
+};
+
+function multiplyMat4(left: Float32Array, right: Float32Array) {
+  const out = new Float32Array(16);
+  for (let column = 0; column < 4; column += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      let sum = 0;
+      for (let index = 0; index < 4; index += 1) {
+        sum += left[index * 4 + row] * right[column * 4 + index];
+      }
+      out[column * 4 + row] = sum;
+    }
+  }
+  return out;
+}
+
+function createPerspectiveMat4(fovRadians: number, aspect: number, near: number, far: number) {
+  const f = 1 / Math.tan(fovRadians / 2);
+  const out = new Float32Array(16);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = (far + near) / (near - far);
+  out[11] = -1;
+  out[14] = (2 * far * near) / (near - far);
+  return out;
+}
+
+function normalizeVec3([x, y, z]: [number, number, number]): [number, number, number] {
+  const length = Math.hypot(x, y, z) || 1;
+  return [x / length, y / length, z / length];
+}
+
+function subtractVec3(
+  [ax, ay, az]: [number, number, number],
+  [bx, by, bz]: [number, number, number],
+): [number, number, number] {
+  return [ax - bx, ay - by, az - bz];
+}
+
+function crossVec3(
+  [ax, ay, az]: [number, number, number],
+  [bx, by, bz]: [number, number, number],
+): [number, number, number] {
+  return [
+    ay * bz - az * by,
+    az * bx - ax * bz,
+    ax * by - ay * bx,
+  ];
+}
+
+function dotVec3(
+  [ax, ay, az]: [number, number, number],
+  [bx, by, bz]: [number, number, number],
+) {
+  return ax * bx + ay * by + az * bz;
+}
+
+function createLookAtMat4(
+  eye: [number, number, number],
+  target: [number, number, number],
+  up: [number, number, number],
+) {
+  const zAxis = normalizeVec3(subtractVec3(eye, target));
+  const xAxis = normalizeVec3(crossVec3(up, zAxis));
+  const yAxis = crossVec3(zAxis, xAxis);
+
+  const out = new Float32Array(16);
+  out[0] = xAxis[0];
+  out[1] = yAxis[0];
+  out[2] = zAxis[0];
+  out[4] = xAxis[1];
+  out[5] = yAxis[1];
+  out[6] = zAxis[1];
+  out[8] = xAxis[2];
+  out[9] = yAxis[2];
+  out[10] = zAxis[2];
+  out[12] = -dotVec3(xAxis, eye);
+  out[13] = -dotVec3(yAxis, eye);
+  out[14] = -dotVec3(zAxis, eye);
+  out[15] = 1;
+  return out;
+}
+
+function createShader(gl: WebGLRenderingContext, type: number, source: string) {
+  const shader = gl.createShader(type);
+  if (!shader) {
+    throw new Error('No se pudo crear el shader del route video.');
+  }
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const error = gl.getShaderInfoLog(shader) ?? 'shader compile error';
+    gl.deleteShader(shader);
+    throw new Error(`Shader del route video invalido: ${error}`);
+  }
+  return shader;
+}
+
+function createProgram(gl: WebGLRenderingContext, vertexSource: string, fragmentSource: string) {
+  const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  const program = gl.createProgram();
+  if (!program) {
+    throw new Error('No se pudo crear el programa WebGL del route video.');
+  }
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  gl.deleteShader(vertexShader);
+  gl.deleteShader(fragmentShader);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const error = gl.getProgramInfoLog(program) ?? 'program link error';
+    gl.deleteProgram(program);
+    throw new Error(`Programa WebGL del route video invalido: ${error}`);
+  }
+  return program;
+}
+
+function createRouteVideoGroundProjector(width: number, height: number): RouteVideoGroundProjector | null {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * routeVideoRenderScale));
+  canvas.height = Math.max(1, Math.round(height * routeVideoRenderScale));
+  const gl = canvas.getContext('webgl', {
+    alpha: true,
+    antialias: false,
+    premultipliedAlpha: true,
+  });
+
+  if (!gl) {
+    return null;
+  }
+
+  const vertexSource = `
+    attribute vec3 a_position;
+    attribute vec2 a_texCoord;
+    uniform mat4 u_matrix;
+    varying vec2 v_texCoord;
+    void main() {
+      gl_Position = u_matrix * vec4(a_position, 1.0);
+      v_texCoord = a_texCoord;
+    }
+  `;
+  const fragmentSource = `
+    precision mediump float;
+    varying vec2 v_texCoord;
+    uniform sampler2D u_texture;
+    void main() {
+      gl_FragColor = texture2D(u_texture, v_texCoord);
+    }
+  `;
+
+  const program = createProgram(gl, vertexSource, fragmentSource);
+  const positionLocation = gl.getAttribLocation(program, 'a_position');
+  const texCoordLocation = gl.getAttribLocation(program, 'a_texCoord');
+  const matrixLocation = gl.getUniformLocation(program, 'u_matrix');
+  const textureLocation = gl.getUniformLocation(program, 'u_texture');
+  const positionBuffer = gl.createBuffer();
+  const texCoordBuffer = gl.createBuffer();
+  const texture = gl.createTexture();
+
+  if (!positionBuffer || !texCoordBuffer || !texture || !matrixLocation || !textureLocation) {
+    return null;
+  }
+
+  const halfWidth = routeVideoPerspective.planeHalfWidth;
+  const planeDepth = routeVideoPerspective.planeDepth;
+  const positions = new Float32Array([
+    -halfWidth, 0, 0,
+    halfWidth, 0, 0,
+    -halfWidth, 0, -planeDepth,
+    -halfWidth, 0, -planeDepth,
+    halfWidth, 0, 0,
+    halfWidth, 0, -planeDepth,
+  ]);
+  const texCoords = new Float32Array([
+    0, 1,
+    1, 1,
+    0, 0,
+    0, 0,
+    1, 1,
+    1, 0,
+  ]);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, texCoords, gl.STATIC_DRAW);
+
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+  let textureInitialized = false;
+
+  const matrix = multiplyMat4(
+    createPerspectiveMat4(Math.PI / 3.4, canvas.width / canvas.height, 0.1, 20),
+    createLookAtMat4(
+      [0, routeVideoPerspective.cameraHeight, routeVideoPerspective.cameraDistance],
+      [0, 0, -routeVideoPerspective.cameraLookAhead],
+      [0, 1, 0],
+    ),
+  );
+
+  return {
+    canvas,
+    render(sourceCanvas) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(program);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+      gl.enableVertexAttribArray(positionLocation);
+      gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+      gl.enableVertexAttribArray(texCoordLocation);
+      gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      if (!textureInitialized) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
+        textureInitialized = true;
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
+      }
+      gl.uniform1i(textureLocation, 0);
+      gl.uniformMatrix4fv(matrixLocation, false, matrix);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    },
+  };
+}
+
+function drawPerspectiveGroundPlane(
+  context: CanvasRenderingContext2D,
+  sourceCanvas: HTMLCanvasElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  theme: RouteVideoTheme,
+  projector: RouteVideoGroundProjector | null = null,
+) {
+  context.save();
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.fillStyle = theme.mapBase;
+  context.fillRect(x, y, width, height);
+  if (projector) {
+    projector.render(sourceCanvas);
+    context.drawImage(projector.canvas, x, y, width, height);
+  } else {
+    context.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, x, y, width, height);
+  }
+
+  const topShade = context.createLinearGradient(0, y, 0, y + height * 0.26);
+  topShade.addColorStop(0, 'rgba(8,12,18,0.28)');
+  topShade.addColorStop(0.4, 'rgba(8,12,18,0.12)');
+  topShade.addColorStop(1, 'rgba(8,12,18,0)');
+  context.fillStyle = topShade;
+  context.fillRect(x, y, width, height * 0.26);
+
+  const atmosphere = context.createLinearGradient(0, y, 0, y + height);
+  atmosphere.addColorStop(0, 'rgba(255,255,255,0.02)');
+  atmosphere.addColorStop(0.68, 'rgba(10,16,24,0)');
+  atmosphere.addColorStop(1, 'rgba(10,16,24,0.14)');
+  context.fillStyle = atmosphere;
+  context.fillRect(x, y, width, height);
+
+  context.restore();
+}
+
+function drawRouteVideoMapCardChrome(
+  context: CanvasRenderingContext2D,
+  layout: typeof VIDEO_LAYOUT,
+  _run: DashboardData['recentRuns'][number],
+  routeSource: ActivityRoute['source'],
+) {
+  const x = layout.mapCard.x;
+  const y = layout.mapCard.y;
+  const width = layout.mapCard.w;
+  const height = layout.mapCard.h;
+  const sourceLabel = routeSource.toUpperCase();
+  context.save();
+  const topFade = context.createLinearGradient(0, y, 0, y + 250);
+  topFade.addColorStop(0, 'rgba(8,12,18,0.84)');
+  topFade.addColorStop(0.28, 'rgba(8,12,18,0.42)');
+  topFade.addColorStop(1, 'rgba(8,12,18,0)');
+  context.fillStyle = topFade;
+  context.fillRect(x, y, width, 250);
+
+  const bottomFade = context.createLinearGradient(0, y + height, 0, y + height - 220);
+  bottomFade.addColorStop(0, 'rgba(8,12,18,0.7)');
+  bottomFade.addColorStop(0.52, 'rgba(8,12,18,0.24)');
+  bottomFade.addColorStop(1, 'rgba(8,12,18,0)');
+  context.fillStyle = bottomFade;
+  context.fillRect(x, y + height - 220, width, 220);
+
+  const leftShade = context.createLinearGradient(x, 0, x + width * 0.24, 0);
+  leftShade.addColorStop(0, 'rgba(8,12,18,0.32)');
+  leftShade.addColorStop(1, 'rgba(8,12,18,0)');
+  context.fillStyle = leftShade;
+  context.fillRect(x, y, width * 0.24, height);
+
+  const rightShade = context.createLinearGradient(x + width, 0, x + width * 0.76, 0);
+  rightShade.addColorStop(0, 'rgba(8,12,18,0.32)');
+  rightShade.addColorStop(1, 'rgba(8,12,18,0)');
+  context.fillStyle = rightShade;
+  context.fillRect(x + width * 0.76, y, width * 0.24, height);
+
+  const sourceWidth = measureOverlayPillWidth(context, sourceLabel, {
+    paddingX: 12,
+    font: canvasTextFont(12, 600),
+  });
+  drawOverlayPill(context, x + width - 18 - sourceWidth, y + height - 46, sourceLabel, {
+    fill: 'rgba(12,16,24,0.54)',
+    stroke: 'rgba(255,255,255,0.08)',
+    textColor: 'rgba(249,246,235,0.74)',
+    font: canvasTextFont(12, 600),
+    height: 28,
+    paddingX: 12,
+  });
   context.restore();
 }
 
 /**
  * Draw video overlay (header, metrics, progress bar)
  */
-function drawVideoBackground(context: CanvasRenderingContext2D) {
-  const width = context.canvas.width;
-  const height = context.canvas.height;
-
-  const background = context.createLinearGradient(0, 0, 0, height);
-  background.addColorStop(0, '#171717');
-  background.addColorStop(0.36, '#122');
-  background.addColorStop(1, '#0d0d0d');
-  context.fillStyle = background;
-  context.fillRect(0, 0, width, height);
-
-  const topGlow = context.createRadialGradient(width * 0.86, height * 0.14, 0, width * 0.86, height * 0.14, width * 0.72);
-  topGlow.addColorStop(0, 'rgba(83,157,245,0.18)');
-  topGlow.addColorStop(1, 'rgba(83,157,245,0)');
-  context.fillStyle = topGlow;
-  context.fillRect(0, 0, width, height);
-
-  const sideGlow = context.createRadialGradient(width * 0.18, height * 0.84, 0, width * 0.18, height * 0.84, width * 0.64);
-  sideGlow.addColorStop(0, 'rgba(242,87,116,0.12)');
-  sideGlow.addColorStop(1, 'rgba(242,87,116,0)');
-  context.fillStyle = sideGlow;
+function drawVideoBackground(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  theme: RouteVideoTheme,
+) {
+  context.fillStyle = theme.bgDeep;
   context.fillRect(0, 0, width, height);
 }
 
@@ -2096,130 +2619,96 @@ function drawVideoForeground(
   run: DashboardData['recentRuns'][number],
   athleteName: string,
   providerLabel: string,
+  theme: RouteVideoTheme,
 ) {
-  const width = context.canvas.width;
+  const width = layout.canvasWidth;
   const paceLabel = playbackState.paceSecondsPerKm !== null
     ? formatPace(playbackState.paceSecondsPerKm)
     : formatPace(run.paceSecondsPerKm);
   const completion = clampNumber(run.distanceKm > 0 ? playbackState.distanceKm / run.distanceKm : playbackState.progress, 0, 1);
+  const metricX = layout.metricsCard.x;
+  const metricY = layout.metricsCard.y;
+  const metricGap = 10;
+  const metricWidth = (layout.metricsCard.w - metricGap * 2) / 3;
+  const metricHeight = layout.metricsCard.h;
 
-  fillRoundedPanel(context, layout.header.x, layout.header.y, layout.header.w, layout.header.h, {
-    radius: 30,
-    fill: 'rgba(24,24,24,0.92)',
-    stroke: 'rgba(255,255,255,0.04)',
-    lineWidth: 1.2,
-  });
-
-  context.save();
-  context.beginPath();
-  context.arc(layout.header.x + 42, layout.header.y + 48, 22, 0, Math.PI * 2);
-  const badgeGradient = context.createLinearGradient(
-    layout.header.x + 20, layout.header.y + 26,
-    layout.header.x + 64, layout.header.y + 70
-  );
-  badgeGradient.addColorStop(0, '#539df5');
-  badgeGradient.addColorStop(0.58, '#2f7de8');
-  badgeGradient.addColorStop(1, '#f25774');
-  context.fillStyle = badgeGradient;
-  context.fill();
-  context.restore();
-
-  context.fillStyle = '#FFFFFF';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.font = canvasTextFont(17, 600);
-  context.fillText('RR', layout.header.x + 42, layout.header.y + 50);
-  context.textAlign = 'left';
-  context.textBaseline = 'alphabetic';
-
-  drawOverlayPill(context, layout.header.x + 76, layout.header.y + 24, 'SESSION SHORT', {
-    fill: 'rgba(255,255,255,0.035)',
+  drawOverlayPill(context, layout.header.x, layout.header.y, 'RUN CAM', {
+    fill: 'rgba(12,16,24,0.66)',
     stroke: 'rgba(255,255,255,0.08)',
-    textColor: 'rgba(255,255,255,0.72)',
-    font: canvasTextFont(14, 500),
-    height: 34,
-    paddingX: 16,
+    textColor: 'rgba(255,255,255,0.74)',
+    font: canvasTextFont(12, 600),
+    height: 28,
+    paddingX: 12,
   });
-  drawOverlayPill(context, width - layout.outerPadding - 150, layout.header.y + 24, providerLabel.toUpperCase(), {
-    fill: 'rgba(83,157,245,0.12)',
-    stroke: 'rgba(83,157,245,0.2)',
+  drawOverlayPill(context, width - layout.outerPadding - 108, layout.header.y, providerLabel.toUpperCase(), {
+    fill: theme.accentSoft,
+    stroke: 'rgba(83,157,245,0.24)',
     textColor: '#D9E9FF',
-    font: canvasTextFont(14, 500),
-    height: 34,
-    paddingX: 16,
-  });
-  drawOverlayPill(context, width - layout.outerPadding - 296, layout.header.y + 24, run.activityLabel.toUpperCase(), {
-    fill: 'rgba(242,87,116,0.1)',
-    stroke: 'rgba(242,87,116,0.18)',
-    textColor: '#FFE2E7',
-    font: canvasTextFont(14, 500),
-    height: 34,
-    paddingX: 16,
+    font: canvasTextFont(12, 600),
+    height: 28,
+    paddingX: 12,
   });
 
-  context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(36, 600);
-  wrapCanvasText(context, run.name, layout.header.x + 20, layout.header.y + 86, layout.header.w - 40, 42, 2);
-  context.fillStyle = 'rgba(255,255,255,0.62)';
-  context.font = canvasTextFont(15, 400);
+  context.fillStyle = theme.heading;
+  context.font = canvasDisplayFont(28, 650);
+  wrapCanvasText(context, run.name, layout.header.x, layout.header.y + 42, layout.header.w - 120, 30, 2);
+
+  context.fillStyle = 'rgba(255,255,255,0.7)';
+  context.font = canvasTextFont(13, 500);
   context.fillText(
-    `${run.date}${run.timeLabel ? ` · ${run.timeLabel}` : ''} · ${athleteName.toUpperCase()}`,
-    layout.header.x + 20,
-    layout.header.y + 172
+    `${athleteName.toUpperCase()} · ${run.date}${run.timeLabel ? ` · ${run.timeLabel}` : ''} · ${run.activityLabel.toUpperCase()}`,
+    layout.header.x,
+    layout.header.y + 80,
   );
 
-  fillRoundedPanel(context, layout.metricsCard.x, layout.metricsCard.y, layout.metricsCard.w, layout.metricsCard.h, {
-    radius: layout.metricsCard.r,
-    fill: 'rgba(32,32,32,0.96)',
-    stroke: 'rgba(255,255,255,0.05)',
-    lineWidth: 1.2,
+  const metricPanels = [
+    { label: 'DISTANCE', value: `${playbackState.distanceKm.toFixed(1)}`, suffix: 'km' },
+    { label: 'PACE', value: paceLabel ?? '--:--', suffix: '' },
+    { label: 'TIME', value: formatDuration(playbackState.elapsedSeconds), suffix: '' },
+  ];
+
+  metricPanels.forEach((panel, index) => {
+    const panelX = metricX + index * (metricWidth + metricGap);
+    fillRoundedPanel(context, panelX, metricY, metricWidth, metricHeight, {
+      radius: layout.metricsCard.r,
+      fill: 'rgba(12,16,24,0.58)',
+      stroke: 'rgba(255,255,255,0.08)',
+      lineWidth: 1,
+    });
+    context.fillStyle = 'rgba(255,255,255,0.58)';
+    context.font = canvasTextFont(11, 600);
+    context.fillText(panel.label, panelX + 16, metricY + 22);
+    context.fillStyle = theme.heading;
+    context.font = canvasDisplayFont(index === 0 ? 34 : 30, 650);
+    context.fillText(panel.value, panelX + 16, metricY + 58);
+    if (panel.suffix) {
+      context.fillStyle = 'rgba(255,255,255,0.62)';
+      context.font = canvasTextFont(12, 600);
+      context.fillText(panel.suffix, panelX + 16, metricY + 76);
+    }
   });
 
-  context.fillStyle = 'rgba(255,255,255,0.52)';
-  context.font = canvasTextFont(13, 500);
-  context.fillText('KM', layout.metricsCard.x + 26, layout.metricsCard.y + 54);
-  context.fillText('PACE', layout.metricsCard.x + 368, layout.metricsCard.y + 54);
-  context.fillText('TIME', layout.metricsCard.x + 368, layout.metricsCard.y + 166);
-
-  context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(80, 600);
-  context.fillText(`${playbackState.distanceKm.toFixed(1)}`, layout.metricsCard.x + 26, layout.metricsCard.y + 122);
-  context.font = canvasTextFont(20, 600);
-  context.fillStyle = 'rgba(255,255,255,0.72)';
-  context.fillText('KM', layout.metricsCard.x + 30, layout.metricsCard.y + 166);
-
-  context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(34, 600);
-  context.fillText(paceLabel ?? '--:--', layout.metricsCard.x + 368, layout.metricsCard.y + 124);
-  context.fillText(formatDuration(playbackState.elapsedSeconds), layout.metricsCard.x + 368, layout.metricsCard.y + 218);
-
-  fillRoundedPanel(context, layout.metricsCard.x + 26, layout.metricsCard.y + 232, layout.metricsCard.w - 52, 14, {
+  fillRoundedPanel(context, layout.outerPadding, metricY + metricHeight + 14, width - layout.outerPadding * 2, 8, {
     radius: 999,
-    fill: 'rgba(255,255,255,0.06)',
+    fill: 'rgba(255,255,255,0.14)',
   });
   const progressGradient = context.createLinearGradient(
-    layout.metricsCard.x + 26, layout.metricsCard.y + 232,
-    layout.metricsCard.x + layout.metricsCard.w - 26, layout.metricsCard.y + 232
+    layout.outerPadding, metricY + metricHeight + 14,
+    width - layout.outerPadding, metricY + metricHeight + 14,
   );
-  progressGradient.addColorStop(0, '#539df5');
-  progressGradient.addColorStop(0.65, '#2f7de8');
-  progressGradient.addColorStop(1, '#f25774');
-  fillRoundedPanel(context, layout.metricsCard.x + 26, layout.metricsCard.y + 232, (layout.metricsCard.w - 52) * completion, 14, {
-    radius: 999,
-    fill: progressGradient,
-  });
-
-  context.fillStyle = 'rgba(255,255,255,0.66)';
-  context.font = canvasTextFont(14, 500);
-  context.fillText(
-    `TOTAL ${formatActivityDistance(run.distanceKm).toUpperCase()}`,
-    layout.metricsCard.x + 26,
-    layout.metricsCard.y + 280
-  );
-  context.fillText(
-    `RITMO MEDIO ${formatPace(run.paceSecondsPerKm) ?? 'SIN DATO'} · DESNIVEL ${metricValue(run.elevationGain, ' m')}`,
-    layout.metricsCard.x + 198,
-    layout.metricsCard.y + 280
+  progressGradient.addColorStop(0, '#6EC8FF');
+  progressGradient.addColorStop(0.5, '#539DF5');
+  progressGradient.addColorStop(1, '#F25774');
+  fillRoundedPanel(
+    context,
+    layout.outerPadding,
+    metricY + metricHeight + 14,
+    (width - layout.outerPadding * 2) * completion,
+    8,
+    {
+      radius: 999,
+      fill: progressGradient,
+    },
   );
 }
 
@@ -3160,15 +3649,17 @@ async function exportRunRouteVideo(input: {
   await document.fonts.ready.catch(() => undefined);
   console.log('[exportRunRouteVideo] start', { runId: input.run.id, date: input.run.date });
 
-  const format = pickRouteVideoExportFormat();
-  if (!format) {
+  const fallbackFormat = pickRouteVideoExportFormat();
+  if (!supportsOfflineRouteVideoExport() && !fallbackFormat) {
     throw new Error('Este navegador no soporta la exportacion de video desde canvas.');
   }
 
+  const theme = resolveRouteVideoTheme();
   const layout = VIDEO_LAYOUT;
+  const tileOverscanPx = routeVideoTileOverscanPx;
   const canvas = document.createElement('canvas');
-  canvas.width = layout.canvasWidth;
-  canvas.height = layout.canvasHeight;
+  canvas.width = Math.round(layout.canvasWidth * routeVideoRenderScale);
+  canvas.height = Math.round(layout.canvasHeight * routeVideoRenderScale);
   const context = canvas.getContext('2d');
 
   if (!context) {
@@ -3176,8 +3667,37 @@ async function exportRunRouteVideo(input: {
   }
 
   const playbackSamples = buildPlaybackSamples(input.route, VIDEO_TILE_ZOOM);
+  const totalFrames = Math.max(2, Math.round((routeVideoDurationMs * routeVideoFps) / 1000));
+  const frameDurationMs = 1000 / routeVideoFps;
   const worldRoutePoints = input.route.points.map(([lat, lng]) => mercatorPixel(lat, lng, VIDEO_TILE_ZOOM));
   const thresholds = paceThresholds(input.route);
+  const perspectiveSurfaceScale = routeVideoPerspective.sourceResolutionScale * routeVideoRenderScale;
+  const perspectiveTileOverscanPx = tileOverscanPx * routeVideoPerspective.sourceResolutionScale;
+  const perspectiveSurface = document.createElement('canvas');
+  perspectiveSurface.width = Math.round(
+    layout.mapCard.w * routeVideoPerspective.sourceWidthMultiplier * perspectiveSurfaceScale,
+  );
+  perspectiveSurface.height = Math.round(
+    layout.mapCard.h * routeVideoPerspective.sourceHeightMultiplier * perspectiveSurfaceScale,
+  );
+  const perspectiveContext = perspectiveSurface.getContext('2d');
+
+  if (!perspectiveContext) {
+    throw new Error('El navegador no ha podido crear la superficie runner-cam del video.');
+  }
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  perspectiveContext.imageSmoothingEnabled = true;
+  perspectiveContext.imageSmoothingQuality = 'high';
+  const groundProjector = createRouteVideoGroundProjector(layout.mapCard.w, layout.mapCard.h);
+
+  const perspectiveFollowScale = routeVideoPerspective.followScale * perspectiveSurfaceScale;
+  const perspectiveFocus = {
+    x: perspectiveSurface.width * routeVideoPerspective.sourceFocusX,
+    y: perspectiveSurface.height * routeVideoPerspective.sourceFocusY,
+  };
+  const frameProgressAt = (frameIndex: number) => clampNumber(frameIndex / Math.max(totalFrames - 1, 1), 0, 1);
 
   const worldSegments: Array<{ start: { x: number; y: number }; end: { x: number; y: number }; color: string }> = [];
   for (let index = 1; index < worldRoutePoints.length; index += 1) {
@@ -3214,77 +3734,52 @@ async function exportRunRouteVideo(input: {
     scale: overviewScale,
     heading: 0,
   };
+  const overviewTiles = resolveVisibleTiles(
+    computeVisibleWorldRect(overviewCamera, layout.mapCard.w, layout.mapCard.h, tileOverscanPx),
+    VIDEO_TILE_ZOOM,
+  );
 
-  const followScale = 1.8;
-  const followFocus = {
-    x: layout.mapCard.x + layout.mapCard.w * 0.5,
-    y: layout.mapCard.y + layout.mapCard.h * 0.64,
-  };
-
-  const buildRunnerCamera = (progress: number) => {
+  const buildPerspectiveCamera = (progress: number) => {
     const playbackState = interpolatePlaybackState(playbackSamples, progress);
-    const heading = resolveSmoothedHeadingRadians(playbackSamples, progress);
+    const runnerHeading = resolveSmoothedHeadingRadians(playbackSamples, progress);
+    const rotation = -Math.PI / 2 - runnerHeading;
     const center = cameraCenterForFocus(
       playbackState.worldX,
       playbackState.worldY,
-      heading,
-      layout.mapCard.x,
-      layout.mapCard.y,
-      layout.mapCard.w,
-      layout.mapCard.h,
-      followFocus.x,
-      followFocus.y,
-      followScale,
+      rotation,
+      0,
+      0,
+      perspectiveSurface.width,
+      perspectiveSurface.height,
+      perspectiveFocus.x,
+      perspectiveFocus.y,
+      perspectiveFollowScale,
     );
 
     return {
       centerX: center.centerX,
       centerY: center.centerY,
-      scale: followScale,
-      heading,
+      scale: perspectiveFollowScale,
+      heading: rotation,
     };
   };
 
-  const buildCamera = (progress: number) => {
-    const clampedProgress = clampNumber(progress, 0, 1);
-    if (clampedProgress <= VIDEO_PHASES.overview.end) {
-      return overviewCamera;
-    }
-
-    if (clampedProgress <= VIDEO_PHASES.transition.end) {
-      const transitionLocalProgress =
-        (clampedProgress - VIDEO_PHASES.overview.end) /
-        Math.max(VIDEO_PHASES.transition.end - VIDEO_PHASES.overview.end, 0.0001);
-      return interpolateCamera(overviewCamera, buildRunnerCamera(clampedProgress), transitionLocalProgress);
-    }
-
-    return buildRunnerCamera(clampedProgress);
-  };
-
-  const keyCameras: Array<{ centerX: number; centerY: number; scale: number; heading: number }> = [overviewCamera];
-  const transitionSamples = 5;
-  for (let index = 0; index < transitionSamples; index += 1) {
-    const progress = clampNumber(
-      VIDEO_PHASES.overview.end + ((index + 1) / transitionSamples) * (VIDEO_PHASES.transition.end - VIDEO_PHASES.overview.end),
-      0,
-      1,
-    );
-    keyCameras.push(buildCamera(progress));
-  }
-
-  const followSamples = 8;
-  for (let index = 0; index < followSamples; index += 1) {
-    const progress = clampNumber(
-      VIDEO_PHASES.transition.end + ((index + 1) / followSamples) * (1 - VIDEO_PHASES.transition.end),
-      0,
-      1,
-    );
-    keyCameras.push(buildCamera(progress));
+  const keyCameras: Array<{ camera: { centerX: number; centerY: number; scale: number; heading: number }; width: number; height: number }> = [
+    { camera: overviewCamera, width: layout.mapCard.w, height: layout.mapCard.h },
+  ];
+  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+    const progress = frameProgressAt(frameIndex);
+    keyCameras.push({
+      camera: buildPerspectiveCamera(progress),
+      width: perspectiveSurface.width,
+      height: perspectiveSurface.height,
+    });
   }
 
   const visibleTileMap = new Map<string, { z: number; x: number; y: number }>();
-  keyCameras.forEach((camera) => {
-    resolveVisibleTiles(computeVisibleWorldRect(camera, layout.mapCard.w, layout.mapCard.h), VIDEO_TILE_ZOOM).forEach((tile) => {
+  keyCameras.forEach(({ camera, width, height }) => {
+    const overscanPx = width === layout.mapCard.w ? tileOverscanPx : perspectiveTileOverscanPx;
+    resolveVisibleTiles(computeVisibleWorldRect(camera, width, height, overscanPx), VIDEO_TILE_ZOOM).forEach((tile) => {
       visibleTileMap.set(tileBundleKey(tile), tile);
     });
   });
@@ -3300,18 +3795,152 @@ async function exportRunRouteVideo(input: {
     throw new Error('No hay tiles visibles para generar el video.');
   }
 
-  if (typeof canvas.captureStream !== 'function') {
+  const renderVideoFrame = (progress: number) => {
+    const clampedProgress = clampNumber(progress, 0, 1);
+    const playbackState = interpolatePlaybackState(playbackSamples, clampedProgress);
+    const recapProgress =
+      clampedProgress <= VIDEO_PHASES.recap.start
+        ? 0
+        : clampNumber(
+            (clampedProgress - VIDEO_PHASES.recap.start) /
+              Math.max(VIDEO_PHASES.recap.end - VIDEO_PHASES.recap.start, 0.0001),
+            0,
+            1,
+    );
+    const recapEase = recapProgress * recapProgress * (3 - 2 * recapProgress);
+    const perspectiveCamera = buildPerspectiveCamera(clampedProgress);
+    const perspectiveTiles = resolveVisibleTiles(
+      computeVisibleWorldRect(
+        perspectiveCamera,
+        perspectiveSurface.width,
+        perspectiveSurface.height,
+        perspectiveTileOverscanPx,
+      ),
+      VIDEO_TILE_ZOOM,
+    );
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.setTransform(routeVideoRenderScale, 0, 0, routeVideoRenderScale, 0, 0);
+    drawVideoBackground(context, layout.canvasWidth, layout.canvasHeight, theme);
+    drawRouteVideoMapCardShell(context, layout, theme);
+
+    context.save();
+    drawRoundedRect(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, layout.mapCard.r);
+    context.clip();
+
+    perspectiveContext.setTransform(1, 0, 0, 1, 0, 0);
+    perspectiveContext.clearRect(0, 0, perspectiveSurface.width, perspectiveSurface.height);
+    perspectiveContext.fillStyle = theme.mapBase;
+    perspectiveContext.fillRect(0, 0, perspectiveSurface.width, perspectiveSurface.height);
+    drawBaseMapForCamera(
+      perspectiveContext,
+      perspectiveTiles,
+      perspectiveCamera,
+      0,
+      0,
+      perspectiveSurface.width,
+      perspectiveSurface.height,
+    );
+    drawRouteProgressFrame(
+      perspectiveContext,
+      perspectiveCamera,
+      playbackState,
+      worldRoutePoints,
+      worldSegments,
+      clampedProgress,
+      0,
+      0,
+      perspectiveSurface.width,
+      perspectiveSurface.height,
+      {
+        showActiveMarker: true,
+        visualScale: routeVideoPerspective.sourceResolutionScale,
+      },
+    );
+
+    drawPerspectiveGroundPlane(
+      context,
+      perspectiveSurface,
+      layout.mapCard.x,
+      layout.mapCard.y,
+      layout.mapCard.w,
+      layout.mapCard.h,
+      theme,
+      groundProjector,
+    );
+
+    if (recapProgress > 0) {
+      context.save();
+      context.globalAlpha = recapEase;
+      drawBaseMapForCamera(
+        context,
+        overviewTiles,
+        overviewCamera,
+        layout.mapCard.x,
+        layout.mapCard.y,
+        layout.mapCard.w,
+        layout.mapCard.h,
+      );
+      drawFullRouteOverview(
+        context,
+        overviewCamera,
+        worldRoutePoints,
+        worldSegments,
+        layout.mapCard.x,
+        layout.mapCard.y,
+        layout.mapCard.w,
+        layout.mapCard.h,
+      );
+      context.restore();
+    }
+
+    context.restore();
+    drawRouteVideoMapCardChrome(context, layout, input.run, input.route.source);
+    drawVideoForeground(context, layout, playbackState, input.run, input.athleteName, input.providerLabel, theme);
+  };
+
+  console.log('[exportRunRouteVideo] totalFrames', totalFrames, 'durationMs', routeVideoDurationMs, 'fps', routeVideoFps);
+  const offlineResult = await encodeRouteVideoCanvasOffline({
+    canvas,
+    totalFrames,
+    renderFrame: (frameIndex) => {
+      renderVideoFrame(frameProgressAt(frameIndex));
+    },
+  });
+
+  if (offlineResult) {
+    downloadBlobAsset(offlineResult.blob, `run-route-video-${input.run.date}-${input.run.id}.${offlineResult.extension}`);
+    console.log('[exportRunRouteVideo] finished', {
+      durationMs: routeVideoDurationMs,
+      totalFrames,
+      mode: 'offline',
+    });
+    return;
+  }
+
+  renderVideoFrame(0);
+
+  if (typeof canvas.captureStream !== 'function' || !fallbackFormat) {
     throw new Error('Tu navegador no permite grabar el canvas como video.');
   }
 
-  const stream = canvas.captureStream(routeVideoFps);
+  let stream = canvas.captureStream(0);
+  let videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+
+  if (typeof videoTrack.requestFrame !== 'function') {
+    stream.getTracks().forEach((track) => track.stop());
+    stream = canvas.captureStream(routeVideoFps);
+    videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+  }
+
   const chunks: Blob[] = [];
   let recorder: MediaRecorder;
 
   try {
     recorder = new MediaRecorder(stream, {
-      mimeType: format.mimeType,
-      videoBitsPerSecond: 16_000_000,
+      mimeType: fallbackFormat.mimeType,
+      videoBitsPerSecond: 22_000_000,
     });
   } catch {
     recorder = new MediaRecorder(stream);
@@ -3325,59 +3954,29 @@ async function exportRunRouteVideo(input: {
     };
     recorder.onerror = () => reject(new Error('No se pudo grabar el video del entrenamiento.'));
     recorder.onstop = () => {
-      resolve(new Blob(chunks, { type: recorder.mimeType || format.mimeType }));
+      resolve(new Blob(chunks, { type: recorder.mimeType || fallbackFormat.mimeType }));
     };
   });
 
   recorder.start();
   console.log('[exportRunRouteVideo] recorder started', recorder.state);
+  videoTrack.requestFrame?.();
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const frameDurationMs = 1000 / routeVideoFps;
-      const totalFrames = Math.max(1, Math.round(routeVideoDurationMs * routeVideoFps / 1000));
-      console.log('[exportRunRouteVideo] totalFrames', totalFrames, 'durationMs', routeVideoDurationMs, 'fps', routeVideoFps);
-      let currentFrame = 0;
+      const recordingStartedAt = performance.now();
+      let currentFrame = 1;
+
+      if (totalFrames <= 1) {
+        window.setTimeout(resolve, routeVideoDurationMs);
+        return;
+      }
 
       const renderFrame = () => {
         try {
-          const progress = clampNumber(currentFrame / Math.max(totalFrames - 1, 1), 0, 1);
-          const playbackState = interpolatePlaybackState(playbackSamples, progress);
-          const camera = buildCamera(progress);
-          const frameTiles = resolveVisibleTiles(computeVisibleWorldRect(camera, layout.mapCard.w, layout.mapCard.h), VIDEO_TILE_ZOOM);
-          frameTiles.forEach(getLoadedTileBundle);
-
-          context.clearRect(0, 0, layout.canvasWidth, layout.canvasHeight);
-          drawVideoBackground(context);
-
-          context.save();
-          context.shadowColor = 'rgba(0,0,0,0.34)';
-          context.shadowBlur = 34;
-          context.shadowOffsetY = 14;
-          fillRoundedPanel(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, {
-            radius: layout.mapCard.r,
-            fill: '#0A1015',
-          });
-          context.restore();
-
-          context.save();
-          drawRoundedRect(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, layout.mapCard.r);
-          context.clip();
-          drawBaseMapForCamera(context, frameTiles, camera, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-          if (progress <= VIDEO_PHASES.overview.end) {
-            drawFullRouteOverview(context, camera, worldRoutePoints, worldSegments, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-          } else {
-            drawRouteProgressFrame(context, camera, playbackState, worldRoutePoints, worldSegments, progress, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h);
-          }
-          context.restore();
-
-          fillRoundedPanel(context, layout.mapCard.x, layout.mapCard.y, layout.mapCard.w, layout.mapCard.h, {
-            radius: layout.mapCard.r,
-            stroke: 'rgba(255,255,255,0.08)',
-            lineWidth: 1.5,
-          });
-
-          drawVideoForeground(context, layout, playbackState, input.run, input.athleteName, input.providerLabel);
+          const progress = frameProgressAt(currentFrame);
+          renderVideoFrame(progress);
+          videoTrack.requestFrame?.();
 
           if (currentFrame % 20 === 0) {
             console.log(`[exportRunRouteVideo] frame ${currentFrame + 1}/${totalFrames} progress=${progress.toFixed(3)}`);
@@ -3385,17 +3984,22 @@ async function exportRunRouteVideo(input: {
 
           currentFrame += 1;
           if (currentFrame >= totalFrames) {
-            window.setTimeout(resolve, frameDurationMs * 1.5);
+            const elapsedMs = performance.now() - recordingStartedAt;
+            const remainingMs = Math.max(32, routeVideoDurationMs - elapsedMs);
+            window.setTimeout(resolve, remainingMs);
             return;
           }
 
-          window.setTimeout(renderFrame, frameDurationMs);
+          const elapsedMs = performance.now() - recordingStartedAt;
+          const targetElapsedMs = currentFrame * frameDurationMs;
+          const delayMs = Math.max(0, targetElapsedMs - elapsedMs);
+          window.setTimeout(renderFrame, delayMs);
         } catch (error) {
           reject(error);
         }
       };
 
-      window.setTimeout(renderFrame, 0);
+      window.setTimeout(renderFrame, frameDurationMs);
     });
   } finally {
     if (recorder.state !== 'inactive') {
@@ -3406,8 +4010,8 @@ async function exportRunRouteVideo(input: {
 
   const blob = await finished;
   stream.getTracks().forEach((track) => track.stop());
-  downloadBlobAsset(blob, `run-route-video-${input.run.date}-${input.run.id}.${format.extension}`);
-  console.log('[exportRunRouteVideo] finished', { durationMs: routeVideoDurationMs, totalFrames: Math.max(1, Math.round(routeVideoDurationMs * routeVideoFps / 1000)) });
+  downloadBlobAsset(blob, `run-route-video-${input.run.date}-${input.run.id}.${fallbackFormat.extension}`);
+  console.log('[exportRunRouteVideo] finished', { durationMs: routeVideoDurationMs, totalFrames });
 }
 
 function apiUrl(pathname: string) {

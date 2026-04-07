@@ -143,6 +143,46 @@ def safe_daily_range(
     return rows
 
 
+def get_nested(value: Any, path: str) -> Any:
+    current = value
+    for segment in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    return current
+
+
+def group_records_by_date(
+    dates: list[str],
+    records: Any,
+    date_paths: list[str],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Any]] = {cdate: [] for cdate in dates}
+
+    if isinstance(records, dict):
+        iterable = [records]
+    elif isinstance(records, list):
+        iterable = records
+    else:
+        iterable = []
+
+    for record in iterable:
+        if not isinstance(record, dict):
+            continue
+
+        resolved_date = None
+        for path in date_paths:
+            candidate = get_nested(record, path)
+            if isinstance(candidate, str) and candidate:
+                resolved_date = candidate[:10]
+                break
+
+        if resolved_date and resolved_date in grouped:
+            grouped[resolved_date].append(record)
+
+    return [{"date": cdate, "data": grouped[cdate]} for cdate in dates]
+
+
 def extract_workout_id(payload: Any) -> int:
     if isinstance(payload, dict):
         for key in ("workoutId", "workoutID", "id"):
@@ -179,22 +219,25 @@ def call_tool(client: Garmin, name: str, args: dict[str, Any]) -> Any:
             client.get_hrv_data,
         )
     if name == "get_training_readiness_range":
-        return safe_daily_range(
-            date_range(args["startDate"], args["endDate"]),
-            client.get_training_readiness,
+        dates = date_range(args["startDate"], args["endDate"])
+        records = client.connectapi(
+            f"{client.garmin_connect_training_readiness_url}/{args['startDate']}/{args['endDate']}"
         )
+        return group_records_by_date(dates, records, ["calendarDate"])
     if name == "get_daily_steps_range":
         return client.get_daily_steps(args["startDate"], args["endDate"])
     if name == "get_max_metrics_range":
-        return safe_daily_range(
-            date_range(args["startDate"], args["endDate"]),
-            client.get_max_metrics,
+        dates = date_range(args["startDate"], args["endDate"])
+        records = client.connectapi(
+            f"{client.garmin_connect_metrics_url}/{args['startDate']}/{args['endDate']}"
         )
+        return group_records_by_date(dates, records, ["generic.calendarDate", "calendarDate"])
     if name == "get_vo2max_range":
-        return safe_daily_range(
-            date_range(args["startDate"], args["endDate"]),
-            lambda _: None,
+        dates = date_range(args["startDate"], args["endDate"])
+        records = client.connectapi(
+            f"{client.garmin_connect_metrics_url}/{args['startDate']}/{args['endDate']}"
         )
+        return group_records_by_date(dates, records, ["generic.calendarDate", "calendarDate"])
     if name == "get_training_status":
         return client.get_training_status(args["date"])
     if name == "get_race_predictions":
