@@ -3674,43 +3674,8 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
   const distanceText = `${formatDistanceCompact(input.run.distanceKm)} km`;
   const dateLine = `${input.run.date}${input.run.timeLabel ? ` · ${input.run.timeLabel}` : ''}`;
 
-  const background = context.createLinearGradient(0, 0, width, height);
-  background.addColorStop(0, '#0E1218');
-  background.addColorStop(0.44, '#111722');
-  background.addColorStop(1, '#090B0F');
-  context.fillStyle = background;
-  context.fillRect(0, 0, width, height);
-
-  const skyGlow = context.createRadialGradient(176, 116, 0, 176, 116, 360);
-  skyGlow.addColorStop(0, 'rgba(83,157,245,0.2)');
-  skyGlow.addColorStop(1, 'rgba(83,157,245,0)');
-  context.fillStyle = skyGlow;
-  context.fillRect(0, 0, width, height);
-
-  const warmGlow = context.createRadialGradient(918, 560, 0, 918, 560, 320);
-  warmGlow.addColorStop(0, 'rgba(242,87,116,0.18)');
-  warmGlow.addColorStop(1, 'rgba(242,87,116,0)');
-  context.fillStyle = warmGlow;
-  context.fillRect(0, 0, width, height);
-
-  context.save();
-  context.strokeStyle = 'rgba(255,255,255,0.04)';
-  context.lineWidth = 1;
-  for (let column = 0; column < width; column += 108) {
-    context.beginPath();
-    context.moveTo(column, 0);
-    context.lineTo(column, height);
-    context.stroke();
-  }
-  context.restore();
-
-  context.save();
-  context.fillStyle = 'rgba(255,255,255,0.045)';
-  context.font = '700 198px "Space Grotesk", sans-serif';
-  context.fillText(formatDistanceCompact(input.run.distanceKm), 556, 214);
-  context.font = '600 48px "Space Mono", monospace';
-  context.fillText('KM', 894, 214);
-  context.restore();
+  // Keep entire canvas transparent so only the two glass cards render.
+  context.clearRect(0, 0, width, height);
 
   const leftPanel = {
     x: 36,
