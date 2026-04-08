@@ -33,6 +33,8 @@ import type {
   ActivityRoute,
   DashboardActivitySummary,
   DashboardData,
+  RouteVideoExportJob,
+  RouteVideoRenderSummary,
   SessionPayload,
   UserGoal,
   WhatIfScenario,
@@ -165,6 +167,13 @@ type PrepareStaticRouteMapOptions = {
   labelOpacity?: number;
   zoomBoost?: number;
 };
+type RouteStrokeScaleOptions = {
+  routeStrokeScale?: number;
+};
+type ColoredRouteSegment = {
+  points: Array<[number, number]>;
+  color: string;
+};
 type VideoExportFormat = {
   mimeType: string;
   extension: 'webm' | 'mp4';
@@ -249,13 +258,15 @@ const defaultWhatIfDraft = (goal: UserGoal): WhatIfDraft => ({
 const runOverlayTemplate = {
   id: 'routeGlass' as const,
   label: 'Glass Profile',
-  headline: 'Blur card',
-  description: 'Tarjeta glass translúcida con avatar, nombre, hora, lugar, descripción y ruta.',
+  headline: 'Blur card editorial',
+  description: 'Poster glass horizontal con mapa premium, avatar y métricas pensadas para compartir.',
 };
 const routeVideoDurationMs = 20_000;
 const routeVideoFps = 15;
 const routeVideoRenderScale = 1;
 const routeVideoTileOverscanPx = 280;
+const routeVideoHighlightColor = '#ff5a36';
+const routeVideoLegacyFallbackEnabled = false;
 const routeVideoPerspective = {
   followScale: 2.2,
   sourceWidthMultiplier: 1.22,
@@ -634,16 +645,11 @@ function supportsOfflineRouteVideoExport() {
 }
 
 function supportsRouteVideoExport() {
-  if (typeof window === 'undefined' || typeof HTMLCanvasElement === 'undefined') {
+  if (typeof window === 'undefined') {
     return false;
   }
 
-  return supportsOfflineRouteVideoExport()
-    || (
-      typeof MediaRecorder !== 'undefined'
-      && typeof HTMLCanvasElement.prototype.captureStream === 'function'
-      && pickRouteVideoExportFormat() !== null
-    );
+  return typeof fetch === 'function';
 }
 
 async function encodeRouteVideoCanvasOffline(input: {
@@ -718,6 +724,19 @@ function wrapCanvasText(
   lineHeight: number,
   maxLines = 3,
 ) {
+  const lines = buildWrappedCanvasLines(context, text, maxWidth, maxLines);
+  lines.forEach((line, index) => {
+    context.fillText(line, x, y + index * lineHeight);
+  });
+  return lines.length;
+}
+
+function buildWrappedCanvasLines(
+  context: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines = 3,
+) {
   const words = text.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let current = '';
@@ -747,9 +766,7 @@ function wrapCanvasText(
     lines[maxLines - 1] = `${lines[maxLines - 1].replace(/[.,;:!?-]*$/, '')}…`;
   }
 
-  lines.forEach((line, index) => {
-    context.fillText(line, x, y + index * lineHeight);
-  });
+  return lines;
 }
 
 function drawRoundedRect(
@@ -1219,6 +1236,32 @@ function paceColor(paceSecondsPerKm: number | null, thresholds: ReturnType<typeo
   return PACE_COLORS.slow;
 }
 
+function buildColoredRouteSegments(route: ActivityRoute): ColoredRouteSegment[] {
+  const thresholds = paceThresholds(route);
+
+  if (route.samples.length >= 2) {
+    return route.samples.slice(1).map((sample, index) => {
+      const previous = route.samples[index]!;
+      const segmentPace =
+        sample.paceSecondsPerKm !== null && previous.paceSecondsPerKm !== null
+          ? (sample.paceSecondsPerKm + previous.paceSecondsPerKm) / 2
+          : sample.paceSecondsPerKm ?? previous.paceSecondsPerKm ?? null;
+
+      return {
+        points: [previous.point, sample.point],
+        color: paceColor(segmentPace, thresholds),
+      };
+    });
+  }
+
+  return [
+    {
+      points: route.points,
+      color: PACE_COLORS.default,
+    },
+  ];
+}
+
 function mercatorPixel(lat: number, lng: number, zoom: number) {
   const sinLat = Math.sin((lat * Math.PI) / 180);
   const scale = staticTileSize * 2 ** zoom;
@@ -1290,53 +1333,122 @@ function drawPreparedRouteMapBase(
     labelOpacity?: number;
   } = {},
 ) {
-  const hillshadeOpacity = options.hillshadeOpacity ?? 0.46;
-  const labelOpacity = options.labelOpacity ?? 0.22;
+  const hillshadeOpacity = options.hillshadeOpacity ?? MAP_LAYER_OPACITIES.hillshade;
+  const labelOpacity = options.labelOpacity ?? MAP_LAYER_OPACITIES.labels;
+  const drawFilteredLayer = (
+    imageKey: 'image' | 'hillshade' | 'labels',
+    filter: string,
+    drawOptions: {
+      alpha?: number;
+      composite?: GlobalCompositeOperation;
+    } = {},
+  ) => {
+    context.save();
+    context.globalAlpha = drawOptions.alpha ?? 1;
+    context.globalCompositeOperation = drawOptions.composite ?? 'source-over';
+    context.filter = filter;
+    prepared.tiles.forEach((tile) => {
+      const image = tile[imageKey];
+      if (image) {
+        context.drawImage(image, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
+      }
+    });
+    context.restore();
+  };
 
   context.save();
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
   context.globalCompositeOperation = 'source-over';
-  context.fillStyle = '#0A1015';
+  context.fillStyle = '#11161D';
   context.fillRect(x, y, width, height);
 
-  prepared.tiles.forEach((tile) => {
-    if (tile.image) {
-      context.drawImage(tile.image, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
-    }
+  drawFilteredLayer('image', MAP_LAYER_FILTERS.satellite, {
+    alpha: MAP_LAYER_OPACITIES.satellite,
+  });
+  drawFilteredLayer('hillshade', MAP_LAYER_FILTERS.hillshade, {
+    alpha: hillshadeOpacity,
+    composite: 'screen',
+  });
+  drawFilteredLayer('hillshade', MAP_LAYER_FILTERS.hillshade, {
+    alpha: hillshadeOpacity * 0.16,
+    composite: 'multiply',
+  });
+  drawFilteredLayer('labels', MAP_LAYER_FILTERS.labels, {
+    alpha: labelOpacity,
   });
 
   context.save();
-  context.globalAlpha = hillshadeOpacity;
-  context.globalCompositeOperation = 'screen';
-  prepared.tiles.forEach((tile) => {
-    if (tile.hillshade) {
-      context.drawImage(tile.hillshade, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
-    }
-  });
-  context.restore();
-
-  context.save();
-  context.globalAlpha = hillshadeOpacity * 0.18;
   context.globalCompositeOperation = 'multiply';
-  prepared.tiles.forEach((tile) => {
-    if (tile.hillshade) {
-      context.drawImage(tile.hillshade, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
-    }
-  });
+  context.fillStyle = 'rgba(10, 16, 24, 0.18)';
+  context.fillRect(x, y, width, height);
   context.restore();
 
-  context.fillStyle = 'rgba(6, 10, 15, 0.015)';
+  const topGlow = context.createRadialGradient(
+    x + width * 0.82,
+    y + height * 0.18,
+    0,
+    x + width * 0.82,
+    y + height * 0.18,
+    width * 0.24,
+  );
+  topGlow.addColorStop(0, 'rgba(83, 157, 245, 0.1)');
+  topGlow.addColorStop(1, 'rgba(83, 157, 245, 0)');
+  context.fillStyle = topGlow;
   context.fillRect(x, y, width, height);
 
-  context.save();
-  context.globalAlpha = labelOpacity;
-  prepared.tiles.forEach((tile) => {
-    if (tile.labels) {
-      context.drawImage(tile.labels, x + tile.offsetX, y + tile.offsetY, staticTileSize, staticTileSize);
-    }
-  });
-  context.restore();
+  const accentGlow = context.createRadialGradient(
+    x + width * 0.2,
+    y + height * 0.16,
+    0,
+    x + width * 0.2,
+    y + height * 0.16,
+    width * 0.22,
+  );
+  accentGlow.addColorStop(0, 'rgba(242, 87, 116, 0.05)');
+  accentGlow.addColorStop(1, 'rgba(242, 87, 116, 0)');
+  context.fillStyle = accentGlow;
+  context.fillRect(x, y, width, height);
+
+  const bottomGlow = context.createRadialGradient(
+    x + width * 0.5,
+    y + height,
+    0,
+    x + width * 0.5,
+    y + height,
+    width * 0.42,
+  );
+  bottomGlow.addColorStop(0, 'rgba(0, 0, 0, 0.34)');
+  bottomGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  context.fillStyle = bottomGlow;
+  context.fillRect(x, y, width, height);
+
+  const atmosphere = context.createLinearGradient(x, y, x, y + height);
+  atmosphere.addColorStop(0, 'rgba(20, 24, 31, 0.04)');
+  atmosphere.addColorStop(0.68, 'rgba(20, 24, 31, 0.18)');
+  atmosphere.addColorStop(1, 'rgba(20, 24, 31, 0.34)');
+  context.fillStyle = atmosphere;
+  context.fillRect(x, y, width, height);
+
+  const bottomInset = context.createLinearGradient(x, y + height * 0.56, x, y + height);
+  bottomInset.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  bottomInset.addColorStop(1, 'rgba(0, 0, 0, 0.28)');
+  context.fillStyle = bottomInset;
+  context.fillRect(x, y, width, height);
+
+  const vignette = context.createRadialGradient(
+    x + width * 0.5,
+    y + height * 0.5,
+    width * 0.42,
+    x + width * 0.5,
+    y + height * 0.5,
+    width * 0.74,
+  );
+  vignette.addColorStop(0, 'rgba(10, 16, 24, 0)');
+  vignette.addColorStop(0.72, 'rgba(10, 16, 24, 0.12)');
+  vignette.addColorStop(1, 'rgba(10, 16, 24, 0.32)');
+  context.fillStyle = vignette;
+  context.fillRect(x, y, width, height);
 
   context.restore();
 }
@@ -1500,10 +1612,12 @@ function drawAnimatedRouteProgress(
   progress: number,
   options: {
     showActiveMarker?: boolean;
+    routeStrokeScale?: number;
   } = {},
 ) {
   const clampedProgress = clampNumber(progress, 0, 1);
   let activePoint = prepared.animatedPoints[0] ?? null;
+  const routeStrokeScale = options.routeStrokeScale ?? 1;
 
   prepared.animatedSegments.forEach((segment) => {
     if (clampedProgress <= segment.start.progress) {
@@ -1520,8 +1634,28 @@ function drawAnimatedRouteProgress(
           lerpNumber(segment.start.y, segment.end.y, localProgress),
         ] as const;
 
-    drawPolyline(context, [[segment.start.x, segment.start.y], endPoint], `${segment.color}40`, 18);
-    drawPolyline(context, [[segment.start.x, segment.start.y], endPoint], segment.color, 7);
+    context.save();
+    context.filter = 'blur(1.4px)';
+    drawPolyline(
+      context,
+      [[segment.start.x, segment.start.y], endPoint],
+      `${segment.color}${Math.round(ROUTE_LINE_STYLES.glow.opacity * 255)
+        .toString(16)
+        .padStart(2, '0')}`,
+      ROUTE_LINE_STYLES.glow.width * routeStrokeScale,
+    );
+    context.restore();
+
+    context.save();
+    context.shadowColor = 'rgba(83, 157, 245, 0.18)';
+    context.shadowBlur = 10;
+    drawPolyline(
+      context,
+      [[segment.start.x, segment.start.y], endPoint],
+      segment.color,
+      (ROUTE_LINE_STYLES.main.width + 1) * routeStrokeScale,
+    );
+    context.restore();
 
     activePoint =
       localProgress >= 1
@@ -1580,10 +1714,12 @@ function drawPreparedStaticRouteMapCard(
     showGhostRoute?: boolean;
     showGoalMarker?: boolean;
     showActiveMarker?: boolean;
+    routeStrokeScale?: number;
   } = {},
 ) {
   const matteFill = '#0A1015';
   const routeProgress = options.routeProgress ?? 1;
+  const routeStrokeScale = options.routeStrokeScale ?? 1;
 
   context.save();
   context.shadowColor = 'rgba(0,0,0,0.28)';
@@ -1611,11 +1747,17 @@ function drawPreparedStaticRouteMapCard(
   context.save();
   context.translate(x, y);
   if (options.showGhostRoute) {
-    drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.12)', 10);
-    drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.22)', 3.5);
+    drawPolyline(
+      context,
+      prepared.projectedPoints,
+      ROUTE_LINE_STYLES.shadow.color,
+      ROUTE_LINE_STYLES.shadow.width * routeStrokeScale,
+    );
+    drawPolyline(context, prepared.projectedPoints, 'rgba(255,255,255,0.18)', 3.5 * routeStrokeScale);
   }
   drawAnimatedRouteProgress(context, prepared, routeProgress, {
     showActiveMarker: options.showActiveMarker,
+    routeStrokeScale,
   });
 
   const routeStart = prepared.projectedPoints[0]
@@ -1655,6 +1797,269 @@ function drawPreparedStaticRouteMapCard(
     stroke: 'rgba(255,255,255,0.2)',
     lineWidth: 1.5,
   });
+}
+
+async function waitForLeafletTileLayer(layer: {
+  isLoading?: () => boolean;
+  once: (event: string, handler: () => void) => void;
+  off?: (event: string, handler: () => void) => void;
+}) {
+  if (typeof layer.isLoading === 'function' && !layer.isLoading()) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const finish = () => {
+      window.clearTimeout(timeoutId);
+      layer.off?.('load', finish);
+      resolve();
+    };
+    const timeoutId = window.setTimeout(finish, 8_000);
+    layer.once('load', finish);
+  });
+}
+
+function waitForLeafletFrames(count = 2) {
+  return new Promise<void>((resolve) => {
+    let remaining = Math.max(1, count);
+    const step = () => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        resolve();
+        return;
+      }
+      window.requestAnimationFrame(step);
+    };
+    window.requestAnimationFrame(step);
+  });
+}
+
+async function captureLeafletRouteMapCanvas(input: {
+  route: ActivityRoute;
+  title: string;
+  width: number;
+  height: number;
+} & RouteStrokeScaleOptions) {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return null;
+  }
+
+  const [{ toCanvas }, leafletModule] = await Promise.all([
+    import('html-to-image'),
+    import('leaflet'),
+  ]);
+  const L = leafletModule.default;
+  const points = input.route.points as Array<[number, number]>;
+  const routeStrokeScale = input.routeStrokeScale ?? 1;
+
+  if (points.length < 2) {
+    return null;
+  }
+
+  const host = document.createElement('div');
+  host.style.position = 'fixed';
+  host.style.left = '-10000px';
+  host.style.top = '0';
+  host.style.width = `${input.width}px`;
+  host.style.height = `${input.height}px`;
+  host.style.pointerEvents = 'none';
+  host.style.opacity = '1';
+  host.style.zIndex = '-1';
+  host.setAttribute('aria-hidden', 'true');
+
+  const routeMap = document.createElement('div');
+  routeMap.className = 'route-map route-map-capture';
+  routeMap.style.width = `${input.width}px`;
+  routeMap.style.height = `${input.height}px`;
+
+  const routeMapCanvas = document.createElement('div');
+  routeMapCanvas.className = 'route-map-canvas';
+  routeMapCanvas.style.width = '100%';
+  routeMapCanvas.style.height = '100%';
+  routeMapCanvas.style.aspectRatio = 'auto';
+  routeMapCanvas.style.minHeight = '0';
+  routeMapCanvas.style.borderRadius = '0';
+  routeMapCanvas.style.border = '0';
+
+  const mapRoot = document.createElement('div');
+  mapRoot.className = 'route-map-leaflet';
+  mapRoot.style.width = '100%';
+  mapRoot.style.height = '100%';
+  mapRoot.style.background = '#11161d';
+
+  routeMapCanvas.append(mapRoot);
+  routeMap.append(routeMapCanvas);
+  host.append(routeMap);
+  document.body.append(host);
+
+  let map: import('leaflet').Map | null = null;
+
+  try {
+    map = L.map(mapRoot, {
+      zoomControl: false,
+      attributionControl: false,
+      dragging: false,
+      scrollWheelZoom: false,
+      touchZoom: false,
+      doubleClickZoom: false,
+      boxZoom: false,
+      keyboard: false,
+      preferCanvas: false,
+      fadeAnimation: false,
+      zoomAnimation: false,
+      markerZoomAnimation: false,
+      inertia: false,
+    });
+    const activeMap = map;
+
+    const satelliteLayer = L.tileLayer(SATELLITE_TILE_URL, {
+      crossOrigin: true,
+      className: 'route-map-satellite',
+    }).addTo(activeMap);
+
+    activeMap.createPane('relief');
+    const reliefPane = activeMap.getPane('relief');
+    if (reliefPane) {
+      reliefPane.style.zIndex = '250';
+    }
+
+    const hillshadeLayer = L.tileLayer(HILLSHADE_TILE_URL, {
+      crossOrigin: true,
+      pane: 'relief',
+      className: 'route-map-hillshade',
+      opacity: MAP_LAYER_OPACITIES.hillshade,
+    }).addTo(activeMap);
+
+    activeMap.createPane('labels');
+    const labelsPane = activeMap.getPane('labels');
+    if (labelsPane) {
+      labelsPane.style.zIndex = '320';
+    }
+
+    const labelsLayer = L.tileLayer(LABELS_TILE_URL, {
+      crossOrigin: true,
+      pane: 'labels',
+      className: 'route-map-labels',
+      opacity: MAP_LAYER_OPACITIES.labels,
+    }).addTo(activeMap);
+
+    activeMap.createPane('route-glow');
+    const glowPane = activeMap.getPane('route-glow');
+    if (glowPane) {
+      glowPane.style.zIndex = '410';
+    }
+
+    activeMap.createPane('route-shadow');
+    const shadowPane = activeMap.getPane('route-shadow');
+    if (shadowPane) {
+      shadowPane.style.zIndex = '420';
+    }
+
+    activeMap.createPane('route-main');
+    const mainPane = activeMap.getPane('route-main');
+    if (mainPane) {
+      mainPane.style.zIndex = '430';
+    }
+
+    const segments = buildColoredRouteSegments(input.route);
+    segments.forEach((segment) => {
+      L.polyline(segment.points, {
+        pane: 'route-glow',
+        className: 'route-line route-line-glow',
+        color: segment.color,
+        lineCap: 'round',
+        lineJoin: 'round',
+        opacity: ROUTE_LINE_STYLES.glow.opacity,
+        weight: ROUTE_LINE_STYLES.glow.width * routeStrokeScale,
+      }).addTo(activeMap);
+    });
+
+    L.polyline(points, {
+      pane: 'route-shadow',
+      className: 'route-line route-line-shadow',
+      color: ROUTE_LINE_STYLES.shadow.color,
+      lineCap: 'round',
+      lineJoin: 'round',
+      opacity: ROUTE_LINE_STYLES.shadow.opacity,
+      weight: ROUTE_LINE_STYLES.shadow.width * routeStrokeScale,
+    }).addTo(activeMap);
+
+    segments.forEach((segment) => {
+      L.polyline(segment.points, {
+        pane: 'route-main',
+        className: 'route-line route-line-main',
+        color: segment.color,
+        lineCap: 'round',
+        lineJoin: 'round',
+        opacity: ROUTE_LINE_STYLES.main.opacity,
+        weight: ROUTE_LINE_STYLES.main.width * routeStrokeScale,
+      }).addTo(activeMap);
+    });
+
+    const startPoint = points[0];
+    const finishPoint = points.at(-1);
+    if (startPoint) {
+      L.circleMarker(startPoint, {
+        className: 'route-marker route-marker-start',
+        color: ROUTE_MARKERS.start.color,
+        fillColor: ROUTE_MARKERS.start.color,
+        fillOpacity: 1,
+        weight: 3,
+        opacity: 1,
+        radius: ROUTE_MARKERS.start.radius,
+      }).addTo(activeMap);
+    }
+
+    if (finishPoint) {
+      L.circleMarker(finishPoint, {
+        className: 'route-marker route-marker-finish',
+        color: ROUTE_MARKERS.finish.color,
+        fillColor: ROUTE_MARKERS.finish.color,
+        fillOpacity: 1,
+        weight: 3,
+        opacity: 1,
+        radius: ROUTE_MARKERS.finish.radius,
+      }).addTo(activeMap);
+    }
+
+    const fitRouteBounds = () => {
+      const paddingX = Math.round(clampNumber(input.width * 0.08, 28, 44));
+      const paddingY = Math.round(clampNumber(input.height * 0.08, 28, 42));
+      activeMap.invalidateSize(true);
+      activeMap.fitBounds(L.latLngBounds(points), {
+        paddingTopLeft: [paddingX, paddingY],
+        paddingBottomRight: [paddingX, paddingY],
+        maxZoom: 15,
+        animate: false,
+      });
+    };
+
+    activeMap.whenReady(() => {
+      fitRouteBounds();
+    });
+    await waitForLeafletFrames(2);
+    fitRouteBounds();
+
+    await Promise.all([
+      waitForLeafletTileLayer(satelliteLayer),
+      waitForLeafletTileLayer(hillshadeLayer),
+      waitForLeafletTileLayer(labelsLayer),
+    ]);
+    await waitForLeafletFrames(2);
+    fitRouteBounds();
+    await waitForLeafletFrames(2);
+
+    return await toCanvas(mapRoot, {
+      cacheBust: true,
+      pixelRatio: 2,
+      backgroundColor: '#11161d',
+      width: input.width,
+      height: input.height,
+    });
+  } finally {
+    map?.remove();
+    host.remove();
+  }
 }
 
 // Removed: drawVideoMapLayer (old snapshot-based rendering)
@@ -2550,13 +2955,12 @@ function drawRouteVideoMapCardChrome(
   context: CanvasRenderingContext2D,
   layout: typeof VIDEO_LAYOUT,
   _run: DashboardData['recentRuns'][number],
-  routeSource: ActivityRoute['source'],
+  _routeSource: ActivityRoute['source'],
 ) {
   const x = layout.mapCard.x;
   const y = layout.mapCard.y;
   const width = layout.mapCard.w;
   const height = layout.mapCard.h;
-  const sourceLabel = routeSource.toUpperCase();
   context.save();
   const topFade = context.createLinearGradient(0, y, 0, y + 250);
   topFade.addColorStop(0, 'rgba(8,12,18,0.84)');
@@ -2584,18 +2988,6 @@ function drawRouteVideoMapCardChrome(
   context.fillStyle = rightShade;
   context.fillRect(x + width * 0.76, y, width * 0.24, height);
 
-  const sourceWidth = measureOverlayPillWidth(context, sourceLabel, {
-    paddingX: 12,
-    font: canvasTextFont(12, 600),
-  });
-  drawOverlayPill(context, x + width - 18 - sourceWidth, y + height - 46, sourceLabel, {
-    fill: 'rgba(12,16,24,0.54)',
-    stroke: 'rgba(255,255,255,0.08)',
-    textColor: 'rgba(249,246,235,0.74)',
-    font: canvasTextFont(12, 600),
-    height: 28,
-    paddingX: 12,
-  });
   context.restore();
 }
 
@@ -2618,7 +3010,7 @@ function drawVideoForeground(
   playbackState: PlaybackState,
   run: DashboardData['recentRuns'][number],
   athleteName: string,
-  providerLabel: string,
+  _providerLabel: string,
   theme: RouteVideoTheme,
 ) {
   const width = layout.canvasWidth;
@@ -2632,33 +3024,16 @@ function drawVideoForeground(
   const metricWidth = (layout.metricsCard.w - metricGap * 2) / 3;
   const metricHeight = layout.metricsCard.h;
 
-  drawOverlayPill(context, layout.header.x, layout.header.y, 'RUN CAM', {
-    fill: 'rgba(12,16,24,0.66)',
-    stroke: 'rgba(255,255,255,0.08)',
-    textColor: 'rgba(255,255,255,0.74)',
-    font: canvasTextFont(12, 600),
-    height: 28,
-    paddingX: 12,
-  });
-  drawOverlayPill(context, width - layout.outerPadding - 108, layout.header.y, providerLabel.toUpperCase(), {
-    fill: theme.accentSoft,
-    stroke: 'rgba(83,157,245,0.24)',
-    textColor: '#D9E9FF',
-    font: canvasTextFont(12, 600),
-    height: 28,
-    paddingX: 12,
-  });
-
   context.fillStyle = theme.heading;
-  context.font = canvasDisplayFont(28, 650);
-  wrapCanvasText(context, run.name, layout.header.x, layout.header.y + 42, layout.header.w - 120, 30, 2);
+  context.font = canvasDisplayFont(24, 650);
+  wrapCanvasText(context, run.name.toUpperCase(), layout.header.x, layout.header.y + 28, layout.header.w, 26, 2);
 
   context.fillStyle = 'rgba(255,255,255,0.7)';
-  context.font = canvasTextFont(13, 500);
+  context.font = canvasTextFont(12, 600);
   context.fillText(
-    `${athleteName.toUpperCase()} · ${run.date}${run.timeLabel ? ` · ${run.timeLabel}` : ''} · ${run.activityLabel.toUpperCase()}`,
+    `${athleteName.toUpperCase()} · ${run.date}${run.timeLabel ? ` · ${run.timeLabel}` : ''}`,
     layout.header.x,
-    layout.header.y + 80,
+    layout.header.y + 64,
   );
 
   const metricPanels = [
@@ -2671,9 +3046,9 @@ function drawVideoForeground(
     const panelX = metricX + index * (metricWidth + metricGap);
     fillRoundedPanel(context, panelX, metricY, metricWidth, metricHeight, {
       radius: layout.metricsCard.r,
-      fill: 'rgba(12,16,24,0.58)',
-      stroke: 'rgba(255,255,255,0.08)',
-      lineWidth: 1,
+      fill: 'rgba(7,10,14,0.68)',
+      stroke: 'rgba(255,255,255,0.06)',
+      lineWidth: 0.8,
     });
     context.fillStyle = 'rgba(255,255,255,0.58)';
     context.font = canvasTextFont(11, 600);
@@ -2696,9 +3071,9 @@ function drawVideoForeground(
     layout.outerPadding, metricY + metricHeight + 14,
     width - layout.outerPadding, metricY + metricHeight + 14,
   );
-  progressGradient.addColorStop(0, '#6EC8FF');
-  progressGradient.addColorStop(0.5, '#539DF5');
-  progressGradient.addColorStop(1, '#F25774');
+  progressGradient.addColorStop(0, '#ff7a45');
+  progressGradient.addColorStop(0.6, routeVideoHighlightColor);
+  progressGradient.addColorStop(1, '#ff3d00');
   fillRoundedPanel(
     context,
     layout.outerPadding,
@@ -2715,16 +3090,64 @@ function drawVideoForeground(
 async function drawStaticRouteMapCard(
   context: CanvasRenderingContext2D,
   route: ActivityRoute,
+  title: string,
   x: number,
   y: number,
   width: number,
   height: number,
   radius = 28,
+  options: RouteStrokeScaleOptions = {},
 ) {
+  try {
+    const leafletCanvas = await captureLeafletRouteMapCanvas({
+      route,
+      title,
+      width,
+      height,
+      routeStrokeScale: options.routeStrokeScale,
+    });
+
+    if (leafletCanvas) {
+      context.save();
+      context.shadowColor = 'rgba(0,0,0,0.28)';
+      context.shadowBlur = 34;
+      context.shadowOffsetY = 14;
+      fillRoundedPanel(context, x, y, width, height, {
+        radius,
+        fill: '#0A1015',
+      });
+      context.restore();
+
+      context.save();
+      drawRoundedRect(context, x, y, width, height, radius);
+      context.clip();
+      context.drawImage(leafletCanvas, x, y, width, height);
+      context.restore();
+
+      fillRoundedPanel(context, x, y, width, height, {
+        radius,
+        stroke: 'rgba(255,255,255,0.2)',
+        lineWidth: 1.5,
+      });
+      return;
+    }
+  } catch (error) {
+    console.warn('[blur-card-map] fallback to static renderer', error);
+  }
+
   const prepared = await prepareStaticRouteMap(route, width, height, 28);
   drawPreparedStaticRouteMapCard(context, prepared, x, y, width, height, radius, {
     showActiveMarker: false,
+    routeStrokeScale: options.routeStrokeScale,
   });
+}
+
+function formatOverlayExportPercent(progress: number) {
+  const percent = clampNumber(progress, 0, 1) * 100;
+  if (percent >= 99.95) {
+    return '100%';
+  }
+  return `${percent.toFixed(1)}%`;
 }
 
 function buildOverlayHeadline(name: string) {
@@ -2742,7 +3165,7 @@ function buildOverlayHeadline(name: string) {
 
 function buildRunDescription(run: DashboardData['recentRuns'][number]) {
   if (run.trainingEffect !== null) {
-    return `Training Effect ${run.trainingEffect.toFixed(1)} · ${formatPace(run.paceSecondsPerKm) ?? 'sin dato'}`;
+    return `Training Effect ${run.trainingEffect.toFixed(1)}${run.trainingLoad ? ` · carga ${run.trainingLoad.toFixed(0)}` : ''}`;
   }
 
   if (run.averageHeartRate !== null) {
@@ -2802,6 +3225,127 @@ function drawGlassPanel(
     radius,
     stroke: 'rgba(255,255,255,0.68)',
     lineWidth: 1.4,
+  });
+}
+
+function drawEditorialGlassPanel(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  options: {
+    radius?: number;
+    accentColor?: string;
+    secondaryAccentColor?: string;
+  } = {},
+) {
+  const radius = options.radius ?? 34;
+  const accentColor = options.accentColor ?? 'rgba(83,157,245,0.18)';
+  const secondaryAccentColor = options.secondaryAccentColor ?? 'rgba(242,87,116,0.14)';
+
+  context.save();
+  drawRoundedRect(context, x, y, width, height, radius);
+  context.clip();
+
+  const baseGradient = context.createLinearGradient(x, y, x, y + height);
+  baseGradient.addColorStop(0, 'rgba(20,24,32,0.94)');
+  baseGradient.addColorStop(0.48, 'rgba(13,16,22,0.9)');
+  baseGradient.addColorStop(1, 'rgba(8,10,14,0.96)');
+  context.fillStyle = baseGradient;
+  context.fillRect(x, y, width, height);
+
+  const highlight = context.createLinearGradient(x, y, x, y + height * 0.36);
+  highlight.addColorStop(0, 'rgba(255,255,255,0.15)');
+  highlight.addColorStop(0.52, 'rgba(255,255,255,0.04)');
+  highlight.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = highlight;
+  context.fillRect(x, y, width, height);
+
+  const coolBloom = context.createRadialGradient(
+    x + width * 0.82,
+    y + height * 0.12,
+    0,
+    x + width * 0.82,
+    y + height * 0.12,
+    width * 0.7,
+  );
+  coolBloom.addColorStop(0, accentColor);
+  coolBloom.addColorStop(1, 'rgba(83,157,245,0)');
+  context.fillStyle = coolBloom;
+  context.fillRect(x, y, width, height);
+
+  const warmBloom = context.createRadialGradient(
+    x + width * 0.08,
+    y + height * 0.96,
+    0,
+    x + width * 0.08,
+    y + height * 0.96,
+    width * 0.76,
+  );
+  warmBloom.addColorStop(0, secondaryAccentColor);
+  warmBloom.addColorStop(1, 'rgba(242,87,116,0)');
+  context.fillStyle = warmBloom;
+  context.fillRect(x, y, width, height);
+
+  const veil = context.createLinearGradient(x, y, x + width, y + height);
+  veil.addColorStop(0, 'rgba(255,255,255,0.08)');
+  veil.addColorStop(0.35, 'rgba(255,255,255,0.02)');
+  veil.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = veil;
+  context.fillRect(x, y, width, height);
+  context.restore();
+
+  fillRoundedPanel(context, x, y, width, height, {
+    radius,
+    stroke: 'rgba(255,255,255,0.14)',
+    lineWidth: 1.4,
+  });
+
+  context.save();
+  drawRoundedRect(context, x + 2, y + 2, width - 4, height - 4, Math.max(radius - 2, 0));
+  context.strokeStyle = 'rgba(255,255,255,0.05)';
+  context.lineWidth = 1;
+  context.stroke();
+  context.restore();
+}
+
+function drawShareMetricCard(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  label: string,
+  value: string,
+  options: {
+    accent?: boolean;
+    valueFont?: string;
+  } = {},
+) {
+  drawEditorialGlassPanel(context, x, y, width, height, {
+    radius: 28,
+    accentColor: options.accent ? 'rgba(242,87,116,0.18)' : 'rgba(83,157,245,0.14)',
+    secondaryAccentColor: options.accent ? 'rgba(255,148,89,0.14)' : 'rgba(83,157,245,0.08)',
+  });
+
+  const valueFontSize = height >= 96 ? 34 : 28;
+  const valueY = y + height - 28;
+
+  context.fillStyle = options.accent ? 'rgba(255,210,200,0.82)' : 'rgba(255,255,255,0.58)';
+  context.font = canvasTextFont(16, 600);
+  context.fillText(label, x + 22, y + 30);
+
+  context.fillStyle = '#FFFFFF';
+  context.font = options.valueFont ?? canvasDisplayFont(valueFontSize, 650);
+  context.fillText(value, x + 22, valueY);
+
+  const accentLine = context.createLinearGradient(x + 20, y, x + width - 20, y);
+  accentLine.addColorStop(0, options.accent ? 'rgba(242,87,116,0.92)' : 'rgba(83,157,245,0.88)');
+  accentLine.addColorStop(1, options.accent ? 'rgba(255,148,89,0.92)' : 'rgba(114,190,255,0.88)');
+  fillRoundedPanel(context, x + 20, y + height - 18, width - 40, 4, {
+    radius: 999,
+    fill: accentLine,
   });
 }
 
@@ -3125,103 +3669,267 @@ async function renderRouteFocusOverlay(context: CanvasRenderingContext2D, input:
   ].filter(Boolean);
   const subtitle = subtitleParts.join(' · ');
   const description = buildRunDescription(input.run);
+  const width = 1080;
+  const height = 684;
+  const distanceText = `${formatDistanceCompact(input.run.distanceKm)} km`;
+  const dateLine = `${input.run.date}${input.run.timeLabel ? ` · ${input.run.timeLabel}` : ''}`;
 
-  const cardX = 24;
-  const cardY = 24;
-  const cardWidth = 1032;
-  const cardHeight = 636;
-  const leftX = cardX + 54;
-  const leftWidth = 368;
-  const mapX = cardX + 456;
-  const mapY = cardY + 84;
-  const mapWidth = 500;
-  const mapHeight = 468;
+  const background = context.createLinearGradient(0, 0, width, height);
+  background.addColorStop(0, '#0E1218');
+  background.addColorStop(0.44, '#111722');
+  background.addColorStop(1, '#090B0F');
+  context.fillStyle = background;
+  context.fillRect(0, 0, width, height);
 
-  drawGlassPanel(context, cardX, cardY, cardWidth, cardHeight, 40);
+  const skyGlow = context.createRadialGradient(176, 116, 0, 176, 116, 360);
+  skyGlow.addColorStop(0, 'rgba(83,157,245,0.2)');
+  skyGlow.addColorStop(1, 'rgba(83,157,245,0)');
+  context.fillStyle = skyGlow;
+  context.fillRect(0, 0, width, height);
+
+  const warmGlow = context.createRadialGradient(918, 560, 0, 918, 560, 320);
+  warmGlow.addColorStop(0, 'rgba(242,87,116,0.18)');
+  warmGlow.addColorStop(1, 'rgba(242,87,116,0)');
+  context.fillStyle = warmGlow;
+  context.fillRect(0, 0, width, height);
 
   context.save();
-  const avatarX = leftX + 42;
-  const avatarY = cardY + 92;
+  context.strokeStyle = 'rgba(255,255,255,0.04)';
+  context.lineWidth = 1;
+  for (let column = 0; column < width; column += 108) {
+    context.beginPath();
+    context.moveTo(column, 0);
+    context.lineTo(column, height);
+    context.stroke();
+  }
+  context.restore();
+
+  context.save();
+  context.fillStyle = 'rgba(255,255,255,0.045)';
+  context.font = '700 198px "Space Grotesk", sans-serif';
+  context.fillText(formatDistanceCompact(input.run.distanceKm), 556, 214);
+  context.font = '600 48px "Space Mono", monospace';
+  context.fillText('KM', 894, 214);
+  context.restore();
+
+  const leftPanel = {
+    x: 36,
+    y: 34,
+    w: 470,
+    h: 616,
+  };
+  const mapPanel = {
+    x: 530,
+    y: 34,
+    w: 514,
+    h: 616,
+  };
+  const mapFrame = {
+    x: mapPanel.x + 22,
+    y: mapPanel.y + 82,
+    w: mapPanel.w - 44,
+    h: 392,
+  };
+
+  drawEditorialGlassPanel(context, leftPanel.x, leftPanel.y, leftPanel.w, leftPanel.h, {
+    radius: 40,
+    accentColor: 'rgba(83,157,245,0.18)',
+    secondaryAccentColor: 'rgba(242,87,116,0.12)',
+  });
+  drawEditorialGlassPanel(context, mapPanel.x, mapPanel.y, mapPanel.w, mapPanel.h, {
+    radius: 40,
+    accentColor: 'rgba(242,87,116,0.16)',
+    secondaryAccentColor: 'rgba(83,157,245,0.16)',
+  });
+
+  const providerWidth = measureOverlayPillWidth(context, input.providerLabel.toUpperCase(), {
+    paddingX: 18,
+    font: canvasTextFont(16, 600),
+  });
+  drawOverlayPill(context, leftPanel.x + leftPanel.w - 30 - providerWidth, leftPanel.y + 26, input.providerLabel.toUpperCase(), {
+    fill: 'rgba(83,157,245,0.12)',
+    stroke: 'rgba(83,157,245,0.28)',
+    textColor: 'rgba(220,235,255,0.86)',
+    font: canvasTextFont(16, 600),
+    height: 46,
+    paddingX: 18,
+  });
+
+  const topRowY = leftPanel.y + 26;
+  const topRowHeight = 46;
+  const avatarRadius = 24;
+  const avatarX = leftPanel.x + 54;
+  const avatarY = topRowY + topRowHeight / 2;
+  const athleteMetaX = leftPanel.x + 92;
+  const athleteMetaWidth = Math.max(180, leftPanel.w - providerWidth - 152);
+  context.save();
   context.beginPath();
-  context.arc(avatarX, avatarY, 42, 0, Math.PI * 2);
+  context.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
   context.closePath();
 
   if (input.athleteAvatarImage) {
     context.save();
     context.clip();
-    context.drawImage(input.athleteAvatarImage, avatarX - 42, avatarY - 42, 84, 84);
+    context.drawImage(
+      input.athleteAvatarImage,
+      avatarX - avatarRadius,
+      avatarY - avatarRadius,
+      avatarRadius * 2,
+      avatarRadius * 2,
+    );
     context.restore();
   } else {
-    const avatarGradient = context.createLinearGradient(avatarX - 42, avatarY - 42, avatarX + 42, avatarY + 42);
+    const avatarGradient = context.createLinearGradient(
+      avatarX - avatarRadius,
+      avatarY - avatarRadius,
+      avatarX + avatarRadius,
+      avatarY + avatarRadius,
+    );
     avatarGradient.addColorStop(0, '#67B6FF');
     avatarGradient.addColorStop(1, '#4D6BFF');
     context.fillStyle = avatarGradient;
     context.fill();
   }
-
-  context.strokeStyle = 'rgba(255,255,255,0.52)';
+  context.strokeStyle = 'rgba(255,255,255,0.28)';
   context.lineWidth = 2;
   context.beginPath();
-  context.arc(avatarX, avatarY, 42, 0, Math.PI * 2);
+  context.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
   context.stroke();
 
   if (!input.athleteAvatarImage) {
     context.fillStyle = '#FFFFFF';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.font = canvasDisplayFont(32, 700);
+    context.font = canvasDisplayFont(22, 700);
     context.fillText(athleteInitials(input.athleteName), avatarX, avatarY + 1);
   }
   context.restore();
 
   context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(38, 600);
-  context.fillText(input.athleteName, leftX + 110, cardY + 78);
-  context.fillStyle = 'rgba(255,255,255,0.76)';
-  context.font = canvasDisplayFont(22, 500);
-  context.fillText(subtitle || input.providerLabel, leftX + 110, cardY + 120);
+  context.font = canvasDisplayFont(22, 620);
+  wrapCanvasText(context, input.athleteName, athleteMetaX, topRowY + 18, athleteMetaWidth, 24, 1);
+  context.fillStyle = 'rgba(255,255,255,0.68)';
+  context.font = canvasTextFont(14, 500);
+  wrapCanvasText(context, subtitle || input.providerLabel, athleteMetaX, topRowY + 38, athleteMetaWidth, 16, 1);
 
+  const titleX = leftPanel.x + 30;
+  const titleTopY = leftPanel.y + 156;
+  const titleMaxWidth = leftPanel.w - 60;
+  const titleLineHeight = 62;
   context.fillStyle = '#FFFFFF';
-  context.font = canvasDisplayFont(54, 600);
-  wrapCanvasText(context, input.run.name, leftX, cardY + 220, leftWidth, 64, 3);
+  context.font = canvasDisplayFont(56, 620);
+  const titleLines = buildWrappedCanvasLines(context, input.run.name, titleMaxWidth, 3);
+  titleLines.forEach((line, index) => {
+    context.fillText(line, titleX, titleTopY + index * titleLineHeight);
+  });
 
-  context.fillStyle = 'rgba(255,255,255,0.84)';
-  context.font = canvasTextFont(24, 400);
-  wrapCanvasText(context, description, leftX, cardY + 344, leftWidth, 32, 3);
+  const descriptionY = titleTopY + Math.max(titleLines.length, 1) * titleLineHeight + 12;
+  const descriptionLineHeight = 28;
+  context.fillStyle = 'rgba(255,255,255,0.76)';
+  context.font = canvasTextFont(22, 500);
+  const descriptionLines = buildWrappedCanvasLines(context, description, leftPanel.w - 76, 2);
+  descriptionLines.forEach((line, index) => {
+    context.fillText(line, titleX, descriptionY + index * descriptionLineHeight);
+  });
 
-  const statColumns = [
-    {
-      x: leftX,
-      rows: [
-        { y: cardY + 430, label: 'Distancia', value: `${input.run.distanceKm.toFixed(1)} km` },
-        { y: cardY + 528, label: 'Tiempo', value: formatDuration(input.run.durationSeconds) },
-      ],
-    },
-    {
-      x: leftX + 188,
-      rows: [
-        { y: cardY + 430, label: 'Ritmo', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
-        { y: cardY + 528, label: 'FC media', value: input.run.averageHeartRate ? `${input.run.averageHeartRate} bpm` : 'Sin FC' },
-      ],
-    },
+  const descriptionBottomY =
+    descriptionY + Math.max(descriptionLines.length - 1, 0) * descriptionLineHeight;
+  const dividerY = Math.max(leftPanel.y + 402, descriptionBottomY + 42);
+
+  fillRoundedPanel(context, leftPanel.x + 30, dividerY, leftPanel.w - 60, 1.5, {
+    radius: 999,
+    fill: 'rgba(255,255,255,0.1)',
+  });
+
+  const statCardWidth = 194;
+  const statCardHeight = 82;
+  const statCardGap = 16;
+  const statStartX = leftPanel.x + 30;
+  const statStartY = dividerY + 22;
+  const stats = [
+    { label: 'DISTANCE', value: distanceText, accent: true },
+    { label: 'PACE', value: formatPace(input.run.paceSecondsPerKm) ?? 'Sin dato' },
+    { label: 'TIME', value: formatDuration(input.run.durationSeconds) },
+    { label: 'AVG HR', value: input.run.averageHeartRate ? `${input.run.averageHeartRate} bpm` : 'Sin FC' },
   ];
 
-  statColumns.forEach((column) => {
-    column.rows.forEach((item) => {
-      context.fillStyle = 'rgba(255,255,255,0.68)';
-      context.font = canvasTextFont(18, 500);
-      context.fillText(item.label, column.x, item.y);
-      context.fillStyle = '#FFFFFF';
-      context.font = canvasDisplayFont(28, 600);
-      context.fillText(item.value, column.x, item.y + 40);
-    });
+  stats.forEach((stat, index) => {
+    const column = index % 2;
+    const row = Math.floor(index / 2);
+    drawShareMetricCard(
+      context,
+      statStartX + column * (statCardWidth + statCardGap),
+      statStartY + row * (statCardHeight + statCardGap),
+      statCardWidth,
+      statCardHeight,
+      stat.label,
+      stat.value,
+      {
+        accent: stat.accent,
+      },
+    );
   });
 
-  fillRoundedPanel(context, mapX, mapY, mapWidth, mapHeight, {
-    radius: 30,
-    fill: '#0A1015',
+  drawOverlayPill(context, mapPanel.x + 24, mapPanel.y + 24, input.run.activityLabel.toUpperCase(), {
+    fill: 'rgba(255,255,255,0.06)',
+    stroke: 'rgba(255,255,255,0.12)',
+    textColor: 'rgba(255,255,255,0.76)',
+    font: canvasTextFont(16, 600),
+    height: 46,
+    paddingX: 18,
   });
-  await drawStaticRouteMapCard(context, input.route, mapX, mapY, mapWidth, mapHeight, 30);
+  const routePillWidth = measureOverlayPillWidth(context, 'ROUTE STORY', {
+    paddingX: 18,
+    font: canvasTextFont(16, 600),
+  });
+  drawOverlayPill(context, mapPanel.x + mapPanel.w - 24 - routePillWidth, mapPanel.y + 24, 'ROUTE STORY', {
+    fill: 'rgba(242,87,116,0.12)',
+    stroke: 'rgba(242,87,116,0.24)',
+    textColor: 'rgba(255,222,229,0.84)',
+    font: canvasTextFont(16, 600),
+    height: 46,
+    paddingX: 18,
+  });
+
+  fillRoundedPanel(context, mapFrame.x - 1, mapFrame.y - 1, mapFrame.w + 2, mapFrame.h + 2, {
+    radius: 34,
+    fill: 'rgba(5,8,12,0.82)',
+  });
+  await drawStaticRouteMapCard(
+    context,
+    input.route,
+    input.run.name,
+    mapFrame.x,
+    mapFrame.y,
+    mapFrame.w,
+    mapFrame.h,
+    34,
+    {
+      routeStrokeScale: 0.82,
+    },
+  );
+
+  const detailPanelHeight = 86;
+  const detailPanelBottomInset = 42;
+  const detailPanelY = mapPanel.y + mapPanel.h - detailPanelBottomInset - detailPanelHeight;
+  drawEditorialGlassPanel(context, mapPanel.x + 22, detailPanelY, mapPanel.w - 44, 86, {
+    radius: 28,
+    accentColor: 'rgba(83,157,245,0.12)',
+    secondaryAccentColor: 'rgba(242,87,116,0.12)',
+  });
+  context.fillStyle = 'rgba(255,255,255,0.58)';
+  context.font = canvasTextFont(16, 600);
+  context.fillText('DATE', mapPanel.x + 48, detailPanelY + 30);
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(24, 620);
+  context.fillText(dateLine, mapPanel.x + 48, detailPanelY + 62);
+
+  context.fillStyle = 'rgba(255,255,255,0.58)';
+  context.font = canvasTextFont(16, 600);
+  context.fillText('ELEV', mapPanel.x + 316, detailPanelY + 30);
+  context.fillStyle = '#FFFFFF';
+  context.font = canvasDisplayFont(24, 620);
+  context.fillText(metricValue(input.run.elevationGain, ' m'), mapPanel.x + 316, detailPanelY + 62);
 }
 
 function renderRibbonDataOverlay(context: CanvasRenderingContext2D, input: {
@@ -3670,7 +4378,6 @@ async function exportRunRouteVideo(input: {
   const totalFrames = Math.max(2, Math.round((routeVideoDurationMs * routeVideoFps) / 1000));
   const frameDurationMs = 1000 / routeVideoFps;
   const worldRoutePoints = input.route.points.map(([lat, lng]) => mercatorPixel(lat, lng, VIDEO_TILE_ZOOM));
-  const thresholds = paceThresholds(input.route);
   const perspectiveSurfaceScale = routeVideoPerspective.sourceResolutionScale * routeVideoRenderScale;
   const perspectiveTileOverscanPx = tileOverscanPx * routeVideoPerspective.sourceResolutionScale;
   const perspectiveSurface = document.createElement('canvas');
@@ -3701,17 +4408,10 @@ async function exportRunRouteVideo(input: {
 
   const worldSegments: Array<{ start: { x: number; y: number }; end: { x: number; y: number }; color: string }> = [];
   for (let index = 1; index < worldRoutePoints.length; index += 1) {
-    const prevSample = input.route.samples[index - 1];
-    const nextSample = input.route.samples[index];
-    const segmentPace =
-      nextSample?.paceSecondsPerKm !== null && prevSample?.paceSecondsPerKm !== null
-        ? (nextSample.paceSecondsPerKm + prevSample.paceSecondsPerKm) / 2
-        : nextSample?.paceSecondsPerKm ?? prevSample?.paceSecondsPerKm ?? routeMedianPace(input.route) ?? 360;
-
     worldSegments.push({
       start: worldRoutePoints[index - 1],
       end: worldRoutePoints[index],
-      color: paceColor(segmentPace, thresholds),
+      color: routeVideoHighlightColor,
     });
   }
 
@@ -3798,15 +4498,17 @@ async function exportRunRouteVideo(input: {
   const renderVideoFrame = (progress: number) => {
     const clampedProgress = clampNumber(progress, 0, 1);
     const playbackState = interpolatePlaybackState(playbackSamples, clampedProgress);
+    const recapStart = VIDEO_PHASES.recap?.start ?? 0.84;
+    const recapEnd = VIDEO_PHASES.recap?.end ?? 1;
     const recapProgress =
-      clampedProgress <= VIDEO_PHASES.recap.start
+      clampedProgress <= recapStart
         ? 0
         : clampNumber(
-            (clampedProgress - VIDEO_PHASES.recap.start) /
-              Math.max(VIDEO_PHASES.recap.end - VIDEO_PHASES.recap.start, 0.0001),
+            (clampedProgress - recapStart) /
+              Math.max(recapEnd - recapStart, 0.0001),
             0,
             1,
-    );
+      );
     const recapEase = recapProgress * recapProgress * (3 - 2 * recapProgress);
     const perspectiveCamera = buildPerspectiveCamera(clampedProgress);
     const perspectiveTiles = resolveVisibleTiles(
@@ -4429,6 +5131,11 @@ function App() {
   const [routeState, setRouteState] = useState<RouteState>(idleRouteState);
   const [isExportingRunImage, setIsExportingRunImage] = useState(false);
   const [isExportingRunVideo, setIsExportingRunVideo] = useState(false);
+  const [runVideoExportMessage, setRunVideoExportMessage] = useState<string | null>(null);
+  const [runVideoExportProgress, setRunVideoExportProgress] = useState<number | null>(null);
+  const [runVideoExportDisplayProgress, setRunVideoExportDisplayProgress] = useState<number | null>(null);
+  const runVideoExportDisplayProgressRef = useRef<number | null>(null);
+  const runVideoExportProgressAnimationRef = useRef<number | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [activeSection, setActiveSection] = useState<DashboardSectionId>(initialDashboardSection);
   const [pageTransition, setPageTransition] = useState<PageTransitionState>(null);
@@ -4439,6 +5146,7 @@ function App() {
   });
   const [clockNow, setClockNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
+  const routeCacheRef = useRef<Map<number, ActivityRoute>>(new Map());
   const voiceRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const microphoneReadyRef = useRef(false);
   const checkInNoteRef = useRef<HTMLTextAreaElement | null>(null);
@@ -4448,6 +5156,17 @@ function App() {
   const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
   const stravaPublicLoginEnabled = publicAuthProviders.includes('strava');
   const canExportRunVideo = supportsRouteVideoExport();
+  const resolvedRecentActivities =
+    state.status === 'ready'
+      ? (state.data.recentActivities.length ? state.data.recentActivities : state.data.recentRuns)
+      : [];
+  const resolvedSelectedRun =
+    resolvedRecentActivities.find((run) => run.id === selectedRunId) ??
+    resolvedRecentActivities[0] ??
+    null;
+  const selectedRouteSignature = resolvedSelectedRun
+    ? `${resolvedSelectedRun.id}:${resolvedSelectedRun.distanceKm.toFixed(3)}`
+    : null;
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -4499,9 +5218,12 @@ function App() {
   };
 
   const clearSession = () => {
+    routeCacheRef.current.clear();
     setSessionId(null);
     setSessionProvider(null);
     setSessionAccountLabel(null);
+    setSelectedRunId(null);
+    setRouteState(idleRouteState);
     setGoalDraft(defaultGoal);
     setCheckInDraft(defaultCheckInDraft);
     setCheckInState({
@@ -4816,23 +5538,31 @@ function App() {
       return;
     }
 
-    const recentActivities = state.data.recentActivities.length ? state.data.recentActivities : state.data.recentRuns;
-    const selectedRun =
-      recentActivities.find((run) => run.id === selectedRunId) ??
-      recentActivities[0] ??
-      null;
-
-    if (!selectedRun) {
+    if (!resolvedSelectedRun) {
       setRouteState((current) => (current.status === 'idle' ? current : idleRouteState));
       return;
     }
 
-    if (selectedRun.distanceKm <= 0) {
+    if (resolvedSelectedRun.distanceKm <= 0) {
       setRouteState({
         status: 'error',
         data: null,
-        error: activityRouteUnavailableMessage(selectedRun),
+        error: activityRouteUnavailableMessage(resolvedSelectedRun),
       });
+      return;
+    }
+
+    const cachedRoute = routeCacheRef.current.get(resolvedSelectedRun.id);
+    if (cachedRoute) {
+      setRouteState((current) =>
+        current.status === 'ready' && current.data === cachedRoute
+          ? current
+          : {
+              status: 'ready',
+              data: cachedRoute,
+              error: null,
+            },
+      );
       return;
     }
 
@@ -4846,7 +5576,7 @@ function App() {
 
     void (async () => {
       try {
-        const response = await apiFetch(`/api/activities/${selectedRun.id}/route`);
+        const response = await apiFetch(`/api/activities/${resolvedSelectedRun.id}/route`);
         const payload = await response.json();
         if (!response.ok) {
           throw new Error(payload.message ?? 'No se pudo cargar el mapa del entrenamiento.');
@@ -4856,6 +5586,7 @@ function App() {
           return;
         }
 
+        routeCacheRef.current.set(resolvedSelectedRun.id, payload as ActivityRoute);
         setRouteState({
           status: 'ready',
           data: payload as ActivityRoute,
@@ -4877,7 +5608,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedRunId, state]);
+  }, [state.status, selectedRouteSignature]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -4928,6 +5659,67 @@ function App() {
       window.clearTimeout(transitionTimer);
     };
   }, [activeSection]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      runVideoExportDisplayProgressRef.current = runVideoExportProgress;
+      setRunVideoExportDisplayProgress(runVideoExportProgress);
+      return;
+    }
+
+    if (runVideoExportProgressAnimationRef.current !== null) {
+      window.cancelAnimationFrame(runVideoExportProgressAnimationRef.current);
+      runVideoExportProgressAnimationRef.current = null;
+    }
+
+    if (runVideoExportProgress === null) {
+      runVideoExportDisplayProgressRef.current = null;
+      setRunVideoExportDisplayProgress(null);
+      return;
+    }
+
+    const target = clampNumber(runVideoExportProgress, 0, 1);
+    const startValue = runVideoExportDisplayProgressRef.current ?? target;
+    if (Math.abs(target - startValue) < 0.0005) {
+      runVideoExportDisplayProgressRef.current = target;
+      setRunVideoExportDisplayProgress(target);
+      return;
+    }
+
+    const startedAt = window.performance.now();
+    const durationMs = clampNumber(Math.abs(target - startValue) * 900, 180, 460);
+
+    const animateProgress = (now: number) => {
+      const elapsed = now - startedAt;
+      const ratio = clampNumber(elapsed / durationMs, 0, 1);
+      const easedRatio = 1 - (1 - ratio) ** 3;
+      const nextValue = lerpNumber(startValue, target, easedRatio);
+      runVideoExportDisplayProgressRef.current = nextValue;
+      startTransition(() => {
+        setRunVideoExportDisplayProgress(nextValue);
+      });
+
+      if (ratio < 1) {
+        runVideoExportProgressAnimationRef.current = window.requestAnimationFrame(animateProgress);
+        return;
+      }
+
+      runVideoExportDisplayProgressRef.current = target;
+      startTransition(() => {
+        setRunVideoExportDisplayProgress(target);
+      });
+      runVideoExportProgressAnimationRef.current = null;
+    };
+
+    runVideoExportProgressAnimationRef.current = window.requestAnimationFrame(animateProgress);
+
+    return () => {
+      if (runVideoExportProgressAnimationRef.current !== null) {
+        window.cancelAnimationFrame(runVideoExportProgressAnimationRef.current);
+        runVideoExportProgressAnimationRef.current = null;
+      }
+    };
+  }, [runVideoExportProgress]);
 
   const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5593,13 +6385,10 @@ function App() {
   }
 
   const data = state.data;
-  const recentActivities = data.recentActivities.length ? data.recentActivities : data.recentRuns;
+  const recentActivities = resolvedRecentActivities;
   const selectedMetricMeta = chartOptions.find((option) => option.key === selectedMetric) ?? chartOptions[0];
   const selectedWeek = data.plan.weeks[selectedWeekIndex] ?? data.plan.weeks[0];
-  const selectedRun =
-    recentActivities.find((run) => run.id === selectedRunId) ??
-    recentActivities[0] ??
-    null;
+  const selectedRun = resolvedSelectedRun;
   const averageValue = metricAverage(data.wellnessTrend, selectedMetric);
   const peakValue = metricPeak(data.wellnessTrend, selectedMetric);
   const readinessWindow = data.wellnessTrend.filter((entry) => entry.readiness !== null).slice(-14);
@@ -5735,29 +6524,97 @@ function App() {
       return;
     }
 
-    if (routeState.status === 'loading') {
-      window.alert('Todavia estoy cargando la ruta de esta actividad. Espera un momento y vuelve a intentarlo.');
-      return;
-    }
-
-    if (routeState.status !== 'ready') {
+    if (selectedRun.distanceKm <= 0) {
       window.alert('Esta actividad no tiene una ruta utilizable para la exportacion.');
       return;
     }
 
     setIsExportingRunVideo(true);
+    setRunVideoExportMessage('Preparando export 3D...');
+    setRunVideoExportProgress(0.02);
 
     try {
-      await exportRunRouteVideo({
-        run: selectedRun,
-        route: routeState.data,
-        athleteName: data.athlete.name,
+      const summary: RouteVideoRenderSummary = {
+        title: selectedRun.name,
+        date: selectedRun.date,
+        timeLabel: selectedRun.timeLabel,
+        activityLabel: selectedRun.activityLabel,
         providerLabel: data.provider.label,
+        athleteName: data.athlete.name,
+        distanceKm: selectedRun.distanceKm,
+        durationSeconds: selectedRun.durationSeconds,
+        paceSecondsPerKm: selectedRun.paceSecondsPerKm,
+        elevationGain: selectedRun.elevationGain,
+      };
+
+      const createResponse = await apiFetch(`/api/activities/${selectedRun.id}/video-export`, {
+        method: 'POST',
+        body: JSON.stringify({
+          summary,
+        }),
       });
+      const createPayload = await createResponse.json();
+
+      if (!createResponse.ok) {
+        throw new Error(createPayload.message ?? 'No se pudo crear el export del vídeo.');
+      }
+
+      let job = createPayload as RouteVideoExportJob;
+      setRunVideoExportMessage(job.message);
+      setRunVideoExportProgress(job.progress);
+
+      while (job.status === 'queued' || job.status === 'rendering') {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, job.status === 'queued' ? 900 : 350),
+        );
+        const statusResponse = await apiFetch(`/api/video-exports/${job.id}`);
+        const statusPayload = await statusResponse.json();
+
+        if (!statusResponse.ok) {
+          throw new Error(statusPayload.message ?? 'No se pudo consultar el estado del vídeo.');
+        }
+
+        job = statusPayload as RouteVideoExportJob;
+        setRunVideoExportMessage(job.message);
+        setRunVideoExportProgress(job.progress);
+      }
+
+      if (job.status === 'error') {
+        throw new Error(job.error ?? 'El render del vídeo ha fallado.');
+      }
+
+      if (!job.downloadUrl) {
+        throw new Error('El servidor ha terminado el render pero no ha devuelto la descarga.');
+      }
+
+      setRunVideoExportMessage('Descargando MP4...');
+      setRunVideoExportProgress(1);
+      const downloadResponse = await apiFetch(job.downloadUrl);
+      if (!downloadResponse.ok) {
+        const errorPayload = await downloadResponse.json().catch(() => ({ message: null }));
+        throw new Error(errorPayload.message ?? 'No se pudo descargar el MP4 generado.');
+      }
+
+      const blob = await downloadResponse.blob();
+      downloadBlobAsset(
+        blob,
+        job.outputFilename ?? `run-route-video-${selectedRun.date}-${selectedRun.id}.mp4`,
+      );
+
+      if (routeVideoLegacyFallbackEnabled && routeState.status === 'ready') {
+        await exportRunRouteVideo({
+          run: selectedRun,
+          route: routeState.data,
+          athleteName: data.athlete.name,
+          providerLabel: data.provider.label,
+        });
+      }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : 'No se pudo generar el video de la actividad.');
     } finally {
       setIsExportingRunVideo(false);
+      setRunVideoExportMessage(null);
+      setRunVideoExportProgress(null);
     }
   };
   const scheduleWorkout = async (weekIndex: number, dayIndex: number) => {
@@ -6084,7 +6941,12 @@ function App() {
                   <div className="overlay-single-card" aria-label="Overlay activo">
                     <span className="overlay-template-tag">GLASS + ROUTE VIDEO</span>
                     <strong>{runOverlayTemplate.headline} + short vertical</strong>
-                    <small>PNG limpio para compartir y vídeo tipo reel con trazado progresivo, distancia y pace.</small>
+                    <small>PNG con look social más editorial y vídeo tipo reel con trazado progresivo, distancia y pace.</small>
+                    <div className="overlay-single-card-meta" aria-hidden="true">
+                      <span>avatar</span>
+                      <span>mapa premium</span>
+                      <span>stats</span>
+                    </div>
                   </div>
                   <div className="spotlight-actions">
                     <button
@@ -6101,21 +6963,42 @@ function App() {
                     </button>
                     <button
                       className="secondary-button"
-                      disabled={!canExportRunVideo || isExportingRunVideo || routeState.status === 'loading'}
+                      disabled={!canExportRunVideo || isExportingRunVideo || selectedRun.distanceKm <= 0}
                       onClick={() => void exportSelectedRunVideo()}
                       type="button"
                     >
                       {!canExportRunVideo
                         ? 'Vídeo no disponible aquí'
                         : isExportingRunVideo
-                          ? 'Generando vídeo...'
-                          : routeState.status === 'loading'
-                            ? 'Cargando ruta...'
+                          ? runVideoExportMessage ?? 'Generando vídeo...'
+                          : selectedRun.distanceKm <= 0
+                            ? 'Ruta no exportable'
                             : 'Descargar vídeo ruta'}
                     </button>
                   </div>
+                  {isExportingRunVideo && runVideoExportDisplayProgress !== null ? (
+                    <div
+                      className="overlay-export-progress"
+                      aria-label="Progreso del export del vídeo"
+                      aria-valuemax={100}
+                      aria-valuemin={0}
+                      aria-valuenow={Math.round(runVideoExportDisplayProgress * 100)}
+                      role="progressbar"
+                    >
+                      <div className="overlay-export-progress-head">
+                        <span>{runVideoExportMessage ?? 'Generando vídeo...'}</span>
+                        <strong>{formatOverlayExportPercent(runVideoExportDisplayProgress)}</strong>
+                      </div>
+                      <div className="overlay-export-progress-track">
+                        <span
+                          className="overlay-export-progress-fill"
+                          style={{ width: `${(runVideoExportDisplayProgress * 100).toFixed(3)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                   <small className="overlay-export-note">
-                    El vídeo se exporta en WebM o MP4 según lo que soporte tu navegador.
+                    {runVideoExportMessage ?? 'El vídeo se renderiza en servidor como MP4 vertical 1080x1920 con cámara 3D y duración variable.'}
                   </small>
                 </div>
               </aside>
@@ -6138,11 +7021,11 @@ function App() {
                           {run.timeLabel ? ` · ${run.timeLabel}` : ''}
                         </span>
                       </div>
-                      <div>
+                      <div className="run-row-metrics">
                         <strong>{formatActivityDistance(run.distanceKm)}</strong>
                         <span>{formatDuration(run.durationSeconds)}</span>
                       </div>
-                      <div>
+                      <div className="run-row-metrics">
                         <strong>{formatPace(run.paceSecondsPerKm)}</strong>
                         <span>{run.averageHeartRate ? `${run.averageHeartRate} bpm` : 'Sin FC'}</span>
                       </div>

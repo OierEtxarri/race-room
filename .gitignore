@@ -17,6 +17,9 @@ dist-ssr
 .venv-garmin/
 data/*.sqlite
 data/*.sqlite-*
+data/video-exports/
+data/video-route-cache/
+data/video-terrain-cache/
 
 # Editor directories and files
 .vscode/*

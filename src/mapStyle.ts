@@ -100,6 +100,8 @@ export const VIDEO_LAYOUT = {
 
 // Video phase timing
 export const VIDEO_PHASES = {
+  overview: { start: 0.0, end: 0.0 },
+  transition: { start: 0.0, end: 0.0 },
   followCam: { start: 0.0, end: 0.84 },
   recap: { start: 0.84, end: 1.0 },
 };

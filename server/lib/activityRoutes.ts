@@ -17,6 +17,18 @@ export type ActivityRouteData = {
   source: 'garmin' | 'strava';
 };
 
+type RouteExtractionOptions = {
+  maxPoints?: number;
+  maxSamples?: number;
+  maxSplitSamples?: number;
+};
+
+const DEFAULT_MAX_ROUTE_POINTS = 180;
+const DEFAULT_MAX_ROUTE_SAMPLES = 220;
+const DEFAULT_MAX_ROUTE_SPLIT_SAMPLES = 220;
+const DETAILED_MAX_ROUTE_POINTS = 6_000;
+const DETAILED_MAX_ROUTE_SAMPLES = 6_000;
+
 function toNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -145,7 +157,7 @@ function decodePolyline(encoded: string): LatLngTuple[] {
   return points;
 }
 
-function normalizePoints(points: LatLngTuple[]): LatLngTuple[] {
+function normalizePoints(points: LatLngTuple[], maxPoints = DEFAULT_MAX_ROUTE_POINTS): LatLngTuple[] {
   const filtered = points.filter(
     (point, index) =>
       Number.isFinite(point[0]) &&
@@ -153,11 +165,11 @@ function normalizePoints(points: LatLngTuple[]): LatLngTuple[] {
       (index === 0 || point[0] !== points[index - 1]?.[0] || point[1] !== points[index - 1]?.[1]),
   );
 
-  if (filtered.length <= 180) {
+  if (!Number.isFinite(maxPoints) || filtered.length <= maxPoints) {
     return filtered;
   }
 
-  const step = Math.ceil(filtered.length / 180);
+  const step = Math.ceil(filtered.length / Math.max(2, maxPoints));
   return filtered.filter((_, index) => index % step === 0 || index === filtered.length - 1);
 }
 
@@ -252,7 +264,7 @@ function sampleFromObject(source: unknown): ActivityRouteSampleData | null {
   };
 }
 
-function normalizeSamples(samples: ActivityRouteSampleData[]): ActivityRouteSampleData[] {
+function normalizeSamples(samples: ActivityRouteSampleData[], maxSamples = DEFAULT_MAX_ROUTE_SAMPLES): ActivityRouteSampleData[] {
   const filtered = samples.filter(
     (sample, index) =>
       Number.isFinite(sample.point[0]) &&
@@ -262,11 +274,11 @@ function normalizeSamples(samples: ActivityRouteSampleData[]): ActivityRouteSamp
         sample.point[1] !== samples[index - 1]?.point[1]),
   );
 
-  if (filtered.length <= 220) {
+  if (!Number.isFinite(maxSamples) || filtered.length <= maxSamples) {
     return filtered;
   }
 
-  const step = Math.ceil(filtered.length / 220);
+  const step = Math.ceil(filtered.length / Math.max(2, maxSamples));
   return filtered.filter((_, index) => index % step === 0 || index === filtered.length - 1);
 }
 
@@ -366,7 +378,10 @@ function splitSampleFromObject(source: unknown): RouteSplitSample | null {
   };
 }
 
-function normalizeSplitSamples(samples: RouteSplitSample[]): RouteSplitSample[] {
+function normalizeSplitSamples(
+  samples: RouteSplitSample[],
+  maxSamples = DEFAULT_MAX_ROUTE_SPLIT_SAMPLES,
+): RouteSplitSample[] {
   const filtered = samples.filter(
     (sample) =>
       Number.isFinite(sample.order ?? 0) ||
@@ -387,11 +402,11 @@ function normalizeSplitSamples(samples: RouteSplitSample[]): RouteSplitSample[] 
     return 0;
   });
 
-  if (sorted.length <= 220) {
+  if (!Number.isFinite(maxSamples) || sorted.length <= maxSamples) {
     return sorted;
   }
 
-  const step = Math.ceil(sorted.length / 220);
+  const step = Math.ceil(sorted.length / Math.max(2, maxSamples));
   return sorted.filter((_, index) => index % step === 0 || index === sorted.length - 1);
 }
 
@@ -400,7 +415,10 @@ type GarminDetailMetricDescriptor = {
   key: string;
 };
 
-function buildRouteSamplesFromGarminDetails(source: unknown): ActivityRouteSampleData[] | null {
+function buildRouteSamplesFromGarminDetails(
+  source: unknown,
+  maxSamples = DEFAULT_MAX_ROUTE_SAMPLES,
+): ActivityRouteSampleData[] | null {
   if (!source || typeof source !== 'object') {
     return null;
   }
@@ -492,11 +510,15 @@ function buildRouteSamplesFromGarminDetails(source: unknown): ActivityRouteSampl
     });
   });
 
-  const normalized = normalizeSamples(samples);
+  const normalized = normalizeSamples(samples, maxSamples);
   return normalized.length >= 2 ? normalized : null;
 }
 
-function collectOrderedSplitCandidates(source: unknown, maxDepth = 8): RouteSplitSample[] {
+function collectOrderedSplitCandidates(
+  source: unknown,
+  maxDepth = 8,
+  maxSamples = DEFAULT_MAX_ROUTE_SPLIT_SAMPLES,
+): RouteSplitSample[] {
   const seen = new Set<unknown>();
   let best: RouteSplitSample[] = [];
   let bestScore = -1;
@@ -520,7 +542,7 @@ function collectOrderedSplitCandidates(source: unknown, maxDepth = 8): RouteSpli
     const score = samples.length + paceCount * 8 + durationCount * 4 + distanceCount * 3;
 
     if (score > bestScore) {
-      best = normalizeSplitSamples(samples);
+      best = normalizeSplitSamples(samples, maxSamples);
       bestScore = score;
     }
   }
@@ -730,7 +752,11 @@ function buildRouteSamplesFromSplitCandidates(
   });
 }
 
-function collectOrderedSampleCandidates(source: unknown, maxDepth = 8): ActivityRouteSampleData[] {
+function collectOrderedSampleCandidates(
+  source: unknown,
+  maxDepth = 8,
+  maxSamples = DEFAULT_MAX_ROUTE_SAMPLES,
+): ActivityRouteSampleData[] {
   const seen = new Set<unknown>();
   let best: ActivityRouteSampleData[] = [];
   let bestScore = -1;
@@ -751,7 +777,7 @@ function collectOrderedSampleCandidates(source: unknown, maxDepth = 8): Activity
     const score = samples.length + paceCount * 8 + timestampCount * 3;
 
     if (score > bestScore) {
-      best = normalizeSamples(samples);
+      best = normalizeSamples(samples, maxSamples);
       bestScore = score;
     }
   }
@@ -849,12 +875,12 @@ function collectCoordinatePairs(source: unknown, maxDepth = 8): LatLngTuple[] {
   return points;
 }
 
-function extractRoutePoints(source: unknown): LatLngTuple[] {
+function extractRoutePoints(source: unknown, maxPoints = DEFAULT_MAX_ROUTE_POINTS): LatLngTuple[] {
   for (const encoded of collectPolylineCandidates(source)) {
     try {
       const decoded = decodePolyline(encoded);
       if (decoded.length >= 2) {
-        return normalizePoints(decoded);
+        return normalizePoints(decoded, maxPoints);
       }
     } catch {
       // Ignore malformed candidates and continue scanning.
@@ -862,7 +888,7 @@ function extractRoutePoints(source: unknown): LatLngTuple[] {
   }
 
   const coordinatePairs = collectCoordinatePairs(source);
-  return coordinatePairs.length >= 2 ? normalizePoints(coordinatePairs) : [];
+  return coordinatePairs.length >= 2 ? normalizePoints(coordinatePairs, maxPoints) : [];
 }
 
 function routeDataFromSamples(samples: ActivityRouteSampleData[], source: 'garmin' | 'strava'): ActivityRouteData {
@@ -873,12 +899,16 @@ function routeDataFromSamples(samples: ActivityRouteSampleData[], source: 'garmi
   };
 }
 
-export async function getGarminActivityRoute(
+async function getGarminActivityRouteWithOptions(
   auth: GarminSessionAuth,
   activityId: number,
+  options: RouteExtractionOptions = {},
 ): Promise<ActivityRouteData> {
   const routeStartTime = Date.now();
   const routeTimeoutMs = 10_000; // Global timeout for route fetch
+  const maxPoints = options.maxPoints ?? DEFAULT_MAX_ROUTE_POINTS;
+  const maxSamples = options.maxSamples ?? DEFAULT_MAX_ROUTE_SAMPLES;
+  const maxSplitSamples = options.maxSplitSamples ?? DEFAULT_MAX_ROUTE_SPLIT_SAMPLES;
 
   try {
     // Fetch activity details with timeout
@@ -889,8 +919,8 @@ export async function getGarminActivityRoute(
       ),
     ]);
 
-    const detailSamples = buildRouteSamplesFromGarminDetails(details);
-    const points = extractRoutePoints(details);
+    const detailSamples = buildRouteSamplesFromGarminDetails(details, maxSamples);
+    const points = extractRoutePoints(details, maxPoints);
 
     if (detailSamples && detailSamples.length >= 2) {
       console.log(`[perf] getGarminActivityRoute success from details total=${Date.now() - routeStartTime}ms`);
@@ -901,7 +931,7 @@ export async function getGarminActivityRoute(
       };
     }
 
-    const orderedSamples = collectOrderedSampleCandidates(details);
+    const orderedSamples = collectOrderedSampleCandidates(details, 8, maxSamples);
 
     if (orderedSamples.length >= 2) {
       console.log(`[perf] getGarminActivityRoute success from ordered samples total=${Date.now() - routeStartTime}ms`);
@@ -941,7 +971,7 @@ export async function getGarminActivityRoute(
 
         let bestSplitSamples: RouteSplitSample[] = [];
         splitSources.forEach((source) => {
-          const candidates = collectOrderedSplitCandidates(source);
+          const candidates = collectOrderedSplitCandidates(source, 8, maxSplitSamples);
           if (candidates.length > bestSplitSamples.length) {
             bestSplitSamples = candidates;
           }
@@ -980,16 +1010,38 @@ export async function getGarminActivityRoute(
   }
 }
 
+export async function getGarminActivityRoute(
+  auth: GarminSessionAuth,
+  activityId: number,
+): Promise<ActivityRouteData> {
+  return getGarminActivityRouteWithOptions(auth, activityId);
+}
+
+export async function getGarminActivityRouteForVideo(
+  auth: GarminSessionAuth,
+  activityId: number,
+): Promise<ActivityRouteData> {
+  return getGarminActivityRouteWithOptions(auth, activityId, {
+    maxPoints: DETAILED_MAX_ROUTE_POINTS,
+    maxSamples: DETAILED_MAX_ROUTE_SAMPLES,
+    maxSplitSamples: DETAILED_MAX_ROUTE_SAMPLES,
+  });
+}
+
 type StravaStreamsResponse = {
   latlng?: { data?: Array<[number, number]> };
   velocity_smooth?: { data?: number[] };
   time?: { data?: number[] };
 };
 
-export async function getStravaActivityRoute(
+async function getStravaActivityRouteWithOptions(
   session: StravaSessionRecord,
   activityId: number,
+  options: RouteExtractionOptions = {},
 ): Promise<ActivityRouteData> {
+  const maxPoints = options.maxPoints ?? DEFAULT_MAX_ROUTE_POINTS;
+  const maxSamples = options.maxSamples ?? DEFAULT_MAX_ROUTE_SAMPLES;
+
   try {
     const streams = await getStravaActivity(session, activityId, {
       endpoint: 'streams',
@@ -1007,6 +1059,7 @@ export async function getStravaActivityRoute(
         paceSecondsPerKm: toPaceFromSpeed(toNumber(velocities[index])),
         timestampSeconds: toNumber(times[index]),
       })),
+      maxSamples,
     );
 
     if (samples.length >= 2) {
@@ -1017,7 +1070,7 @@ export async function getStravaActivityRoute(
   }
 
   const activity = await getStravaActivity(session, activityId);
-  const points = extractRoutePoints(activity);
+  const points = extractRoutePoints(activity, maxPoints);
 
   if (points.length < 2) {
     throw new Error('Strava no ha devuelto una ruta utilizable para este entrenamiento.');
@@ -1032,4 +1085,21 @@ export async function getStravaActivityRoute(
     })),
     source: 'strava',
   };
+}
+
+export async function getStravaActivityRoute(
+  session: StravaSessionRecord,
+  activityId: number,
+): Promise<ActivityRouteData> {
+  return getStravaActivityRouteWithOptions(session, activityId);
+}
+
+export async function getStravaActivityRouteForVideo(
+  session: StravaSessionRecord,
+  activityId: number,
+): Promise<ActivityRouteData> {
+  return getStravaActivityRouteWithOptions(session, activityId, {
+    maxPoints: DETAILED_MAX_ROUTE_POINTS,
+    maxSamples: DETAILED_MAX_ROUTE_SAMPLES,
+  });
 }

@@ -1742,14 +1742,15 @@
 }
 
 .run-row {
-  grid-template-columns: 2fr 1fr 1fr;
+  grid-template-columns: minmax(0, 1.8fr) minmax(92px, 0.7fr) minmax(92px, 0.7fr);
+  column-gap: 0.85rem;
 }
 
 .recent-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.28fr) minmax(340px, 0.72fr);
   gap: 1.2rem;
-  align-items: start;
+  align-items: stretch;
 }
 
 .run-select {
@@ -1778,18 +1779,24 @@
     var(--panel-strong);
   min-width: 0;
   overflow: hidden;
+  height: 100%;
 }
 
 .run-list-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.85rem;
   padding: 1.15rem 1.2rem;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
     var(--panel-strong);
   min-width: 0;
-  position: sticky;
-  top: 6.8rem;
-  max-height: calc(100vh - 8rem);
-  overflow: auto;
+  position: relative;
+  top: auto;
+  align-self: stretch;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
 }
 
 .spotlight-heading {
@@ -1831,21 +1838,70 @@
 
 .overlay-single-card {
   display: grid;
-  gap: 0.3rem;
-  padding: 0.95rem 1rem;
-  border-radius: 16px;
-  border: 1px solid var(--line);
-  background: #202020;
+  gap: 0.45rem;
+  padding: 1rem 1rem 1.05rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at 88% 12%, rgba(83, 157, 245, 0.2), transparent 28%),
+    radial-gradient(circle at 12% 100%, rgba(242, 87, 116, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 32%),
+    #191b20;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 18px 34px rgba(0, 0, 0, 0.22);
+  position: relative;
+  overflow: hidden;
+}
+
+.overlay-single-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.06), transparent 28%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: auto, 5.2rem 100%;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.overlay-single-card > * {
+  position: relative;
+  z-index: 1;
 }
 
 .overlay-single-card strong {
   color: var(--heading);
   font-size: 1rem;
+  letter-spacing: -0.01em;
 }
 
 .overlay-single-card small {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.overlay-single-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.2rem;
+}
+
+.overlay-single-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.7rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.78);
+  font-family: var(--mono);
+  font-size: 0.67rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .spotlight-actions {
@@ -1858,6 +1914,49 @@
 .overlay-export-note {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.overlay-export-progress {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.9rem 1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(83, 157, 245, 0.18);
+  background: linear-gradient(90deg, rgba(83, 157, 245, 0.12), rgba(242, 87, 116, 0.06)), #202020;
+}
+
+.overlay-export-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.overlay-export-progress-head strong {
+  color: var(--heading);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+}
+
+.overlay-export-progress-track {
+  overflow: hidden;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.overlay-export-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-deep) 62%, var(--accent-warm) 100%);
+  box-shadow: 0 0 22px rgba(83, 157, 245, 0.22);
+  transition: width 360ms linear;
+  will-change: width;
 }
 
 .overlay-template-grid {
@@ -1927,6 +2026,32 @@
   min-width: 0;
 }
 
+.run-row-metrics {
+  display: grid;
+  gap: 0.28rem;
+  align-content: start;
+  justify-items: start;
+  min-width: 0;
+}
+
+.run-row-metrics strong,
+.run-row-metrics span {
+  display: block;
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.run-row-metrics span {
+  color: var(--muted);
+}
+
+.run-list {
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
+  padding-right: 0.2rem;
+}
+
 .spotlight-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 0.8rem;
@@ -1948,6 +2073,16 @@
   padding: 0.85rem;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   overflow: hidden;
+}
+
+.route-map.route-map-capture {
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 @keyframes route-map-fade {
@@ -2008,6 +2143,15 @@
   animation: route-map-fade 520ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.route-map.route-map-capture .route-map-canvas {
+  border: 0;
+  border-radius: 0;
+  min-height: 0;
+  background: #11161d;
+  box-shadow: none;
+  animation: none;
+}
+
 .route-map-canvas::before {
   content: '';
   position: absolute;
@@ -2018,6 +2162,11 @@
     radial-gradient(circle at 82% 18%, rgba(83, 157, 245, 0.1), transparent 24%),
     radial-gradient(circle at 50% 100%, rgba(0, 0, 0, 0.34), transparent 42%);
   z-index: 440;
+}
+
+.route-map.route-map-capture .route-map-canvas::before,
+.route-map.route-map-capture .route-map-canvas::after {
+  display: none;
 }
 
 .route-map-canvas::after {
@@ -2064,6 +2213,10 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.route-map.route-map-capture .route-map-hud {
+  display: none;
 }
 
 .route-map-leaflet {
@@ -3002,8 +3155,16 @@
 
   .run-list-panel {
     position: static;
+    height: auto;
     max-height: none;
     overflow: visible;
+    display: block;
+  }
+
+  .run-list {
+    overflow: visible;
+    min-height: auto;
+    padding-right: 0;
   }
 
   .coach-insight-grid {

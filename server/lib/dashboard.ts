@@ -15,6 +15,7 @@ import {
   type AdaptiveGuidance,
   type PlanExecutionReview,
 } from './adaptivePlan.ts';
+import { pickNormalizedImageUrl } from './avatarUrl.ts';
 import { garminClient } from './garminClient.ts';
 import type { GarminSessionAuth } from './garminMcpClient.ts';
 import { canSchedulePlanDay } from './planWorkouts.ts';
@@ -2286,9 +2287,18 @@ async function buildGarminDashboardData(input: {
     ['displayName', 'deviceName', 'partNumber'],
     ['display', 'device', 'name'],
   );
-  const avatarUrl = pickString(
-    socialProfile,
-    ['profileImageUrlLarge', 'profileImageUrlMedium', 'profileImageUrlSmall', 'profileImageUrl'],
+  const avatarUrl = pickNormalizedImageUrl(
+    [socialProfile, userProfile],
+    [
+      'profileImageUrlLarge',
+      'profileImageUrlMedium',
+      'profileImageUrlSmall',
+      'profileImageUrl',
+      'profileImageLarge',
+      'profileImageMedium',
+      'profileImageSmall',
+      'profileImage',
+    ],
   );
 
   const result = buildDashboardFromSource({

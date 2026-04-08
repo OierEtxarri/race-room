@@ -8,6 +8,7 @@ export default defineConfig({
   base: appBase,
   plugins: [react()],
   server: {
+    allowedHosts: ['.trycloudflare.com'],
     proxy: apiBaseUrl
       ? undefined
       : {

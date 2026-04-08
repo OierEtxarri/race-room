@@ -233,3 +233,58 @@ export type ActivityRoute = {
   samples: ActivityRouteSample[];
   source: 'garmin' | 'strava';
 };
+
+export type RouteVideoPoint = {
+  lat: number;
+  lng: number;
+  elevationMeters: number;
+  timestampSeconds: number;
+  paceSecondsPerKm: number | null;
+  distanceMeters: number;
+};
+
+export type RouteVideoPayload = {
+  activityId: number;
+  source: 'garmin' | 'strava';
+  bounds: {
+    minLat: number;
+    minLng: number;
+    maxLat: number;
+    maxLng: number;
+  };
+  points: RouteVideoPoint[];
+  totalDistanceKm: number;
+  totalElapsedSeconds: number;
+};
+
+export type RouteVideoRenderSummary = {
+  title: string;
+  date: string;
+  timeLabel: string | null;
+  activityLabel: string;
+  providerLabel: string;
+  athleteName: string;
+  distanceKm: number;
+  durationSeconds: number;
+  paceSecondsPerKm: number | null;
+  elevationGain: number | null;
+};
+
+export type RouteVideoExportJob = {
+  id: string;
+  sessionId: string;
+  activityId: number;
+  status: 'queued' | 'rendering' | 'done' | 'error';
+  createdAt: string;
+  updatedAt: string;
+  progress: number;
+  message: string;
+  summary: RouteVideoRenderSummary;
+  outputFilename: string | null;
+  downloadUrl: string | null;
+  error: string | null;
+  metrics: {
+    totalFrames: number | null;
+    durationSeconds: number | null;
+  };
+};

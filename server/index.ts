@@ -8,6 +8,7 @@ import {
   buildFallbackDashboardData,
   type DashboardData,
 } from './lib/dashboard.ts';
+import { pickNormalizedImageUrl } from './lib/avatarUrl.ts';
 import { garminClient, normalizeGarminError } from './lib/garminClient.ts';
 import type { GarminSessionAuth } from './lib/garminMcpClient.ts';
 import { schedulePlanWorkoutOnGarmin } from './lib/planWorkouts.ts';
@@ -52,6 +53,9 @@ import {
   upsertPersistedDashboard,
   upsertPersistedGoal,
 } from './lib/userStateStore.ts';
+import { buildRouteVideoPayload } from './lib/videoRoutePayload.ts';
+import { routeVideoExportManager } from './lib/videoExportJobs.ts';
+import type { RouteVideoRenderSummary } from './lib/videoExportTypes.ts';
 import { config } from './config.ts';
 
 const app = express();
@@ -102,6 +106,10 @@ function isPrivateLanHostname(hostname: string): boolean {
   return false;
 }
 
+function isAllowedPublicTunnelHostname(hostname: string): boolean {
+  return hostname === 'trycloudflare.com' || hostname.endsWith('.trycloudflare.com');
+}
+
 function isAllowedOrigin(origin: string): boolean {
   if (allowedOrigins.has(origin)) {
     return true;
@@ -110,8 +118,9 @@ function isAllowedOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
     return (
-      url.protocol === 'http:' &&
-      (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || isPrivateLanHostname(url.hostname))
+      ((url.protocol === 'http:' &&
+        (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || isPrivateLanHostname(url.hostname))) ||
+        (url.protocol === 'https:' && isAllowedPublicTunnelHostname(url.hostname)))
     );
   } catch {
     return false;
@@ -419,35 +428,81 @@ function normalizeReturnTo(rawValue: unknown): string {
   }
 }
 
-function pickStringField(source: unknown, keys: string[]): string | null {
-  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+function pickNullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function parseRouteVideoRenderSummary(value: unknown): RouteVideoRenderSummary | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
 
-  const record = source as Record<string, unknown>;
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
+  const record = value as Record<string, unknown>;
+  const title = pickNullableString(record.title);
+  const date = pickNullableString(record.date);
+  const activityLabel = pickNullableString(record.activityLabel);
+  const providerLabel = pickNullableString(record.providerLabel);
+  const athleteName = pickNullableString(record.athleteName);
+  const distanceKm = typeof record.distanceKm === 'number' ? record.distanceKm : Number(record.distanceKm);
+  const durationSeconds =
+    typeof record.durationSeconds === 'number' ? record.durationSeconds : Number(record.durationSeconds);
+  const paceSecondsPerKm =
+    record.paceSecondsPerKm === null || record.paceSecondsPerKm === undefined
+      ? null
+      : typeof record.paceSecondsPerKm === 'number'
+        ? record.paceSecondsPerKm
+        : Number(record.paceSecondsPerKm);
+  const elevationGain =
+    record.elevationGain === null || record.elevationGain === undefined
+      ? null
+      : typeof record.elevationGain === 'number'
+        ? record.elevationGain
+        : Number(record.elevationGain);
+
+  if (!title || !date || !activityLabel || !providerLabel || !athleteName) {
+    return null;
   }
 
-  return null;
+  if (!Number.isFinite(distanceKm) || distanceKm <= 0 || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return null;
+  }
+
+  return {
+    title,
+    date,
+    timeLabel: pickNullableString(record.timeLabel),
+    activityLabel,
+    providerLabel,
+    athleteName,
+    distanceKm,
+    durationSeconds,
+    paceSecondsPerKm: paceSecondsPerKm !== null && Number.isFinite(paceSecondsPerKm) ? paceSecondsPerKm : null,
+    elevationGain: elevationGain !== null && Number.isFinite(elevationGain) ? elevationGain : null,
+  };
 }
 
 async function resolveAthleteAvatarUrl(session: SessionRecord): Promise<string | null> {
   if (isGarminSession(session)) {
-    const socialProfile = await garminClient.callJson(sessionToGarminAuth(session), 'get_social_profile').catch(() => null);
-    return pickStringField(socialProfile, [
+    const auth = sessionToGarminAuth(session);
+    const [socialProfile, userProfile] = await Promise.all([
+      garminClient.callJson(auth, 'get_social_profile').catch(() => null),
+      garminClient.callJson(auth, 'get_user_profile').catch(() => null),
+    ]);
+
+    return pickNormalizedImageUrl([socialProfile, userProfile], [
       'profileImageUrlLarge',
       'profileImageUrlMedium',
       'profileImageUrlSmall',
       'profileImageUrl',
+      'profileImageLarge',
+      'profileImageMedium',
+      'profileImageSmall',
+      'profileImage',
     ]);
   }
 
   const athlete = await getStravaAthlete(session).catch(() => null);
-  return pickStringField(athlete, ['profile_medium', 'profile']);
+  return pickNormalizedImageUrl([athlete], ['profile_medium', 'profile']);
 }
 
 function buildFrontendRedirect(baseUrl: string, params: Record<string, string>): string {
@@ -1115,6 +1170,106 @@ app.get('/api/activities/:activityId/route', async (request, response) => {
   }
 });
 
+app.get('/api/activities/:activityId/video-route', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const activityId = Number(request.params.activityId);
+  if (!Number.isInteger(activityId) || activityId <= 0) {
+    response.status(400).json({
+      message: 'activityId debe ser un entero positivo.',
+    });
+    return;
+  }
+
+  try {
+    const payload = await buildRouteVideoPayload(session, activityId);
+    response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+    response.json(payload);
+  } catch (error) {
+    response.status(404).json({
+      message: error instanceof Error ? error.message : 'No se pudo preparar la ruta del vídeo.',
+    });
+  }
+});
+
+app.post('/api/activities/:activityId/video-export', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const activityId = Number(request.params.activityId);
+  if (!Number.isInteger(activityId) || activityId <= 0) {
+    response.status(400).json({
+      message: 'activityId debe ser un entero positivo.',
+    });
+    return;
+  }
+
+  const summary = parseRouteVideoRenderSummary(request.body?.summary);
+  if (!summary) {
+    response.status(400).json({
+      message: 'Faltan metadatos válidos para el HUD del vídeo.',
+    });
+    return;
+  }
+
+  const job = await routeVideoExportManager.createJob(session.id, activityId, summary);
+  response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+  response.status(202).json(job);
+});
+
+app.get('/api/video-exports/:jobId', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const job = routeVideoExportManager.getJob(session.id, request.params.jobId);
+  if (!job) {
+    response.status(404).json({
+      message: 'No existe ese export de vídeo.',
+    });
+    return;
+  }
+
+  response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+  response.json(job);
+});
+
+app.get('/api/video-exports/:jobId/download', async (request, response) => {
+  const session = resolveSessionFromRequest(request);
+  if (!session) {
+    response.status(401).json({
+      message: 'No hay sesión activa.',
+    });
+    return;
+  }
+
+  const download = await routeVideoExportManager.resolveDownload(session.id, request.params.jobId);
+  if (!download) {
+    response.status(404).json({
+      message: 'El vídeo todavía no está listo para descargar.',
+    });
+    return;
+  }
+
+  response.setHeader('Set-Cookie', buildSessionCookie(session.id));
+  response.download(download.filePath, download.filename);
+});
+
 app.get('/api/athlete/avatar', async (request, response) => {
   const session = resolveSessionFromRequest(request);
   if (!session) {
@@ -1136,6 +1291,7 @@ app.get('/api/athlete/avatar', async (request, response) => {
     const upstream = await fetch(avatarUrl, {
       headers: {
         Accept: 'image/*',
+        'User-Agent': 'garmin-race-room/1.0',
       },
     });
 
