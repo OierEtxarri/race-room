@@ -3,10 +3,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.ts';
 import { getSession } from './sessionStore.ts';
+import { estimateRouteVideoRenderMetrics } from './videoExportMath.ts';
+import { resolveRouteVideoExportPresetConfig } from './videoExportPresets.ts';
 import { buildRouteVideoPayload } from './videoRoutePayload.ts';
 import { renderRouteVideoToMp4 } from './videoExportRenderer.ts';
 import type {
   RouteVideoExportJob,
+  RouteVideoExportPreset,
   RouteVideoPayload,
   RouteVideoRenderResult,
   RouteVideoRenderSummary,
@@ -22,6 +25,7 @@ type RouteVideoExportManagerDeps = {
     jobId: string;
     workDir: string;
     payload: RouteVideoPayload;
+    preset: RouteVideoExportPreset;
     summary: RouteVideoRenderSummary;
     onProgress?: (progress: number, message: string) => void;
   }) => Promise<RouteVideoRenderResult>;
@@ -56,15 +60,23 @@ export class RouteVideoExportManager {
     this.render = deps.render ?? renderRouteVideoToMp4;
   }
 
-  async createJob(sessionId: string, activityId: number, summary: RouteVideoRenderSummary) {
+  async createJob(
+    sessionId: string,
+    activityId: number,
+    summary: RouteVideoRenderSummary,
+    preset: RouteVideoExportPreset,
+  ) {
     await this.pruneOldJobs();
     const id = crypto.randomUUID();
     const workDir = path.join(jobsDir, id);
     const createdAt = nowIso();
+    const presetConfig = resolveRouteVideoExportPresetConfig(preset);
+    const renderEstimate = estimateRouteVideoRenderMetrics(summary.distanceKm, presetConfig.outputFps);
     const job: InternalRouteVideoExportJob = {
       id,
       sessionId,
       activityId,
+      preset,
       status: 'queued',
       createdAt,
       updatedAt: createdAt,
@@ -75,8 +87,8 @@ export class RouteVideoExportManager {
       downloadUrl: null,
       error: null,
       metrics: {
-        totalFrames: null,
-        durationSeconds: null,
+        totalFrames: renderEstimate.totalFrames,
+        durationSeconds: renderEstimate.durationSeconds,
       },
       workDir,
     };
@@ -140,15 +152,22 @@ export class RouteVideoExportManager {
       }
 
       const payload = await this.buildPayload(session, job.activityId);
+      const presetConfig = resolveRouteVideoExportPresetConfig(job.preset);
+      const renderEstimate = estimateRouteVideoRenderMetrics(payload.totalDistanceKm, presetConfig.outputFps);
       this.updateJob(job.id, {
         progress: 0.06,
         message: 'Ruta densa y relieve listos.',
+        metrics: {
+          totalFrames: renderEstimate.totalFrames,
+          durationSeconds: renderEstimate.durationSeconds,
+        },
       });
 
       const renderResult = await this.render({
         jobId: job.id,
         workDir: job.workDir,
         payload,
+        preset: job.preset,
         summary: job.summary,
         onProgress: (progress, message) => {
           this.updateJob(job.id, {
@@ -205,6 +224,7 @@ export class RouteVideoExportManager {
       id: job.id,
       sessionId: job.sessionId,
       activityId: job.activityId,
+      preset: job.preset,
       status: job.status,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,

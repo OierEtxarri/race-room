@@ -1911,52 +1911,58 @@
   gap: 0.75rem;
 }
 
+.video-export-presets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.video-export-preset {
+  display: grid;
+  gap: 0.22rem;
+  text-align: left;
+  padding: 0.85rem 0.95rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--heading);
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    transform 180ms ease;
+}
+
+.video-export-preset strong {
+  font-size: 0.94rem;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.video-export-preset span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.video-export-preset.selected {
+  border-color: rgba(83, 157, 245, 0.28);
+  background:
+    linear-gradient(90deg, rgba(83, 157, 245, 0.12), rgba(242, 87, 116, 0.06)),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(83, 157, 245, 0.08);
+}
+
+.video-export-preset:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+  transform: none;
+}
+
 .overlay-export-note {
   color: var(--muted);
   line-height: 1.45;
-}
-
-.overlay-export-progress {
-  display: grid;
-  gap: 0.55rem;
-  padding: 0.9rem 1rem;
-  border-radius: 16px;
-  border: 1px solid rgba(83, 157, 245, 0.18);
-  background: linear-gradient(90deg, rgba(83, 157, 245, 0.12), rgba(242, 87, 116, 0.06)), #202020;
-}
-
-.overlay-export-progress-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-
-.overlay-export-progress-head strong {
-  color: var(--heading);
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  letter-spacing: 0.04em;
-}
-
-.overlay-export-progress-track {
-  overflow: hidden;
-  height: 0.5rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.overlay-export-progress-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-deep) 62%, var(--accent-warm) 100%);
-  box-shadow: 0 0 22px rgba(83, 157, 245, 0.22);
-  transition: width 360ms linear;
-  will-change: width;
+  min-height: 2.9rem;
 }
 
 .overlay-template-grid {
@@ -2626,6 +2632,51 @@
   transition:
     background 180ms ease,
     border-color 180ms ease;
+}
+
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.export-progress-button {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  min-height: 3.35rem;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.export-progress-button::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--export-progress-ratio, 0) * 100%);
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-deep) 62%, var(--accent-warm) 100%);
+  box-shadow: 0 0 22px rgba(83, 157, 245, 0.22);
+  transition: width 280ms linear;
+  will-change: width;
+  z-index: 0;
+}
+
+.export-progress-button.is-exporting {
+  border-color: rgba(83, 157, 245, 0.26);
+  background:
+    linear-gradient(90deg, rgba(83, 157, 245, 0.12), rgba(242, 87, 116, 0.06)),
+    #202020;
+}
+
+.export-progress-button.is-exporting:disabled {
+  cursor: wait;
+  opacity: 1;
+}
+
+.export-progress-button-label {
+  position: relative;
+  z-index: 1;
+  display: block;
+  max-width: 100%;
 }
 
 .recharts-cartesian-axis-tick-value,

@@ -270,10 +270,13 @@ export type RouteVideoRenderSummary = {
   elevationGain: number | null;
 };
 
+export type RouteVideoExportPreset = 'fast' | 'high';
+
 export type RouteVideoExportJob = {
   id: string;
   sessionId: string;
   activityId: number;
+  preset: RouteVideoExportPreset;
   status: 'queued' | 'rendering' | 'done' | 'error';
   createdAt: string;
   updatedAt: string;

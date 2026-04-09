@@ -6,6 +6,7 @@ import {
   useEffectEvent,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
 } from 'react';
 import {
@@ -26,7 +27,7 @@ import {
   CanvasSource,
   Output,
   WebMOutputFormat,
-  QUALITY_HIGH,
+  QUALITY_MEDIUM,
   getFirstEncodableVideoCodec,
 } from 'mediabunny';
 import type {
@@ -34,6 +35,7 @@ import type {
   DashboardActivitySummary,
   DashboardData,
   RouteVideoExportJob,
+  RouteVideoExportPreset,
   RouteVideoRenderSummary,
   SessionPayload,
   UserGoal,
@@ -261,17 +263,41 @@ const runOverlayTemplate = {
   headline: 'Blur card editorial',
   description: 'Poster glass horizontal con mapa premium, avatar y métricas pensadas para compartir.',
 };
-const routeVideoDurationMs = 20_000;
-const routeVideoFps = 15;
+const routeVideoPresetOptions: Array<{
+  id: RouteVideoExportPreset;
+  label: string;
+  detail: string;
+  idleNote: string;
+  exportingNote: string;
+}> = [
+  {
+    id: 'fast',
+    label: 'Rápido',
+    detail: '720p · 20 fps',
+    idleNote: 'MP4 vertical 720x1280 a 20 fps, con captura ligera para reducir la espera.',
+    exportingNote: 'El render corre en servidor como MP4 vertical 720x1280 a 20 fps. Mantén esta vista abierta hasta que termine la descarga.',
+  },
+  {
+    id: 'high',
+    label: 'Alta calidad',
+    detail: '1080p · 25 fps',
+    idleNote: 'MP4 vertical 1080x1920 a 25 fps, con más detalle en texto, relieve y etiquetas.',
+    exportingNote:
+      'El render corre en servidor como MP4 vertical 1080x1920 a 25 fps. Mantén esta vista abierta hasta que termine la descarga.',
+  },
+];
+const routeVideoDurationMs = 24_000;
+const routeVideoFps = 20;
 const routeVideoRenderScale = 1;
-const routeVideoTileOverscanPx = 280;
+const routeVideoTileOverscanPx = 240;
 const routeVideoHighlightColor = '#ff5a36';
 const routeVideoLegacyFallbackEnabled = false;
+const routeVideoDebugEnabled = false;
 const routeVideoPerspective = {
   followScale: 2.2,
-  sourceWidthMultiplier: 1.22,
-  sourceHeightMultiplier: 1.55,
-  sourceResolutionScale: 1.45,
+  sourceWidthMultiplier: 1.16,
+  sourceHeightMultiplier: 1.48,
+  sourceResolutionScale: 1.2,
   sourceFocusX: 0.5,
   sourceFocusY: 0.88,
   horizonRatio: 0.1,
@@ -294,6 +320,12 @@ function canvasDisplayFont(sizePx: number, weight: number | string) {
 
 function canvasTextFont(sizePx: number, weight: number | string) {
   return `${weight} ${sizePx}px ${canvasTextFontFamily}`;
+}
+
+function routeVideoDebugLog(...args: unknown[]) {
+  if (routeVideoDebugEnabled) {
+    console.log(...args);
+  }
 }
 
 function cssVar(name: string, fallback: string) {
@@ -665,7 +697,7 @@ async function encodeRouteVideoCanvasOffline(input: {
   const codec = await getFirstEncodableVideoCodec(outputFormat.getSupportedVideoCodecs(), {
     width: input.canvas.width,
     height: input.canvas.height,
-    bitrate: QUALITY_HIGH,
+    bitrate: QUALITY_MEDIUM,
   });
 
   if (!codec) {
@@ -678,7 +710,7 @@ async function encodeRouteVideoCanvasOffline(input: {
   });
   const source = new CanvasSource(input.canvas, {
     codec,
-    bitrate: QUALITY_HIGH,
+    bitrate: QUALITY_MEDIUM,
   });
 
   output.addVideoTrack(source, {
@@ -692,9 +724,9 @@ async function encodeRouteVideoCanvasOffline(input: {
       input.renderFrame(frameIndex);
       await source.add(frameIndex / routeVideoFps, 1 / routeVideoFps);
 
-      if (frameIndex % 20 === 0) {
+      if (routeVideoDebugEnabled && frameIndex % 20 === 0) {
         const progress = clampNumber(frameIndex / Math.max(input.totalFrames - 1, 1), 0, 1);
-        console.log(`[exportRunRouteVideo] frame ${frameIndex + 1}/${input.totalFrames} progress=${progress.toFixed(3)}`);
+        routeVideoDebugLog(`[exportRunRouteVideo] frame ${frameIndex + 1}/${input.totalFrames} progress=${progress.toFixed(3)}`);
       }
     }
 
@@ -3020,20 +3052,21 @@ function drawVideoForeground(
   const completion = clampNumber(run.distanceKm > 0 ? playbackState.distanceKm / run.distanceKm : playbackState.progress, 0, 1);
   const metricX = layout.metricsCard.x;
   const metricY = layout.metricsCard.y;
-  const metricGap = 10;
+  const metricGap = 8;
   const metricWidth = (layout.metricsCard.w - metricGap * 2) / 3;
   const metricHeight = layout.metricsCard.h;
+  const metricInset = 18;
 
   context.fillStyle = theme.heading;
-  context.font = canvasDisplayFont(24, 650);
-  wrapCanvasText(context, run.name.toUpperCase(), layout.header.x, layout.header.y + 28, layout.header.w, 26, 2);
+  context.font = canvasDisplayFont(30, 650);
+  wrapCanvasText(context, run.name.toUpperCase(), layout.header.x, layout.header.y + 32, layout.header.w, 32, 2);
 
   context.fillStyle = 'rgba(255,255,255,0.7)';
-  context.font = canvasTextFont(12, 600);
+  context.font = canvasTextFont(14, 600);
   context.fillText(
     `${athleteName.toUpperCase()} · ${run.date}${run.timeLabel ? ` · ${run.timeLabel}` : ''}`,
     layout.header.x,
-    layout.header.y + 64,
+    layout.header.y + 80,
   );
 
   const metricPanels = [
@@ -3051,25 +3084,25 @@ function drawVideoForeground(
       lineWidth: 0.8,
     });
     context.fillStyle = 'rgba(255,255,255,0.58)';
-    context.font = canvasTextFont(11, 600);
-    context.fillText(panel.label, panelX + 16, metricY + 22);
+    context.font = canvasTextFont(12, 600);
+    context.fillText(panel.label, panelX + metricInset, metricY + 24);
     context.fillStyle = theme.heading;
-    context.font = canvasDisplayFont(index === 0 ? 34 : 30, 650);
-    context.fillText(panel.value, panelX + 16, metricY + 58);
+    context.font = canvasDisplayFont(index === 0 ? 40 : 34, 650);
+    context.fillText(panel.value, panelX + metricInset, metricY + 68);
     if (panel.suffix) {
       context.fillStyle = 'rgba(255,255,255,0.62)';
-      context.font = canvasTextFont(12, 600);
-      context.fillText(panel.suffix, panelX + 16, metricY + 76);
+      context.font = canvasTextFont(13, 600);
+      context.fillText(panel.suffix, panelX + metricInset, metricY + 90);
     }
   });
 
-  fillRoundedPanel(context, layout.outerPadding, metricY + metricHeight + 14, width - layout.outerPadding * 2, 8, {
+  fillRoundedPanel(context, layout.outerPadding, metricY + metricHeight + 16, width - layout.outerPadding * 2, 10, {
     radius: 999,
     fill: 'rgba(255,255,255,0.14)',
   });
   const progressGradient = context.createLinearGradient(
-    layout.outerPadding, metricY + metricHeight + 14,
-    width - layout.outerPadding, metricY + metricHeight + 14,
+    layout.outerPadding, metricY + metricHeight + 16,
+    width - layout.outerPadding, metricY + metricHeight + 16,
   );
   progressGradient.addColorStop(0, '#ff7a45');
   progressGradient.addColorStop(0.6, routeVideoHighlightColor);
@@ -3077,9 +3110,9 @@ function drawVideoForeground(
   fillRoundedPanel(
     context,
     layout.outerPadding,
-    metricY + metricHeight + 14,
+    metricY + metricHeight + 16,
     (width - layout.outerPadding * 2) * completion,
-    8,
+    10,
     {
       radius: 999,
       fill: progressGradient,
@@ -3142,12 +3175,26 @@ async function drawStaticRouteMapCard(
   });
 }
 
-function formatOverlayExportPercent(progress: number) {
-  const percent = clampNumber(progress, 0, 1) * 100;
-  if (percent >= 99.95) {
-    return '100%';
+function buildRunVideoExportStatusLabel(
+  message: string | null,
+  metrics: RouteVideoExportJob['metrics'] | null,
+) {
+  const baseMessage = (message ?? 'Generando vídeo...').trim().replace(/\.$/, '');
+  const totalFrames = metrics?.totalFrames ?? null;
+
+  if (!totalFrames) {
+    return baseMessage;
   }
-  return `${percent.toFixed(1)}%`;
+
+  if (
+    /\bframes?\b/i.test(baseMessage) ||
+    /\bmp4\b/i.test(baseMessage) ||
+    /vídeo listo/i.test(baseMessage)
+  ) {
+    return baseMessage;
+  }
+
+  return `${baseMessage} · ${totalFrames} frames`;
 }
 
 function buildOverlayHeadline(name: string) {
@@ -4320,7 +4367,7 @@ async function exportRunRouteVideo(input: {
   providerLabel: string;
 }) {
   await document.fonts.ready.catch(() => undefined);
-  console.log('[exportRunRouteVideo] start', { runId: input.run.id, date: input.run.date });
+  routeVideoDebugLog('[exportRunRouteVideo] start', { runId: input.run.id, date: input.run.date });
 
   const fallbackFormat = pickRouteVideoExportFormat();
   if (!supportsOfflineRouteVideoExport() && !fallbackFormat) {
@@ -4450,11 +4497,11 @@ async function exportRunRouteVideo(input: {
   });
 
   const visibleTiles = Array.from(visibleTileMap.values());
-  console.log('[exportRunRouteVideo] key cameras', keyCameras.length, 'visible tile bundles', visibleTiles.length);
+  routeVideoDebugLog('[exportRunRouteVideo] key cameras', keyCameras.length, 'visible tile bundles', visibleTiles.length);
 
   const preloadStart = performance.now();
   await preloadVisibleTileBundles(visibleTiles);
-  console.log('[exportRunRouteVideo] preload complete', visibleTiles.length, 'tiles in', Math.round(performance.now() - preloadStart), 'ms');
+  routeVideoDebugLog('[exportRunRouteVideo] preload complete', visibleTiles.length, 'tiles in', Math.round(performance.now() - preloadStart), 'ms');
 
   if (visibleTiles.length === 0) {
     throw new Error('No hay tiles visibles para generar el video.');
@@ -4567,7 +4614,7 @@ async function exportRunRouteVideo(input: {
     drawVideoForeground(context, layout, playbackState, input.run, input.athleteName, input.providerLabel, theme);
   };
 
-  console.log('[exportRunRouteVideo] totalFrames', totalFrames, 'durationMs', routeVideoDurationMs, 'fps', routeVideoFps);
+  routeVideoDebugLog('[exportRunRouteVideo] totalFrames', totalFrames, 'durationMs', routeVideoDurationMs, 'fps', routeVideoFps);
   const offlineResult = await encodeRouteVideoCanvasOffline({
     canvas,
     totalFrames,
@@ -4578,7 +4625,7 @@ async function exportRunRouteVideo(input: {
 
   if (offlineResult) {
     downloadBlobAsset(offlineResult.blob, `run-route-video-${input.run.date}-${input.run.id}.${offlineResult.extension}`);
-    console.log('[exportRunRouteVideo] finished', {
+    routeVideoDebugLog('[exportRunRouteVideo] finished', {
       durationMs: routeVideoDurationMs,
       totalFrames,
       mode: 'offline',
@@ -4607,7 +4654,7 @@ async function exportRunRouteVideo(input: {
   try {
     recorder = new MediaRecorder(stream, {
       mimeType: fallbackFormat.mimeType,
-      videoBitsPerSecond: 22_000_000,
+      videoBitsPerSecond: 12_000_000,
     });
   } catch {
     recorder = new MediaRecorder(stream);
@@ -4626,7 +4673,7 @@ async function exportRunRouteVideo(input: {
   });
 
   recorder.start();
-  console.log('[exportRunRouteVideo] recorder started', recorder.state);
+  routeVideoDebugLog('[exportRunRouteVideo] recorder started', recorder.state);
   videoTrack.requestFrame?.();
 
   try {
@@ -4645,8 +4692,8 @@ async function exportRunRouteVideo(input: {
           renderVideoFrame(progress);
           videoTrack.requestFrame?.();
 
-          if (currentFrame % 20 === 0) {
-            console.log(`[exportRunRouteVideo] frame ${currentFrame + 1}/${totalFrames} progress=${progress.toFixed(3)}`);
+          if (routeVideoDebugEnabled && currentFrame % 20 === 0) {
+            routeVideoDebugLog(`[exportRunRouteVideo] frame ${currentFrame + 1}/${totalFrames} progress=${progress.toFixed(3)}`);
           }
 
           currentFrame += 1;
@@ -4671,14 +4718,14 @@ async function exportRunRouteVideo(input: {
   } finally {
     if (recorder.state !== 'inactive') {
       recorder.stop();
-      console.log('[exportRunRouteVideo] recorder stopped');
+      routeVideoDebugLog('[exportRunRouteVideo] recorder stopped');
     }
   }
 
   const blob = await finished;
   stream.getTracks().forEach((track) => track.stop());
   downloadBlobAsset(blob, `run-route-video-${input.run.date}-${input.run.id}.${fallbackFormat.extension}`);
-  console.log('[exportRunRouteVideo] finished', { durationMs: routeVideoDurationMs, totalFrames });
+  routeVideoDebugLog('[exportRunRouteVideo] finished', { durationMs: routeVideoDurationMs, totalFrames });
 }
 
 function apiUrl(pathname: string) {
@@ -5096,8 +5143,10 @@ function App() {
   const [routeState, setRouteState] = useState<RouteState>(idleRouteState);
   const [isExportingRunImage, setIsExportingRunImage] = useState(false);
   const [isExportingRunVideo, setIsExportingRunVideo] = useState(false);
+  const [selectedRunVideoPreset, setSelectedRunVideoPreset] = useState<RouteVideoExportPreset>('high');
   const [runVideoExportMessage, setRunVideoExportMessage] = useState<string | null>(null);
   const [runVideoExportProgress, setRunVideoExportProgress] = useState<number | null>(null);
+  const [runVideoExportMetrics, setRunVideoExportMetrics] = useState<RouteVideoExportJob['metrics'] | null>(null);
   const [runVideoExportDisplayProgress, setRunVideoExportDisplayProgress] = useState<number | null>(null);
   const runVideoExportDisplayProgressRef = useRef<number | null>(null);
   const runVideoExportProgressAnimationRef = useRef<number | null>(null);
@@ -5121,6 +5170,17 @@ function App() {
   const isAuthBusy = loginState.status === 'submitting' || loginState.status === 'hydrating';
   const stravaPublicLoginEnabled = publicAuthProviders.includes('strava');
   const canExportRunVideo = supportsRouteVideoExport();
+  const selectedRunVideoPresetMeta =
+    routeVideoPresetOptions.find((preset) => preset.id === selectedRunVideoPreset) ?? routeVideoPresetOptions[1]!;
+  const runVideoExportButtonLabel = buildRunVideoExportStatusLabel(runVideoExportMessage, runVideoExportMetrics);
+  const runVideoExportButtonProgress = isExportingRunVideo
+    ? clampNumber(runVideoExportDisplayProgress ?? runVideoExportProgress ?? 0, 0, 1)
+    : 0;
+  const runVideoExportButtonStyle = isExportingRunVideo
+    ? ({
+        '--export-progress-ratio': `${runVideoExportButtonProgress}`,
+      } as CSSProperties)
+    : undefined;
   const resolvedRecentActivities =
     state.status === 'ready'
       ? (state.data.recentActivities.length ? state.data.recentActivities : state.data.recentRuns)
@@ -5189,6 +5249,11 @@ function App() {
     setSessionAccountLabel(null);
     setSelectedRunId(null);
     setRouteState(idleRouteState);
+    setIsExportingRunImage(false);
+    setIsExportingRunVideo(false);
+    setRunVideoExportMessage(null);
+    setRunVideoExportProgress(null);
+    setRunVideoExportMetrics(null);
     setGoalDraft(defaultGoal);
     setCheckInDraft(defaultCheckInDraft);
     setCheckInState({
@@ -6495,8 +6560,11 @@ function App() {
     }
 
     setIsExportingRunVideo(true);
-    setRunVideoExportMessage('Preparando export 3D...');
+    setRunVideoExportMessage(
+      selectedRunVideoPreset === 'fast' ? 'Preparando export rápido...' : 'Preparando export alta calidad...',
+    );
     setRunVideoExportProgress(0.02);
+    setRunVideoExportMetrics(null);
 
     try {
       const summary: RouteVideoRenderSummary = {
@@ -6515,6 +6583,7 @@ function App() {
       const createResponse = await apiFetch(`/api/activities/${selectedRun.id}/video-export`, {
         method: 'POST',
         body: JSON.stringify({
+          preset: selectedRunVideoPreset,
           summary,
         }),
       });
@@ -6527,6 +6596,7 @@ function App() {
       let job = createPayload as RouteVideoExportJob;
       setRunVideoExportMessage(job.message);
       setRunVideoExportProgress(job.progress);
+      setRunVideoExportMetrics(job.metrics);
 
       while (job.status === 'queued' || job.status === 'rendering') {
         await new Promise((resolve) =>
@@ -6542,6 +6612,7 @@ function App() {
         job = statusPayload as RouteVideoExportJob;
         setRunVideoExportMessage(job.message);
         setRunVideoExportProgress(job.progress);
+        setRunVideoExportMetrics(job.metrics);
       }
 
       if (job.status === 'error') {
@@ -6580,6 +6651,7 @@ function App() {
       setIsExportingRunVideo(false);
       setRunVideoExportMessage(null);
       setRunVideoExportProgress(null);
+      setRunVideoExportMetrics(null);
     }
   };
   const scheduleWorkout = async (weekIndex: number, dayIndex: number) => {
@@ -6913,6 +6985,20 @@ function App() {
                       <span>stats</span>
                     </div>
                   </div>
+                  <div className="video-export-presets" aria-label="Preset del vídeo" role="group">
+                    {routeVideoPresetOptions.map((preset) => (
+                      <button
+                        key={preset.id}
+                        className={`video-export-preset${selectedRunVideoPreset === preset.id ? ' selected' : ''}`}
+                        disabled={isExportingRunVideo}
+                        onClick={() => setSelectedRunVideoPreset(preset.id)}
+                        type="button"
+                      >
+                        <strong>{preset.label}</strong>
+                        <span>{preset.detail}</span>
+                      </button>
+                    ))}
+                  </div>
                   <div className="spotlight-actions">
                     <button
                       className="secondary-button"
@@ -6927,43 +7013,28 @@ function App() {
                           : 'Descargar PNG glass'}
                     </button>
                     <button
-                      className="secondary-button"
+                      className={`secondary-button export-progress-button${isExportingRunVideo ? ' is-exporting' : ''}`}
+                      aria-busy={isExportingRunVideo}
                       disabled={!canExportRunVideo || isExportingRunVideo || selectedRun.distanceKm <= 0}
                       onClick={() => void exportSelectedRunVideo()}
+                      style={runVideoExportButtonStyle}
                       type="button"
                     >
-                      {!canExportRunVideo
-                        ? 'Vídeo no disponible aquí'
-                        : isExportingRunVideo
-                          ? runVideoExportMessage ?? 'Generando vídeo...'
-                          : selectedRun.distanceKm <= 0
-                            ? 'Ruta no exportable'
-                            : 'Descargar vídeo ruta'}
+                      <span className="export-progress-button-label">
+                        {!canExportRunVideo
+                          ? 'Vídeo no disponible aquí'
+                          : isExportingRunVideo
+                            ? runVideoExportButtonLabel
+                            : selectedRun.distanceKm <= 0
+                              ? 'Ruta no exportable'
+                              : 'Descargar vídeo ruta'}
+                      </span>
                     </button>
                   </div>
-                  {isExportingRunVideo && runVideoExportDisplayProgress !== null ? (
-                    <div
-                      className="overlay-export-progress"
-                      aria-label="Progreso del export del vídeo"
-                      aria-valuemax={100}
-                      aria-valuemin={0}
-                      aria-valuenow={Math.round(runVideoExportDisplayProgress * 100)}
-                      role="progressbar"
-                    >
-                      <div className="overlay-export-progress-head">
-                        <span>{runVideoExportMessage ?? 'Generando vídeo...'}</span>
-                        <strong>{formatOverlayExportPercent(runVideoExportDisplayProgress)}</strong>
-                      </div>
-                      <div className="overlay-export-progress-track">
-                        <span
-                          className="overlay-export-progress-fill"
-                          style={{ width: `${(runVideoExportDisplayProgress * 100).toFixed(3)}%` }}
-                        />
-                      </div>
-                    </div>
-                  ) : null}
                   <small className="overlay-export-note">
-                    {runVideoExportMessage ?? 'El vídeo se renderiza en servidor como MP4 vertical 1080x1920 con cámara 3D y duración variable.'}
+                    {isExportingRunVideo
+                      ? selectedRunVideoPresetMeta.exportingNote
+                      : selectedRunVideoPresetMeta.idleNote}
                   </small>
                 </div>
               </aside>

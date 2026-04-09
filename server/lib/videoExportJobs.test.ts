@@ -95,10 +95,11 @@ test('RouteVideoExportManager runs queued jobs to completion', async () => {
   });
 
   try {
-    const job = await manager.createJob(session.id, 123, summary);
+    const job = await manager.createJob(session.id, 123, summary, 'high');
     const settled = await waitForSettled(manager, session.id, job.id);
 
     assert.equal(settled.status, 'done');
+    assert.equal(settled.preset, 'high');
     assert.equal(settled.metrics.totalFrames, 120);
     assert.ok(settled.downloadUrl);
   } finally {
@@ -119,7 +120,7 @@ test('RouteVideoExportManager surfaces renderer failures', async () => {
   });
 
   try {
-    const job = await manager.createJob(session.id, 123, summary);
+    const job = await manager.createJob(session.id, 123, summary, 'high');
     const settled = await waitForSettled(manager, session.id, job.id);
 
     assert.equal(settled.status, 'error');

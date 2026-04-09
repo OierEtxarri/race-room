@@ -10,25 +10,26 @@ import {
 } from '../../src/mapStyle.ts';
 import {
   calculateRouteBearingDegrees,
-  calculateRouteVideoRenderFps,
   clampNumber,
   createRouteVideoTimeline,
   distanceBetweenGeoPointsMeters,
+  estimateRouteVideoRenderMetrics,
   findRoutePointIndexByDistance,
   lerpNumber,
   routeProgressAtElapsedSeconds,
 } from './videoExportMath.ts';
+import {
+  DEFAULT_ROUTE_VIDEO_EXPORT_PRESET,
+  resolveRouteVideoExportPresetConfig,
+  type RouteVideoExportPresetConfig,
+} from './videoExportPresets.ts';
 import type {
+  RouteVideoExportPreset,
   RouteVideoPayload,
   RouteVideoRenderResult,
   RouteVideoRenderSummary,
 } from './videoExportTypes.ts';
 
-const VIDEO_OUTPUT_WIDTH = 1080;
-const VIDEO_OUTPUT_HEIGHT = 1920;
-const VIDEO_RENDER_WIDTH = 540;
-const VIDEO_RENDER_HEIGHT = 960;
-const VIDEO_OUTPUT_FPS = 25;
 const ROUTE_VIDEO_BOOT_TIMEOUT_MS = 45_000;
 const CHROMIUM_RENDER_ARGS = [
   '--use-angle=swiftshader',
@@ -38,14 +39,11 @@ const CHROMIUM_RENDER_ARGS = [
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
 ];
-const MAP_RENDER_PIXEL_RATIO = 1;
 const FOLLOW_CAMERA_PITCH = 68;
 const FOLLOW_CAMERA_ZOOM = 16.2;
 const FOLLOW_CAMERA_BEHIND_METERS = 24;
 const FOLLOW_CAMERA_AHEAD_METERS = 52;
 const FOLLOW_CAMERA_FOCUS_AHEAD_METERS = 10;
-const RENDER_SCALE_X = VIDEO_RENDER_WIDTH / VIDEO_OUTPUT_WIDTH;
-const RENDER_SCALE_Y = VIDEO_RENDER_HEIGHT / VIDEO_OUTPUT_HEIGHT;
 const VIDEO_BASE_MAP_STYLE = {
   version: 8,
   sources: {
@@ -116,37 +114,65 @@ const VIDEO_BASE_MAP_STYLE = {
   ],
 } as const;
 
-function scalePadding(padding: { top: number; bottom: number; left: number; right: number }) {
+type RouteVideoRenderLayout = {
+  renderScaleX: number;
+  renderScaleY: number;
+  followPadding: { top: number; bottom: number; left: number; right: number };
+  overviewPadding: { top: number; bottom: number; left: number; right: number };
+  finishPadding: { top: number; bottom: number; left: number; right: number };
+  scaleRenderPx: (value: number) => number;
+};
+
+function scalePadding(
+  padding: { top: number; bottom: number; left: number; right: number },
+  layout: Pick<RouteVideoRenderLayout, 'renderScaleX' | 'renderScaleY'>,
+) {
   return {
-    top: Math.round(padding.top * RENDER_SCALE_Y),
-    bottom: Math.round(padding.bottom * RENDER_SCALE_Y),
-    left: Math.round(padding.left * RENDER_SCALE_X),
-    right: Math.round(padding.right * RENDER_SCALE_X),
+    top: Math.round(padding.top * layout.renderScaleY),
+    bottom: Math.round(padding.bottom * layout.renderScaleY),
+    left: Math.round(padding.left * layout.renderScaleX),
+    right: Math.round(padding.right * layout.renderScaleX),
   };
 }
 
-function scaleRenderPx(value: number) {
-  return Math.round(value * RENDER_SCALE_X);
-}
+function createRouteVideoRenderLayout(preset: RouteVideoExportPresetConfig): RouteVideoRenderLayout {
+  const renderScaleX = preset.renderWidth / preset.outputWidth;
+  const renderScaleY = preset.renderHeight / preset.outputHeight;
+  const scaleRenderPx = (value: number) => Math.round(value * renderScaleX);
 
-const FOLLOW_PADDING = scalePadding({
-  top: 980,
-  bottom: 240,
-  left: 120,
-  right: 120,
-});
-const OVERVIEW_PADDING = scalePadding({
-  top: 190,
-  bottom: 270,
-  left: 120,
-  right: 120,
-});
-const FINISH_PADDING = scalePadding({
-  top: 220,
-  bottom: 320,
-  left: 140,
-  right: 140,
-});
+  return {
+    renderScaleX,
+    renderScaleY,
+    followPadding: scalePadding(
+      {
+        top: 980,
+        bottom: 240,
+        left: 120,
+        right: 120,
+      },
+      { renderScaleX, renderScaleY },
+    ),
+    overviewPadding: scalePadding(
+      {
+        top: 190,
+        bottom: 270,
+        left: 120,
+        right: 120,
+      },
+      { renderScaleX, renderScaleY },
+    ),
+    finishPadding: scalePadding(
+      {
+        top: 220,
+        bottom: 320,
+        left: 140,
+        right: 140,
+      },
+      { renderScaleX, renderScaleY },
+    ),
+    scaleRenderPx,
+  };
+}
 
 type RenderFrameState = {
   phase: 'overview' | 'descent' | 'follow' | 'finish';
@@ -265,7 +291,11 @@ function rawFollowCameraForProgress(
   };
 }
 
-function buildFollowFrames(payload: RouteVideoPayload, renderFps: number) {
+function buildFollowFrames(
+  payload: RouteVideoPayload,
+  renderFps: number,
+  layout: RouteVideoRenderLayout,
+) {
   const timeline = createRouteVideoTimeline(payload.totalDistanceKm);
   const followFrameCount = Math.max(1, Math.round(timeline.followSeconds * renderFps));
   const followFrames: RenderFrameState[] = [];
@@ -300,7 +330,7 @@ function buildFollowFrames(payload: RouteVideoPayload, renderFps: number) {
       pitch: raw.pitch,
       zoom: raw.zoom,
       terrainExaggeration: raw.terrainExaggeration,
-      padding: FOLLOW_PADDING,
+      padding: layout.followPadding,
       currentDistanceKm: raw.currentDistanceKm,
       currentElapsedSeconds: raw.currentElapsedSeconds,
       currentPaceSecondsPerKm: raw.currentPaceSecondsPerKm,
@@ -314,17 +344,21 @@ function buildFollowFrames(payload: RouteVideoPayload, renderFps: number) {
   return followFrames;
 }
 
-function buildRenderFrames(payload: RouteVideoPayload) {
+function buildRenderFrames(payload: RouteVideoPayload, preset: RouteVideoExportPresetConfig) {
   const timeline = createRouteVideoTimeline(payload.totalDistanceKm);
-  const renderFps = calculateRouteVideoRenderFps(timeline.totalSeconds);
-  const totalFrames = Math.max(2, Math.round(timeline.totalSeconds * renderFps));
-  const followFrames = buildFollowFrames(payload, renderFps);
+  const layout = createRouteVideoRenderLayout(preset);
+  const {
+    captureFrames,
+    durationSeconds: totalDurationSeconds,
+    renderFps,
+  } = estimateRouteVideoRenderMetrics(payload.totalDistanceKm, preset.outputFps);
+  const followFrames = buildFollowFrames(payload, renderFps, layout);
   const terrainExaggeration = terrainExaggerationForPayload(payload);
   const firstFollowFrame = followFrames[0] ?? rawFollowCameraForProgress(payload, 0, terrainExaggeration);
   const lastFollowFrame = followFrames.at(-1) ?? firstFollowFrame;
   const frames: RenderFrameState[] = [];
 
-  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+  for (let frameIndex = 0; frameIndex < captureFrames; frameIndex += 1) {
     const elapsedSeconds = frameIndex / renderFps;
     const routeProgress = routeProgressAtElapsedSeconds(timeline, elapsedSeconds);
     const overviewEnd = timeline.overviewSeconds;
@@ -342,7 +376,7 @@ function buildRenderFrames(payload: RouteVideoPayload) {
         pitch: 0,
         zoom: 0,
         terrainExaggeration,
-        padding: OVERVIEW_PADDING,
+        padding: layout.overviewPadding,
         currentDistanceKm: 0,
         currentElapsedSeconds: 0,
         currentPaceSecondsPerKm: payload.points[0]?.paceSecondsPerKm ?? null,
@@ -363,10 +397,10 @@ function buildRenderFrames(payload: RouteVideoPayload) {
         zoom: lerpNumber(0, firstFollowFrame.zoom, phaseProgress),
         terrainExaggeration,
         padding: {
-          top: Math.round(lerpNumber(OVERVIEW_PADDING.top, FOLLOW_PADDING.top, phaseProgress)),
-          bottom: Math.round(lerpNumber(OVERVIEW_PADDING.bottom, FOLLOW_PADDING.bottom, phaseProgress)),
-          left: Math.round(lerpNumber(OVERVIEW_PADDING.left, FOLLOW_PADDING.left, phaseProgress)),
-          right: Math.round(lerpNumber(OVERVIEW_PADDING.right, FOLLOW_PADDING.right, phaseProgress)),
+          top: Math.round(lerpNumber(layout.overviewPadding.top, layout.followPadding.top, phaseProgress)),
+          bottom: Math.round(lerpNumber(layout.overviewPadding.bottom, layout.followPadding.bottom, phaseProgress)),
+          left: Math.round(lerpNumber(layout.overviewPadding.left, layout.followPadding.left, phaseProgress)),
+          right: Math.round(lerpNumber(layout.overviewPadding.right, layout.followPadding.right, phaseProgress)),
         },
         currentDistanceKm: 0,
         currentElapsedSeconds: 0,
@@ -394,7 +428,7 @@ function buildRenderFrames(payload: RouteVideoPayload) {
       pitch: lerpNumber(lastFollowFrame.pitch, 12, (elapsedSeconds - finishStart) / timeline.finishHoldSeconds),
       zoom: lastFollowFrame.zoom,
       terrainExaggeration: lastFollowFrame.terrainExaggeration,
-      padding: FINISH_PADDING,
+      padding: layout.finishPadding,
       currentDistanceKm: payload.totalDistanceKm,
       currentElapsedSeconds: payload.totalElapsedSeconds,
       currentPaceSecondsPerKm: payload.points.at(-1)?.paceSecondsPerKm ?? lastFollowFrame.currentPaceSecondsPerKm,
@@ -403,8 +437,8 @@ function buildRenderFrames(payload: RouteVideoPayload) {
 
   return {
     frames,
-    totalFrames,
-    totalDurationSeconds: timeline.totalSeconds,
+    totalFrames: captureFrames,
+    totalDurationSeconds,
     renderFps,
   };
 }
@@ -447,7 +481,14 @@ function pickWarmupFrames(frames: RenderFrameState[]) {
     .filter(Boolean);
 }
 
-function createRendererHtml(payload: RouteVideoPayload, summary: RouteVideoRenderSummary) {
+function createRendererHtml(
+  payload: RouteVideoPayload,
+  summary: RouteVideoRenderSummary,
+  preset: RouteVideoExportPresetConfig,
+) {
+  const layout = createRouteVideoRenderLayout(preset);
+  const { scaleRenderPx } = layout;
+
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -470,8 +511,8 @@ function createRendererHtml(payload: RouteVideoPayload, summary: RouteVideoRende
       * { box-sizing: border-box; }
       html, body {
         margin: 0;
-        width: ${VIDEO_RENDER_WIDTH}px;
-        height: ${VIDEO_RENDER_HEIGHT}px;
+        width: ${preset.renderWidth}px;
+        height: ${preset.renderHeight}px;
         overflow: hidden;
         background: var(--bg);
         font-family: "SF Pro Display", "Inter", "Segoe UI", sans-serif;
@@ -653,8 +694,8 @@ function createRendererHtml(payload: RouteVideoPayload, summary: RouteVideoRende
         [payload.bounds.maxLng, payload.bounds.maxLat],
       );
 
-      const overviewPadding = ${JSON.stringify(OVERVIEW_PADDING)};
-      const finishPadding = ${JSON.stringify(FINISH_PADDING)};
+      const overviewPadding = ${JSON.stringify(layout.overviewPadding)};
+      const finishPadding = ${JSON.stringify(layout.finishPadding)};
       const terrainSourceId = 'terrain-source';
       const phaseLabels = {
         overview: '2D Overview',
@@ -682,7 +723,7 @@ function createRendererHtml(payload: RouteVideoPayload, summary: RouteVideoRende
         },
       });
 
-      map.setPixelRatio(${MAP_RENDER_PIXEL_RATIO});
+      map.setPixelRatio(${preset.mapRenderPixelRatio});
 
       const titleEl = document.getElementById('title');
       const metaEl = document.getElementById('meta');
@@ -1130,7 +1171,7 @@ function createRendererHtml(payload: RouteVideoPayload, summary: RouteVideoRende
           };
         }
 
-        const safeFps = Math.max(1, Number.isFinite(fps) ? fps : ${VIDEO_OUTPUT_FPS});
+        const safeFps = Math.max(1, Number.isFinite(fps) ? fps : ${preset.outputFps});
         const frameDurationMs = 1000 / safeFps;
         jumpToFrame(frames[0]);
         await waitForTimer(24);
@@ -1427,6 +1468,7 @@ async function writeChunkToStdin(
 async function encodeCapturedFramesToMp4(input: {
   outputFilePath: string;
   captureFps: number;
+  preset: RouteVideoExportPresetConfig;
   frames: RenderFrameState[];
   page: Awaited<ReturnType<Awaited<ReturnType<typeof chromium.launch>>['newPage']>>;
   onFrameCaptured?: (frameIndex: number, totalFrames: number) => void;
@@ -1448,16 +1490,16 @@ async function encodeCapturedFramesToMp4(input: {
     '-i',
     'pipe:0',
     '-vf',
-    `fps=${VIDEO_OUTPUT_FPS},scale=${VIDEO_OUTPUT_WIDTH}:${VIDEO_OUTPUT_HEIGHT}:flags=lanczos`,
+    `fps=${input.preset.outputFps},scale=${input.preset.outputWidth}:${input.preset.outputHeight}:flags=lanczos`,
     '-an',
     '-c:v',
     'libx264',
     '-pix_fmt',
     'yuv420p',
     '-crf',
-    '20',
+    String(input.preset.ffmpegCrf),
     '-preset',
-    'veryfast',
+    input.preset.ffmpegPreset,
     '-movflags',
     '+faststart',
     input.outputFilePath,
@@ -1505,7 +1547,7 @@ async function encodeCapturedFramesToMp4(input: {
 
       const frameBuffer = await input.page.screenshot({
         type: 'jpeg',
-        quality: 82,
+        quality: input.preset.jpegQuality,
         timeout: 0,
         animations: 'disabled',
       });
@@ -1542,10 +1584,19 @@ export async function renderRouteVideoToMp4(input: {
   jobId: string;
   workDir: string;
   payload: RouteVideoPayload;
+  preset?: RouteVideoExportPreset;
   summary: RouteVideoRenderSummary;
   onProgress?: (progress: number, message: string) => void;
 }): Promise<RouteVideoRenderResult> {
-  const { frames, totalFrames, totalDurationSeconds, renderFps } = buildRenderFrames(input.payload);
+  const preset = resolveRouteVideoExportPresetConfig(input.preset ?? DEFAULT_ROUTE_VIDEO_EXPORT_PRESET);
+  const { frames, totalFrames: captureFrameTotal, totalDurationSeconds, renderFps } = buildRenderFrames(
+    input.payload,
+    preset,
+  );
+  const { totalFrames: outputFrameTotal } = estimateRouteVideoRenderMetrics(
+    input.payload.totalDistanceKm,
+    preset.outputFps,
+  );
   const warmupFrames = pickWarmupFrames(frames);
   const outputFilename = `${input.jobId}.mp4`;
   const outputFilePath = path.join(input.workDir, outputFilename);
@@ -1567,8 +1618,8 @@ export async function renderRouteVideoToMp4(input: {
   try {
     context = await browser.newContext({
       viewport: {
-        width: VIDEO_RENDER_WIDTH,
-        height: VIDEO_RENDER_HEIGHT,
+        width: preset.renderWidth,
+        height: preset.renderHeight,
       },
       deviceScaleFactor: 1,
     });
@@ -1589,7 +1640,7 @@ export async function renderRouteVideoToMp4(input: {
       }
     });
 
-    await page.setContent(createRendererHtml(input.payload, input.summary), {
+    await page.setContent(createRendererHtml(input.payload, input.summary, preset), {
       waitUntil: 'load',
     });
     try {
@@ -1629,12 +1680,13 @@ export async function renderRouteVideoToMp4(input: {
       frames[0],
     );
 
-    input.onProgress?.(0.2, `Renderizando ${totalFrames} frames únicos.`);
-    const progressStepFrames = Math.max(1, Math.ceil(totalFrames / 180));
+    input.onProgress?.(0.2, `Renderizando frames 0/${outputFrameTotal}.`);
+    const progressStepFrames = Math.max(1, Math.ceil(captureFrameTotal / 180));
     let lastReportedFrame = 0;
     await encodeCapturedFramesToMp4({
       outputFilePath,
       captureFps: renderFps,
+      preset,
       frames,
       page,
       onFrameCaptured: (frameIndex, frameTotal) => {
@@ -1646,9 +1698,13 @@ export async function renderRouteVideoToMp4(input: {
         }
         lastReportedFrame = frameIndex;
         const captureProgress = frameTotal <= 0 ? 1 : frameIndex / frameTotal;
+        const outputFrameIndex =
+          frameIndex >= frameTotal
+            ? outputFrameTotal
+            : Math.max(1, Math.min(outputFrameTotal, Math.round(captureProgress * outputFrameTotal)));
         input.onProgress?.(
           0.2 + captureProgress * 0.68,
-          `Renderizando frames ${frameIndex}/${frameTotal}.`,
+          `Renderizando frames ${outputFrameIndex}/${outputFrameTotal}.`,
         );
       },
     });
@@ -1667,7 +1723,7 @@ export async function renderRouteVideoToMp4(input: {
   return {
     filePath: outputFilePath,
     outputFilename,
-    totalFrames,
+    totalFrames: outputFrameTotal,
     durationSeconds: totalDurationSeconds,
   };
 }

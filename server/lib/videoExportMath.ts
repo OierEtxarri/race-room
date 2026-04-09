@@ -205,6 +205,20 @@ export function calculateRouteVideoRenderFps(durationSeconds: number) {
   return 18;
 }
 
+export function estimateRouteVideoRenderMetrics(distanceKm: number, outputFps = 25) {
+  const timeline = createRouteVideoTimeline(distanceKm);
+  const renderFps = calculateRouteVideoRenderFps(timeline.totalSeconds);
+  const captureFrames = Math.max(2, Math.round(timeline.totalSeconds * renderFps));
+  const totalFrames = Math.max(2, Math.round(timeline.totalSeconds * Math.max(outputFps, 1)));
+
+  return {
+    captureFrames,
+    totalFrames,
+    durationSeconds: timeline.totalSeconds,
+    renderFps,
+  };
+}
+
 export function createRouteVideoTimeline(distanceKm: number): RouteVideoTimeline {
   const overviewSeconds = 2;
   const descentSeconds = 2.2;

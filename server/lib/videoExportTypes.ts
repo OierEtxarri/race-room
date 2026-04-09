@@ -36,8 +36,11 @@ export type RouteVideoRenderSummary = {
   elevationGain: number | null;
 };
 
+export type RouteVideoExportPreset = 'fast' | 'high';
+
 export type RouteVideoExportRequest = {
   summary: RouteVideoRenderSummary;
+  preset: RouteVideoExportPreset;
 };
 
 export type RouteVideoExportJobStatus = 'queued' | 'rendering' | 'done' | 'error';
@@ -46,6 +49,7 @@ export type RouteVideoExportJob = {
   id: string;
   sessionId: string;
   activityId: number;
+  preset: RouteVideoExportPreset;
   status: RouteVideoExportJobStatus;
   createdAt: string;
   updatedAt: string;

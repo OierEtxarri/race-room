@@ -78,9 +78,9 @@ export const VIDEO_LAYOUT = {
   outerPadding: 20,
   header: {
     x: 20,
-    y: 22,
+    y: 18,
     w: 440,
-    h: 84,
+    h: 98,
   },
   mapCard: {
     x: 0,
@@ -90,11 +90,11 @@ export const VIDEO_LAYOUT = {
     r: 0,
   },
   metricsCard: {
-    x: 20,
-    y: 114,
-    w: 440,
-    h: 86,
-    r: 22,
+    x: 16,
+    y: 124,
+    w: 448,
+    h: 104,
+    r: 24,
   },
 };
 
@@ -102,8 +102,8 @@ export const VIDEO_LAYOUT = {
 export const VIDEO_PHASES = {
   overview: { start: 0.0, end: 0.0 },
   transition: { start: 0.0, end: 0.0 },
-  followCam: { start: 0.0, end: 0.84 },
-  recap: { start: 0.84, end: 1.0 },
+  followCam: { start: 0.0, end: 0.96 },
+  recap: { start: 0.96, end: 1.0 },
 };
 
 // Camera anchor points (in map card coordinate space)

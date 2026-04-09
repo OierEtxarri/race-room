@@ -55,7 +55,8 @@ import {
 } from './lib/userStateStore.ts';
 import { buildRouteVideoPayload } from './lib/videoRoutePayload.ts';
 import { routeVideoExportManager } from './lib/videoExportJobs.ts';
-import type { RouteVideoRenderSummary } from './lib/videoExportTypes.ts';
+import { DEFAULT_ROUTE_VIDEO_EXPORT_PRESET, isRouteVideoExportPreset } from './lib/videoExportPresets.ts';
+import type { RouteVideoExportPreset, RouteVideoRenderSummary } from './lib/videoExportTypes.ts';
 import { config } from './config.ts';
 
 const app = express();
@@ -479,6 +480,14 @@ function parseRouteVideoRenderSummary(value: unknown): RouteVideoRenderSummary |
     paceSecondsPerKm: paceSecondsPerKm !== null && Number.isFinite(paceSecondsPerKm) ? paceSecondsPerKm : null,
     elevationGain: elevationGain !== null && Number.isFinite(elevationGain) ? elevationGain : null,
   };
+}
+
+function parseRouteVideoExportPreset(value: unknown): RouteVideoExportPreset | null {
+  if (value === null || value === undefined || value === '') {
+    return DEFAULT_ROUTE_VIDEO_EXPORT_PRESET;
+  }
+
+  return isRouteVideoExportPreset(value) ? value : null;
 }
 
 async function resolveAthleteAvatarUrl(session: SessionRecord): Promise<string | null> {
@@ -1223,7 +1232,15 @@ app.post('/api/activities/:activityId/video-export', async (request, response) =
     return;
   }
 
-  const job = await routeVideoExportManager.createJob(session.id, activityId, summary);
+  const preset = parseRouteVideoExportPreset(request.body?.preset);
+  if (!preset) {
+    response.status(400).json({
+      message: 'Preset de vídeo no válido.',
+    });
+    return;
+  }
+
+  const job = await routeVideoExportManager.createJob(session.id, activityId, summary, preset);
   response.setHeader('Set-Cookie', buildSessionCookie(session.id));
   response.status(202).json(job);
 });
