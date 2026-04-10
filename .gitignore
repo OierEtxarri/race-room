@@ -33,3 +33,4 @@ data/video-terrain-cache/
 *.sw?
 vendor/garmin-connect-mcp
 .continue/
+.atl/

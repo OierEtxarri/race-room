@@ -9,14 +9,15 @@ import {
   SATELLITE_TILE_URL,
 } from '../../src/mapStyle.ts';
 import {
-  calculateRouteBearingDegrees,
+  calculateSmoothedRouteVideoBearingDegrees,
   clampNumber,
   createRouteVideoTimeline,
   distanceBetweenGeoPointsMeters,
+  easeInOutCubic,
+  easeOutCubic,
   estimateRouteVideoRenderMetrics,
-  findRoutePointIndexByDistance,
+  interpolateRouteVideoPointByDistance,
   lerpNumber,
-  routeProgressAtElapsedSeconds,
 } from './videoExportMath.ts';
 import {
   DEFAULT_ROUTE_VIDEO_EXPORT_PRESET,
@@ -39,11 +40,22 @@ const CHROMIUM_RENDER_ARGS = [
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
 ];
-const FOLLOW_CAMERA_PITCH = 68;
-const FOLLOW_CAMERA_ZOOM = 16.2;
-const FOLLOW_CAMERA_BEHIND_METERS = 24;
-const FOLLOW_CAMERA_AHEAD_METERS = 52;
-const FOLLOW_CAMERA_FOCUS_AHEAD_METERS = 10;
+const FOLLOW_CAMERA_START_PITCH = 58;
+const FOLLOW_CAMERA_CRUISE_PITCH = 64;
+const FOLLOW_CAMERA_END_PITCH = 61.5;
+const FOLLOW_CAMERA_START_ZOOM = 15.25;
+const FOLLOW_CAMERA_CRUISE_ZOOM = 15.85;
+const FOLLOW_CAMERA_END_ZOOM = 15.55;
+const FOLLOW_CAMERA_START_BEHIND_METERS = 12;
+const FOLLOW_CAMERA_CRUISE_BEHIND_METERS = 20;
+const FOLLOW_CAMERA_END_BEHIND_METERS = 16;
+const FOLLOW_CAMERA_START_AHEAD_METERS = 58;
+const FOLLOW_CAMERA_CRUISE_AHEAD_METERS = 74;
+const FOLLOW_CAMERA_END_AHEAD_METERS = 66;
+const FOLLOW_CAMERA_START_FOCUS_AHEAD_METERS = 14;
+const FOLLOW_CAMERA_CRUISE_FOCUS_AHEAD_METERS = 20;
+const FOLLOW_CAMERA_END_FOCUS_AHEAD_METERS = 16;
+const OVERVIEW_TO_FOLLOW_LEAD_METERS = 480;
 const VIDEO_BASE_MAP_STYLE = {
   version: 8,
   sources: {
@@ -208,29 +220,14 @@ function clampAngleStep(previous: number, next: number, maxDelta = 5.5) {
   return (previous + clampNumber(delta, -maxDelta, maxDelta) + 360) % 360;
 }
 
+function lerpAngleDegrees(start: number, end: number, amount: number) {
+  return (start + shortestAngleDelta(start, end) * clampNumber(amount, 0, 1) + 360) % 360;
+}
+
 function interpolateRoutePoint(payload: RouteVideoPayload, routeProgress: number) {
   const clampedProgress = clampNumber(routeProgress, 0, 1);
   const totalDistanceMeters = payload.points.at(-1)?.distanceMeters ?? 0;
-  const targetDistanceMeters = totalDistanceMeters * clampedProgress;
-  const rightIndex = findRoutePointIndexByDistance(payload.points, targetDistanceMeters);
-  const endPoint = payload.points[Math.min(rightIndex, payload.points.length - 1)]!;
-  const startPoint = payload.points[Math.max(0, rightIndex - 1)] ?? endPoint;
-  const span = Math.max(endPoint.distanceMeters - startPoint.distanceMeters, 0.0001);
-  const ratio = clampNumber((targetDistanceMeters - startPoint.distanceMeters) / span, 0, 1);
-
-  return {
-    lat: lerpNumber(startPoint.lat, endPoint.lat, ratio),
-    lng: lerpNumber(startPoint.lng, endPoint.lng, ratio),
-    elevationMeters: lerpNumber(startPoint.elevationMeters, endPoint.elevationMeters, ratio),
-    timestampSeconds: lerpNumber(startPoint.timestampSeconds, endPoint.timestampSeconds, ratio),
-    distanceMeters: lerpNumber(startPoint.distanceMeters, endPoint.distanceMeters, ratio),
-    paceSecondsPerKm: endPoint.paceSecondsPerKm ?? startPoint.paceSecondsPerKm,
-  };
-}
-
-function findOffsetPoint(payload: RouteVideoPayload, distanceMeters: number) {
-  const index = findRoutePointIndexByDistance(payload.points, distanceMeters);
-  return payload.points[Math.min(index, payload.points.length - 1)] ?? payload.points.at(-1)!;
+  return interpolateRouteVideoPointByDistance(payload.points, totalDistanceMeters * clampedProgress);
 }
 
 function terrainExaggerationForPayload(payload: RouteVideoPayload) {
@@ -249,41 +246,144 @@ function terrainExaggerationForPayload(payload: RouteVideoPayload) {
   return clampNumber(220 / Math.max(reliefMeters, 120), 1.15, 1.75);
 }
 
+type FollowCameraProfile = {
+  pitch: number;
+  zoom: number;
+  behindMeters: number;
+  aheadMeters: number;
+  focusAheadMeters: number;
+};
+
+function blendFollowCameraProperty(
+  routeProgress: number,
+  start: number,
+  cruise: number,
+  end: number,
+) {
+  const settleProgress = easeInOutCubic(clampNumber(routeProgress / 0.16, 0, 1));
+  const finaleProgress = easeInOutCubic(clampNumber((routeProgress - 0.82) / 0.18, 0, 1));
+  return lerpNumber(lerpNumber(start, cruise, settleProgress), end, finaleProgress);
+}
+
+function followCameraProfileForProgress(routeProgress: number): FollowCameraProfile {
+  return {
+    pitch: blendFollowCameraProperty(
+      routeProgress,
+      FOLLOW_CAMERA_START_PITCH,
+      FOLLOW_CAMERA_CRUISE_PITCH,
+      FOLLOW_CAMERA_END_PITCH,
+    ),
+    zoom: blendFollowCameraProperty(
+      routeProgress,
+      FOLLOW_CAMERA_START_ZOOM,
+      FOLLOW_CAMERA_CRUISE_ZOOM,
+      FOLLOW_CAMERA_END_ZOOM,
+    ),
+    behindMeters: blendFollowCameraProperty(
+      routeProgress,
+      FOLLOW_CAMERA_START_BEHIND_METERS,
+      FOLLOW_CAMERA_CRUISE_BEHIND_METERS,
+      FOLLOW_CAMERA_END_BEHIND_METERS,
+    ),
+    aheadMeters: blendFollowCameraProperty(
+      routeProgress,
+      FOLLOW_CAMERA_START_AHEAD_METERS,
+      FOLLOW_CAMERA_CRUISE_AHEAD_METERS,
+      FOLLOW_CAMERA_END_AHEAD_METERS,
+    ),
+    focusAheadMeters: blendFollowCameraProperty(
+      routeProgress,
+      FOLLOW_CAMERA_START_FOCUS_AHEAD_METERS,
+      FOLLOW_CAMERA_CRUISE_FOCUS_AHEAD_METERS,
+      FOLLOW_CAMERA_END_FOCUS_AHEAD_METERS,
+    ),
+  };
+}
+
+function interpolateFramePadding(
+  start: RenderFrameState['padding'],
+  end: RenderFrameState['padding'],
+  amount: number,
+) {
+  return {
+    top: Math.round(lerpNumber(start.top, end.top, amount)),
+    bottom: Math.round(lerpNumber(start.bottom, end.bottom, amount)),
+    left: Math.round(lerpNumber(start.left, end.left, amount)),
+    right: Math.round(lerpNumber(start.right, end.right, amount)),
+  };
+}
+
+function interpolateRenderFrameState(
+  start: RenderFrameState,
+  end: RenderFrameState,
+  amount: number,
+): RenderFrameState {
+  const progress = clampNumber(amount, 0, 1);
+  const interpolatedPace =
+    start.currentPaceSecondsPerKm !== null && end.currentPaceSecondsPerKm !== null
+      ? lerpNumber(start.currentPaceSecondsPerKm, end.currentPaceSecondsPerKm, progress)
+      : end.currentPaceSecondsPerKm ?? start.currentPaceSecondsPerKm;
+
+  return {
+    phase: end.phase,
+    phaseProgress: lerpNumber(start.phaseProgress, end.phaseProgress, progress),
+    routeProgress: lerpNumber(start.routeProgress, end.routeProgress, progress),
+    centerLat: lerpNumber(start.centerLat, end.centerLat, progress),
+    centerLng: lerpNumber(start.centerLng, end.centerLng, progress),
+    bearing: lerpAngleDegrees(start.bearing, end.bearing, progress),
+    pitch: lerpNumber(start.pitch, end.pitch, progress),
+    zoom: lerpNumber(start.zoom, end.zoom, progress),
+    terrainExaggeration: lerpNumber(start.terrainExaggeration, end.terrainExaggeration, progress),
+    padding: interpolateFramePadding(start.padding, end.padding, progress),
+    currentDistanceKm: lerpNumber(start.currentDistanceKm, end.currentDistanceKm, progress),
+    currentElapsedSeconds: lerpNumber(start.currentElapsedSeconds, end.currentElapsedSeconds, progress),
+    currentPaceSecondsPerKm: interpolatedPace,
+  };
+}
+
+function interpolateFollowFrameState(frames: RenderFrameState[], routeProgress: number) {
+  if (!frames.length) {
+    throw new Error('follow frames required');
+  }
+
+  const clampedProgress = clampNumber(routeProgress, 0, 1);
+  const scaledIndex = clampedProgress * Math.max(frames.length - 1, 0);
+  const startIndex = Math.floor(scaledIndex);
+  const endIndex = Math.min(frames.length - 1, startIndex + 1);
+  const startFrame = frames[startIndex]!;
+  const endFrame = frames[endIndex]!;
+  if (startIndex === endIndex) {
+    return startFrame;
+  }
+
+  return interpolateRenderFrameState(startFrame, endFrame, scaledIndex - startIndex);
+}
+
 function rawFollowCameraForProgress(
   payload: RouteVideoPayload,
   routeProgress: number,
   terrainExaggeration: number,
 ) {
   const currentPoint = interpolateRoutePoint(payload, routeProgress);
-  const behindPoint = findOffsetPoint(
-    payload,
-    Math.max(0, currentPoint.distanceMeters - FOLLOW_CAMERA_BEHIND_METERS),
+  const totalDistanceMeters = payload.points.at(-1)?.distanceMeters ?? 0;
+  const profile = followCameraProfileForProgress(routeProgress);
+  const focusPoint = interpolateRouteVideoPointByDistance(
+    payload.points,
+    Math.min(totalDistanceMeters, currentPoint.distanceMeters + profile.focusAheadMeters),
   );
-  const aheadPoint = findOffsetPoint(
-    payload,
-    Math.min(
-      payload.points.at(-1)?.distanceMeters ?? 0,
-      currentPoint.distanceMeters + FOLLOW_CAMERA_AHEAD_METERS,
-    ),
-  );
-  const focusPoint = findOffsetPoint(
-    payload,
-    Math.min(
-      payload.points.at(-1)?.distanceMeters ?? 0,
-      currentPoint.distanceMeters + FOLLOW_CAMERA_FOCUS_AHEAD_METERS,
-    ),
-  );
-  const bearing = calculateRouteBearingDegrees(
-    { lat: behindPoint.lat, lng: behindPoint.lng },
-    { lat: aheadPoint.lat, lng: aheadPoint.lng },
+  const bearing = calculateSmoothedRouteVideoBearingDegrees(
+    payload.points,
+    currentPoint.distanceMeters,
+    profile.behindMeters,
+    profile.aheadMeters,
   );
 
   return {
     centerLat: focusPoint.lat,
     centerLng: focusPoint.lng,
     bearing,
-    pitch: FOLLOW_CAMERA_PITCH,
-    zoom: FOLLOW_CAMERA_ZOOM,
+    pitch: profile.pitch,
+    zoom: profile.zoom,
     terrainExaggeration,
     currentDistanceKm: currentPoint.distanceMeters / 1000,
     currentElapsedSeconds: currentPoint.timestampSeconds,
@@ -311,8 +411,8 @@ function buildFollowFrames(
       { lat: previousCenter.centerLat, lng: previousCenter.centerLng },
       { lat: raw.centerLat, lng: raw.centerLng },
     );
-    const maxBearingStep = lerpNumber(7.5, 15, clampNumber(angleDelta / 60, 0, 1));
-    const centerCatchup = lerpNumber(0.34, 0.78, clampNumber(centerDriftMeters / 26, 0, 1));
+    const maxBearingStep = lerpNumber(5.25, 10.5, clampNumber(angleDelta / 70, 0, 1));
+    const centerCatchup = lerpNumber(0.28, 0.68, clampNumber(centerDriftMeters / 34, 0, 1));
     const bearing =
       frameIndex === 0 ? raw.bearing : clampAngleStep(previousBearing, raw.bearing, maxBearingStep);
     const centerLat =
@@ -354,13 +454,34 @@ function buildRenderFrames(payload: RouteVideoPayload, preset: RouteVideoExportP
   } = estimateRouteVideoRenderMetrics(payload.totalDistanceKm, preset.outputFps);
   const followFrames = buildFollowFrames(payload, renderFps, layout);
   const terrainExaggeration = terrainExaggerationForPayload(payload);
-  const firstFollowFrame = followFrames[0] ?? rawFollowCameraForProgress(payload, 0, terrainExaggeration);
+  const initialFollowCamera = rawFollowCameraForProgress(payload, 0, terrainExaggeration);
+  const firstFollowFrame =
+    followFrames[0] ?? {
+      phase: 'follow' as const,
+      phaseProgress: 0,
+      routeProgress: 0,
+      centerLat: initialFollowCamera.centerLat,
+      centerLng: initialFollowCamera.centerLng,
+      bearing: initialFollowCamera.bearing,
+      pitch: initialFollowCamera.pitch,
+      zoom: initialFollowCamera.zoom,
+      terrainExaggeration: initialFollowCamera.terrainExaggeration,
+      padding: layout.followPadding,
+      currentDistanceKm: initialFollowCamera.currentDistanceKm,
+      currentElapsedSeconds: initialFollowCamera.currentElapsedSeconds,
+      currentPaceSecondsPerKm: initialFollowCamera.currentPaceSecondsPerKm,
+    };
   const lastFollowFrame = followFrames.at(-1) ?? firstFollowFrame;
+  const totalDistanceMeters = payload.points.at(-1)?.distanceMeters ?? 0;
+  const transitionTravelProgress = clampNumber(
+    OVERVIEW_TO_FOLLOW_LEAD_METERS / Math.max(totalDistanceMeters, 1),
+    0.018,
+    0.05,
+  );
   const frames: RenderFrameState[] = [];
 
   for (let frameIndex = 0; frameIndex < captureFrames; frameIndex += 1) {
     const elapsedSeconds = frameIndex / renderFps;
-    const routeProgress = routeProgressAtElapsedSeconds(timeline, elapsedSeconds);
     const overviewEnd = timeline.overviewSeconds;
     const descentEnd = timeline.overviewSeconds + timeline.descentSeconds;
     const finishStart = timeline.totalSeconds - timeline.finishHoldSeconds;
@@ -368,7 +489,9 @@ function buildRenderFrames(payload: RouteVideoPayload, preset: RouteVideoExportP
     if (elapsedSeconds <= overviewEnd) {
       frames.push({
         phase: 'overview',
-        phaseProgress: timeline.overviewSeconds <= 0 ? 1 : elapsedSeconds / timeline.overviewSeconds,
+        phaseProgress: easeInOutCubic(
+          timeline.overviewSeconds <= 0 ? 1 : elapsedSeconds / timeline.overviewSeconds,
+        ),
         routeProgress: 0,
         centerLat: firstFollowFrame.centerLat,
         centerLng: firstFollowFrame.centerLng,
@@ -385,16 +508,20 @@ function buildRenderFrames(payload: RouteVideoPayload, preset: RouteVideoExportP
     }
 
     if (elapsedSeconds <= descentEnd) {
-      const phaseProgress = (elapsedSeconds - overviewEnd) / timeline.descentSeconds;
+      const basePhaseProgress = (elapsedSeconds - overviewEnd) / timeline.descentSeconds;
+      const phaseProgress = easeInOutCubic(basePhaseProgress);
+      const previewRouteProgress = transitionTravelProgress * easeOutCubic(basePhaseProgress);
+      const previewFollowFrame = interpolateFollowFrameState(followFrames, previewRouteProgress);
+      const hudProgress = easeOutCubic(basePhaseProgress);
       frames.push({
         phase: 'descent',
         phaseProgress,
-        routeProgress: 0,
-        centerLat: firstFollowFrame.centerLat,
-        centerLng: firstFollowFrame.centerLng,
-        bearing: firstFollowFrame.bearing,
-        pitch: lerpNumber(0, firstFollowFrame.pitch, phaseProgress),
-        zoom: lerpNumber(0, firstFollowFrame.zoom, phaseProgress),
+        routeProgress: previewFollowFrame.routeProgress,
+        centerLat: previewFollowFrame.centerLat,
+        centerLng: previewFollowFrame.centerLng,
+        bearing: previewFollowFrame.bearing,
+        pitch: lerpNumber(0, previewFollowFrame.pitch, phaseProgress),
+        zoom: lerpNumber(0, previewFollowFrame.zoom, phaseProgress),
         terrainExaggeration,
         padding: {
           top: Math.round(lerpNumber(layout.overviewPadding.top, layout.followPadding.top, phaseProgress)),
@@ -402,30 +529,32 @@ function buildRenderFrames(payload: RouteVideoPayload, preset: RouteVideoExportP
           left: Math.round(lerpNumber(layout.overviewPadding.left, layout.followPadding.left, phaseProgress)),
           right: Math.round(lerpNumber(layout.overviewPadding.right, layout.followPadding.right, phaseProgress)),
         },
-        currentDistanceKm: 0,
-        currentElapsedSeconds: 0,
-        currentPaceSecondsPerKm: payload.points[0]?.paceSecondsPerKm ?? null,
+        currentDistanceKm: lerpNumber(0, previewFollowFrame.currentDistanceKm, hudProgress),
+        currentElapsedSeconds: lerpNumber(0, previewFollowFrame.currentElapsedSeconds, hudProgress),
+        currentPaceSecondsPerKm:
+          previewFollowFrame.currentPaceSecondsPerKm ?? payload.points[0]?.paceSecondsPerKm ?? null,
       });
       continue;
     }
 
     if (elapsedSeconds < finishStart) {
-      const followFrameIndex = Math.min(
-        followFrames.length - 1,
-        Math.max(0, Math.round(routeProgress * Math.max(followFrames.length - 1, 0))),
+      const followPhaseProgress = clampNumber(
+        timeline.followSeconds <= 0 ? 1 : (elapsedSeconds - descentEnd) / timeline.followSeconds,
+        0,
+        1,
       );
-      frames.push(followFrames[followFrameIndex]!);
+      frames.push(interpolateFollowFrameState(followFrames, followPhaseProgress));
       continue;
     }
 
     frames.push({
       phase: 'finish',
-      phaseProgress: (elapsedSeconds - finishStart) / timeline.finishHoldSeconds,
+      phaseProgress: easeInOutCubic((elapsedSeconds - finishStart) / timeline.finishHoldSeconds),
       routeProgress: 1,
       centerLat: lastFollowFrame.centerLat,
       centerLng: lastFollowFrame.centerLng,
-      bearing: 0,
-      pitch: lerpNumber(lastFollowFrame.pitch, 12, (elapsedSeconds - finishStart) / timeline.finishHoldSeconds),
+      bearing: lastFollowFrame.bearing,
+      pitch: lastFollowFrame.pitch,
       zoom: lastFollowFrame.zoom,
       terrainExaggeration: lastFollowFrame.terrainExaggeration,
       padding: layout.finishPadding,
@@ -754,6 +883,18 @@ function createRendererHtml(
 
       function lerp(start, end, amount) {
         return start + (end - start) * amount;
+      }
+
+      function shortestAngleDelta(start, end) {
+        let delta = ((end - start + 540) % 360) - 180;
+        if (delta < -180) {
+          delta += 360;
+        }
+        return delta;
+      }
+
+      function lerpAngle(start, end, amount) {
+        return (start + shortestAngleDelta(start, end) * amount + 360) % 360;
       }
 
       function scalePadding(padding, ratio) {
@@ -1204,7 +1345,7 @@ function createRendererHtml(
             center,
             zoom: lerp(overview.zoom, frameState.zoom, frameState.phaseProgress),
             pitch: frameState.pitch,
-            bearing: frameState.bearing * frameState.phaseProgress,
+            bearing: lerpAngle(0, frameState.bearing, frameState.phaseProgress),
             padding: frameState.padding,
           });
           requestMapRender();
@@ -1217,7 +1358,7 @@ function createRendererHtml(
             center: finish.center,
             zoom: finish.zoom,
             pitch: lerp(frameState.pitch, 12, frameState.phaseProgress),
-            bearing: 0,
+            bearing: lerpAngle(frameState.bearing, 0, frameState.phaseProgress),
             padding: finish.padding,
           });
           requestMapRender();

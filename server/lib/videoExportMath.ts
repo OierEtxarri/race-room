@@ -17,12 +17,24 @@ export type RouteVideoTimeline = {
   totalSeconds: number;
 };
 
+type RouteDistancePoint = RouteVideoPayload['points'][number];
+
 export function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
 export function lerpNumber(start: number, end: number, amount: number) {
   return start + (end - start) * amount;
+}
+
+export function easeOutCubic(amount: number) {
+  const clamped = clampNumber(amount, 0, 1);
+  return 1 - (1 - clamped) ** 3;
+}
+
+export function easeInOutCubic(amount: number) {
+  const clamped = clampNumber(amount, 0, 1);
+  return clamped < 0.5 ? 4 * clamped ** 3 : 1 - ((-2 * clamped + 2) ** 3) / 2;
 }
 
 export function distanceBetweenGeoPointsMeters(
@@ -190,7 +202,7 @@ export function buildRouteVideoBounds(points: Array<{ lat: number; lng: number }
 }
 
 export function calculateRouteVideoDurationSeconds(distanceKm: number) {
-  return clampNumber(8 + distanceKm * 1.6, 12, 50);
+  return clampNumber(7 + distanceKm * 1.45, 11.5, 44);
 }
 
 export function calculateRouteVideoRenderFps(durationSeconds: number) {
@@ -207,7 +219,7 @@ export function calculateRouteVideoRenderFps(durationSeconds: number) {
 
 export function estimateRouteVideoRenderMetrics(distanceKm: number, outputFps = 25) {
   const timeline = createRouteVideoTimeline(distanceKm);
-  const renderFps = calculateRouteVideoRenderFps(timeline.totalSeconds);
+  const renderFps = Math.max(Math.round(Math.max(outputFps, 1)), calculateRouteVideoRenderFps(timeline.totalSeconds));
   const captureFrames = Math.max(2, Math.round(timeline.totalSeconds * renderFps));
   const totalFrames = Math.max(2, Math.round(timeline.totalSeconds * Math.max(outputFps, 1)));
 
@@ -220,10 +232,10 @@ export function estimateRouteVideoRenderMetrics(distanceKm: number, outputFps = 
 }
 
 export function createRouteVideoTimeline(distanceKm: number): RouteVideoTimeline {
-  const overviewSeconds = 2;
-  const descentSeconds = 2.2;
+  const overviewSeconds = 1.35;
+  const descentSeconds = 1.75;
   const followSeconds = calculateRouteVideoDurationSeconds(distanceKm);
-  const finishHoldSeconds = 2.2;
+  const finishHoldSeconds = 1.45;
   const totalSeconds = overviewSeconds + descentSeconds + followSeconds + finishHoldSeconds;
 
   return {
@@ -286,6 +298,71 @@ export function calculateRouteBearingDegrees(
   const dy = to.lat - from.lat;
   const angle = (Math.atan2(dx, dy) * 180) / Math.PI;
   return (angle + 360) % 360;
+}
+
+export function interpolateRouteVideoPointByDistance(
+  points: RouteDistancePoint[],
+  targetDistanceMeters: number,
+): RouteDistancePoint {
+  if (!points.length) {
+    return {
+      lat: 0,
+      lng: 0,
+      elevationMeters: 0,
+      timestampSeconds: 0,
+      paceSecondsPerKm: null,
+      distanceMeters: 0,
+    };
+  }
+
+  const totalDistanceMeters = points.at(-1)?.distanceMeters ?? 0;
+  const clampedDistanceMeters = clampNumber(targetDistanceMeters, 0, totalDistanceMeters);
+  const rightIndex = findRoutePointIndexByDistance(points, clampedDistanceMeters);
+  const endPoint = points[Math.min(rightIndex, points.length - 1)]!;
+  const startPoint = points[Math.max(0, rightIndex - 1)] ?? endPoint;
+  const span = Math.max(endPoint.distanceMeters - startPoint.distanceMeters, 0.0001);
+  const ratio = clampNumber((clampedDistanceMeters - startPoint.distanceMeters) / span, 0, 1);
+  const paceSecondsPerKm =
+    startPoint.paceSecondsPerKm !== null && endPoint.paceSecondsPerKm !== null
+      ? lerpNumber(startPoint.paceSecondsPerKm, endPoint.paceSecondsPerKm, ratio)
+      : endPoint.paceSecondsPerKm ?? startPoint.paceSecondsPerKm;
+
+  return {
+    lat: lerpNumber(startPoint.lat, endPoint.lat, ratio),
+    lng: lerpNumber(startPoint.lng, endPoint.lng, ratio),
+    elevationMeters: lerpNumber(startPoint.elevationMeters, endPoint.elevationMeters, ratio),
+    timestampSeconds: lerpNumber(startPoint.timestampSeconds, endPoint.timestampSeconds, ratio),
+    distanceMeters: lerpNumber(startPoint.distanceMeters, endPoint.distanceMeters, ratio),
+    paceSecondsPerKm,
+  };
+}
+
+export function calculateSmoothedRouteVideoBearingDegrees(
+  points: RouteDistancePoint[],
+  currentDistanceMeters: number,
+  behindMeters: number,
+  aheadMeters: number,
+) {
+  if (points.length < 2) {
+    return 0;
+  }
+
+  const totalDistanceMeters = points.at(-1)?.distanceMeters ?? 0;
+  const behindPoint = interpolateRouteVideoPointByDistance(points, currentDistanceMeters - behindMeters);
+  const aheadPoint = interpolateRouteVideoPointByDistance(
+    points,
+    Math.min(totalDistanceMeters, currentDistanceMeters + aheadMeters),
+  );
+
+  if (distanceBetweenGeoPointsMeters(behindPoint, aheadPoint) < 1) {
+    const fallbackAheadPoint = interpolateRouteVideoPointByDistance(
+      points,
+      Math.min(totalDistanceMeters, currentDistanceMeters + Math.max(aheadMeters * 0.35, 1)),
+    );
+    return calculateRouteBearingDegrees(behindPoint, fallbackAheadPoint);
+  }
+
+  return calculateRouteBearingDegrees(behindPoint, aheadPoint);
 }
 
 export function buildRouteVideoPayloadMetrics(payload: RouteVideoPayload) {
