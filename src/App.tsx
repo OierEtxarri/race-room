@@ -273,17 +273,17 @@ const routeVideoPresetOptions: Array<{
   {
     id: 'fast',
     label: 'Rápido',
-    detail: '720p · 20 fps',
-    idleNote: 'MP4 vertical 720x1280 a 20 fps, con captura ligera para reducir la espera.',
-    exportingNote: 'El render corre en servidor como MP4 vertical 720x1280 a 20 fps. Mantén esta vista abierta hasta que termine la descarga.',
+    detail: '720p · 30 fps',
+    idleNote: 'MP4 vertical 720x1280 a 30 fps, con captura ligera para reducir la espera.',
+    exportingNote: 'El render corre en servidor como MP4 vertical 720x1280 a 30 fps. Mantén esta vista abierta hasta que termine la descarga.',
   },
   {
     id: 'high',
     label: 'Alta calidad',
-    detail: '1080p · 25 fps',
-    idleNote: 'MP4 vertical 1080x1920 a 25 fps, con más detalle en texto, relieve y etiquetas.',
+    detail: '1080p · 30 fps',
+    idleNote: 'MP4 vertical 1080x1920 a 30 fps, con más detalle en texto, relieve y etiquetas.',
     exportingNote:
-      'El render corre en servidor como MP4 vertical 1080x1920 a 25 fps. Mantén esta vista abierta hasta que termine la descarga.',
+      'El render corre en servidor como MP4 vertical 1080x1920 a 30 fps. Mantén esta vista abierta hasta que termine la descarga.',
   },
 ];
 const routeVideoDurationMs = 24_000;

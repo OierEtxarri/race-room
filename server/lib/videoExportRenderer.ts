@@ -689,10 +689,6 @@ function createRendererHtml(
       const payload = ${JSON.stringify(payload)};
       const summary = ${JSON.stringify(summary)};
       const fullCoords = payload.points.map((point) => [point.lng, point.lat]);
-      const routeBounds = new maplibregl.LngLatBounds(
-        [payload.bounds.minLng, payload.bounds.minLat],
-        [payload.bounds.maxLng, payload.bounds.maxLat],
-      );
 
       const overviewPadding = ${JSON.stringify(layout.overviewPadding)};
       const finishPadding = ${JSON.stringify(layout.finishPadding)};
@@ -704,6 +700,7 @@ function createRendererHtml(
         finish: 'Route Complete',
       };
       const routeHeatPalette = ['#30b7ff', '#25dd76', '#f3e44e', '#ff9d35', '#ff5252'];
+      const routeBounds = buildRouteBounds();
 
       const map = new maplibregl.Map({
         container: 'map',
@@ -757,6 +754,90 @@ function createRendererHtml(
 
       function lerp(start, end, amount) {
         return start + (end - start) * amount;
+      }
+
+      function scalePadding(padding, ratio) {
+        return {
+          top: Math.round(padding.top * ratio),
+          bottom: Math.round(padding.bottom * ratio),
+          left: Math.round(padding.left * ratio),
+          right: Math.round(padding.right * ratio),
+        };
+      }
+
+      function isValidLngLat(lng, lat) {
+        return Number.isFinite(lng) && Number.isFinite(lat) && Math.abs(lng) <= 180 && Math.abs(lat) <= 90;
+      }
+
+      function pickFallbackCenter() {
+        const midpointPoint = payload.points[Math.floor(payload.points.length / 2)] || payload.points[0] || null;
+        const candidates = [
+          [
+            (Number(payload.bounds.minLng) + Number(payload.bounds.maxLng)) / 2,
+            (Number(payload.bounds.minLat) + Number(payload.bounds.maxLat)) / 2,
+          ],
+          midpointPoint ? [midpointPoint.lng, midpointPoint.lat] : null,
+          payload.points[0] ? [payload.points[0].lng, payload.points[0].lat] : null,
+          [0, 0],
+        ];
+
+        for (const candidate of candidates) {
+          if (!candidate) {
+            continue;
+          }
+          const [lng, lat] = candidate;
+          if (isValidLngLat(lng, lat)) {
+            return { lng, lat };
+          }
+        }
+
+        return { lng: 0, lat: 0 };
+      }
+
+      const fallbackCenter = pickFallbackCenter();
+
+      function normalizeCenter(center) {
+        if (center && typeof center.lng === 'number' && typeof center.lat === 'number') {
+          if (isValidLngLat(center.lng, center.lat)) {
+            return { lng: center.lng, lat: center.lat };
+          }
+        }
+        if (Array.isArray(center) && center.length >= 2) {
+          const lng = Number(center[0]);
+          const lat = Number(center[1]);
+          if (isValidLngLat(lng, lat)) {
+            return { lng, lat };
+          }
+        }
+        return fallbackCenter;
+      }
+
+      function normalizeZoom(zoom) {
+        return Number.isFinite(zoom) ? Math.max(0, Math.min(20, zoom)) : 13.2;
+      }
+
+      function buildRouteBounds() {
+        const lngCandidates = payload.points.map((point) => point.lng).filter(Number.isFinite);
+        const latCandidates = payload.points.map((point) => point.lat).filter(Number.isFinite);
+        const boundsLng = [Number(payload.bounds.minLng), Number(payload.bounds.maxLng)].filter(Number.isFinite);
+        const boundsLat = [Number(payload.bounds.minLat), Number(payload.bounds.maxLat)].filter(Number.isFinite);
+        const minLng = Math.min(...(boundsLng.length === 2 ? boundsLng : lngCandidates));
+        const maxLng = Math.max(...(boundsLng.length === 2 ? boundsLng : lngCandidates));
+        const minLat = Math.min(...(boundsLat.length === 2 ? boundsLat : latCandidates));
+        const maxLat = Math.max(...(boundsLat.length === 2 ? boundsLat : latCandidates));
+
+        const safeMinLng = Number.isFinite(minLng) ? minLng : fallbackCenter.lng - 0.001;
+        const safeMaxLng = Number.isFinite(maxLng) ? maxLng : fallbackCenter.lng + 0.001;
+        const safeMinLat = Number.isFinite(minLat) ? minLat : fallbackCenter.lat - 0.001;
+        const safeMaxLat = Number.isFinite(maxLat) ? maxLat : fallbackCenter.lat + 0.001;
+
+        const lngPad = Math.abs(safeMaxLng - safeMinLng) < 0.0002 ? 0.0008 : 0;
+        const latPad = Math.abs(safeMaxLat - safeMinLat) < 0.0002 ? 0.0008 : 0;
+
+        return new maplibregl.LngLatBounds(
+          [safeMinLng - lngPad, safeMinLat - latPad],
+          [safeMaxLng + lngPad, safeMaxLat + latPad],
+        );
       }
 
       function toLineFeature(coords, properties = {}) {
@@ -972,15 +1053,47 @@ function createRendererHtml(
       }
 
       function cameraForBounds(padding) {
-        const camera = map.cameraForBounds(routeBounds, {
-          padding,
-          bearing: 0,
-          pitch: 0,
-          maxZoom: 16.2,
-        });
+        const widthBudget = Math.max(32, window.innerWidth - 32);
+        const heightBudget = Math.max(32, window.innerHeight - 32);
+        const paddingWidth = padding.left + padding.right;
+        const paddingHeight = padding.top + padding.bottom;
+        const fitScale = Math.min(
+          1,
+          paddingWidth > 0 ? widthBudget / paddingWidth : 1,
+          paddingHeight > 0 ? heightBudget / paddingHeight : 1,
+        );
+        const normalizedPadding = fitScale < 1 ? scalePadding(padding, Math.max(0.14, fitScale)) : padding;
+        const candidateRatios = [1, 0.9, 0.76, 0.62, 0.48, 0.34];
+
+        for (const ratio of candidateRatios) {
+          const candidatePadding = ratio === 1 ? normalizedPadding : scalePadding(normalizedPadding, ratio);
+          try {
+            const camera = map.cameraForBounds(routeBounds, {
+              padding: candidatePadding,
+              bearing: 0,
+              pitch: 0,
+              maxZoom: 16.2,
+            });
+
+            if (camera) {
+              const center = normalizeCenter(camera.center);
+              const zoom = normalizeZoom(camera.zoom);
+              if (center && Number.isFinite(zoom)) {
+                return {
+                  center,
+                  zoom,
+                  padding: candidatePadding,
+                };
+              }
+            }
+          } catch (_error) {
+            // Try a smaller padding profile before falling back to a static center.
+          }
+        }
         return {
-          center: camera.center,
-          zoom: camera.zoom,
+          center: normalizeCenter(routeBounds.getCenter()),
+          zoom: Math.min(15.4, Math.max(12.2, normalizeZoom(map.getZoom()))),
+          padding: normalizedPadding,
         };
       }
 
@@ -1075,7 +1188,7 @@ function createRendererHtml(
             zoom: overview.zoom,
             pitch: 0,
             bearing: 0,
-            padding: overviewPadding,
+            padding: overview.padding,
           });
           requestMapRender();
           return;
@@ -1105,7 +1218,7 @@ function createRendererHtml(
             zoom: finish.zoom,
             pitch: lerp(frameState.pitch, 12, frameState.phaseProgress),
             bearing: 0,
-            padding: finishPadding,
+            padding: finish.padding,
           });
           requestMapRender();
           return;
@@ -1390,7 +1503,7 @@ function createRendererHtml(
           zoom: overview.zoom,
           pitch: 0,
           bearing: 0,
-          padding: overviewPadding,
+          padding: overview.padding,
         });
         await waitForMapSettled(60);
         globalThis.__routeVideoPlaybackState = {
